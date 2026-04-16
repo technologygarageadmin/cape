@@ -1,6 +1,7 @@
 import time
 import threading
 import logging
+from datetime import datetime, timezone
 
 from alpaca.data.historical import OptionHistoricalDataClient
 
@@ -33,6 +34,7 @@ from config import (
     EXIT_STOP_LOSS_ENABLED,
     PRICE_POLL_SEC,
     QP_GAP_PCT,
+    QP_MIN_EXIT_PCT,
     QP_MIN_PEAK_PCT,
     RSI_EXIT_CHECK_SEC,
     SECRET_KEY,
@@ -61,6 +63,7 @@ def _init_exit_state(fill_price: float, tp_price: float, sl_price: float) -> dic
     # Gap shrinks as profit grows so we lock in more of larger moves.
     qp_gap_pct = QP_GAP_PCT   # lock in peak minus QP_GAP_PCT (tight lock from the start)
     return {
+        "fill_price": fill_price,
         "tp_pct": tp_pct,
         "sl_static_pct": sl_pct,
         "sl_dynamic_pct": sl_pct,
@@ -68,10 +71,69 @@ def _init_exit_state(fill_price: float, tp_price: float, sl_price: float) -> dic
         "qp_dynamic_pct": 0.0,      # will build up as price moves
         "qp_gap_pct": qp_gap_pct,
         "max_pnl_pct": 0.0,
+        "qp_armed": False,
+        "qp_arm_time": None,
+        "qp_arm_price": None,
+        "qp_arm_pnl_pct": None,
+        "qp_arm_peak_pct": None,
+        "qp_min_peak_pct": QP_MIN_PEAK_PCT,
+        "qp_min_exit_pct": QP_MIN_EXIT_PCT,
+        "timeline": [],
     }
 
 
-def _update_dynamic_thresholds(exit_state: dict, pnl_pct: float) -> None:
+def _iso_now_utc() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+
+
+def _append_timeline_tick(
+    exit_state: dict,
+    *,
+    source: str,
+    tick_ts: str,
+    fill_price: float,
+    mid_price: float | None,
+    bid_price: float | None,
+    sellable_price: float,
+    pnl_pct: float,
+) -> None:
+    timeline = exit_state.setdefault("timeline", [])
+
+    tp_pct = float(exit_state.get("tp_pct", 0.0))
+    sl_static_pct = float(exit_state.get("sl_static_pct", 0.0))
+    sl_dynamic_pct = float(exit_state.get("sl_dynamic_pct", sl_static_pct))
+    qp_dynamic_pct = float(exit_state.get("qp_dynamic_pct", 0.0))
+    max_pnl_pct = float(exit_state.get("max_pnl_pct", 0.0))
+
+    qp_limit_price = None
+    if fill_price > 0 and qp_dynamic_pct > 0:
+        qp_limit_price = round(fill_price * (1.0 + qp_dynamic_pct / 100.0), 4)
+
+    tick = {
+        "ts": tick_ts,
+        "source": source,
+        "mid_price": round(float(mid_price), 4) if mid_price is not None else None,
+        "bid_price": round(float(bid_price), 4) if bid_price is not None else None,
+        "sellable_price": round(float(sellable_price), 4),
+        "pnl_pct": round(float(pnl_pct), 4),
+        "pnl_dollar_per_contract": round((float(sellable_price) - float(fill_price)) * 100.0, 4),
+        "tp_pct": round(tp_pct, 4),
+        "sl_static_pct": round(sl_static_pct, 4),
+        "sl_dynamic_pct": round(sl_dynamic_pct, 4),
+        "qp_dynamic_pct": round(qp_dynamic_pct, 4),
+        "qp_limit_price": qp_limit_price,
+        "max_pnl_pct": round(max_pnl_pct, 4),
+        "qp_armed": bool(exit_state.get("qp_armed", False)),
+    }
+    timeline.append(tick)
+
+
+def _update_dynamic_thresholds(
+    exit_state: dict,
+    pnl_pct: float,
+    current_price: float | None = None,
+    tick_ts: str | None = None,
+) -> None:
     if pnl_pct > float(exit_state.get("max_pnl_pct", 0.0)):
         exit_state["max_pnl_pct"] = pnl_pct
 
@@ -112,6 +174,14 @@ def _update_dynamic_thresholds(exit_state: dict, pnl_pct: float) -> None:
         if candidate_qp > float(exit_state.get("qp_dynamic_pct", 0.0)):
             exit_state["qp_dynamic_pct"] = candidate_qp
 
+        # Capture first arm event with the actual arm price and pnl.
+        if candidate_qp > 0.0 and not bool(exit_state.get("qp_armed", False)):
+            exit_state["qp_armed"] = True
+            exit_state["qp_arm_time"] = tick_ts or _iso_now_utc()
+            exit_state["qp_arm_price"] = round(float(current_price), 4) if current_price is not None else None
+            exit_state["qp_arm_pnl_pct"] = round(float(pnl_pct), 4)
+            exit_state["qp_arm_peak_pct"] = round(float(max_pnl_pct), 4)
+
 
 def _evaluate_priority_exit(
     pnl_pct: float,
@@ -141,6 +211,7 @@ def _evaluate_priority_exit(
         EXIT_QUICK_PROFIT_ENABLED
         and max_pnl_pct >= QP_MIN_PEAK_PCT
         and qp_dynamic_pct > 0.0
+        and pnl_pct >= QP_MIN_EXIT_PCT
         and pnl_pct < max_pnl_pct
         and pnl_pct <= qp_dynamic_pct
     ):
@@ -222,14 +293,30 @@ def monitor_with_polling(
     use_extended_exit_criteria: bool = True,
     min_exit_epoch_ts: float | None = None,
     buy_order_id: str | None = None,
+    initial_exit_state: dict | None = None,
 ):
     label = f"[{context_label}] " if context_label else ""
     info(f"{label}Fallback polling every {PRICE_POLL_SEC}s for {contract_symbol}")
     rsi_state = {}
-    exit_state = _init_exit_state(fill_price, tp_price, sl_price)
+    exit_state = initial_exit_state or _init_exit_state(fill_price, tp_price, sl_price)
+    if not isinstance(exit_state.get("timeline"), list):
+        exit_state["timeline"] = []
     hold_notice_emitted = False
     entry_ts = time.time()
     bad_entry_fired = False
+
+    # Entry tick anchor for full open→close lifecycle.
+    if not exit_state["timeline"]:
+        _append_timeline_tick(
+            exit_state,
+            source="entry",
+            tick_ts=_iso_now_utc(),
+            fill_price=fill_price,
+            mid_price=fill_price,
+            bid_price=None,
+            sellable_price=fill_price,
+            pnl_pct=0.0,
+        )
 
     while True:
         time.sleep(PRICE_POLL_SEC)
@@ -249,7 +336,18 @@ def monitor_with_polling(
         pnl_pct = (sellable_price - fill_price) / fill_price * 100
         same_candle_price = sellable_price if EXIT_SAME_CANDLE_USE_BID_PRICE else price
         same_candle_pnl_pct = (same_candle_price - fill_price) / fill_price * 100
-        _update_dynamic_thresholds(exit_state, pnl_pct)
+        tick_ts = _iso_now_utc()
+        _update_dynamic_thresholds(exit_state, pnl_pct, current_price=sellable_price, tick_ts=tick_ts)
+        _append_timeline_tick(
+            exit_state,
+            source="poll",
+            tick_ts=tick_ts,
+            fill_price=fill_price,
+            mid_price=price,
+            bid_price=bid_price if bid_price > 0 else None,
+            sellable_price=sellable_price,
+            pnl_pct=pnl_pct,
+        )
 
         # Broadcast live state to frontend
         if buy_order_id:
@@ -430,6 +528,16 @@ def monitor_with_websocket(
             "entry_ts": time.time(),
             "bad_entry_fired": False,
         }
+        _append_timeline_tick(
+            state["exit_state"],
+            source="entry",
+            tick_ts=_iso_now_utc(),
+            fill_price=fill_price,
+            mid_price=fill_price,
+            bid_price=None,
+            sellable_price=fill_price,
+            pnl_pct=0.0,
+        )
         done = threading.Event()
         first_quote_event = threading.Event()
 
@@ -469,7 +577,23 @@ def monitor_with_websocket(
 
             now = time.time()
             pnl_pct = (sellable_price - fill_price) / fill_price * 100
-            _update_dynamic_thresholds(state["exit_state"], pnl_pct)
+            tick_ts = _iso_now_utc()
+            _update_dynamic_thresholds(
+                state["exit_state"],
+                pnl_pct,
+                current_price=sellable_price,
+                tick_ts=tick_ts,
+            )
+            _append_timeline_tick(
+                state["exit_state"],
+                source="ws",
+                tick_ts=tick_ts,
+                fill_price=fill_price,
+                mid_price=price,
+                bid_price=bid if bid > 0 else None,
+                sellable_price=sellable_price,
+                pnl_pct=pnl_pct,
+            )
 
             # Broadcast live state to frontend
             if buy_order_id:
@@ -597,7 +721,7 @@ def monitor_with_websocket(
                     "switching to polling fallback"
                 )
                 stop_stream(stream)
-                return None, state["last_price"], {}
+                return None, state["last_price"], state["exit_state"]
 
             if done.wait(timeout=1):
                 break
@@ -605,12 +729,12 @@ def monitor_with_websocket(
             if not thread.is_alive():
                 _ws_cooldown_until = time.time() + _WS_COOLDOWN_AFTER_FAIL_SEC
                 stop_stream(stream)
-                return None, state["last_price"], {}
+                return None, state["last_price"], state["exit_state"]
 
         if state["exit_reason"] is None:
             _ws_cooldown_until = time.time() + _WS_COOLDOWN_AFTER_FAIL_SEC
             stop_stream(stream)
-            return None, state["last_price"], {}
+            return None, state["last_price"], state["exit_state"]
 
         thread.join(timeout=3)
         return state["exit_reason"], state["last_price"], state["exit_state"]

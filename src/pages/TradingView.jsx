@@ -563,7 +563,7 @@ export default function TradingView() {
     fetchObr()
   }, [selected.symbol])
 
-  // ── Live open positions: poll Alpaca every 15 s ───────────────────────────
+  // ── Live open positions: poll Alpaca every 5 s ────────────────────────────
   useEffect(() => {
     const fetchPositions = async () => {
       try {
@@ -579,7 +579,7 @@ export default function TradingView() {
       } catch (_) {}
     }
     fetchPositions()
-    const id = setInterval(fetchPositions, 15_000)
+    const id = setInterval(fetchPositions, 5_000)
     return () => clearInterval(id)
   }, [])
 
@@ -822,6 +822,7 @@ export default function TradingView() {
           }
           exitReason = exitReason || 'MONITOR EXIT'
           pushToast(`Bot exited · ${manualPosition.contractSymbol?.slice(0, 18)} · ${exitReason.replace(/_/g, ' ')}`, 'success')
+          setLivePositions(prev => prev.filter(p => String(p.symbol || '') !== String(manualPosition.contractSymbol || '')))
           setManualPosition(null)
           setContractPrice(0)
           setOrderStatus(null)
@@ -848,6 +849,28 @@ export default function TradingView() {
     const id = setInterval(poll, 5000)
     return () => clearInterval(id)
   }, [manualPosition?.contractSymbol])
+
+  // Keep Open Positions and Contract Tracker in sync from the same live contract feed.
+  useEffect(() => {
+    if (!manualPosition?.contractSymbol || !(contractPrice > 0)) return
+    const contract = String(manualPosition.contractSymbol)
+    const qtyNum = Number(manualPosition.qty) || 1
+    const fillPrice = Number(manualPosition.fillPrice) || 0
+    const pnlDollar = (contractPrice - fillPrice) * qtyNum * 100
+    const pnlPc = fillPrice > 0 ? (contractPrice - fillPrice) / fillPrice : 0
+    setLivePositions(prev => prev.map(p =>
+      String(p.symbol || '') === contract
+        ? {
+            ...p,
+            qty: qtyNum,
+            avg_entry_price: fillPrice,
+            current_price: contractPrice,
+            unrealized_pl: pnlDollar,
+            unrealized_plpc: pnlPc,
+          }
+        : p
+    ))
+  }, [manualPosition?.contractSymbol, manualPosition?.fillPrice, manualPosition?.qty, contractPrice])
 
   // Poll order fill status after placing buy, until filled or timeout
   useEffect(() => {
@@ -924,6 +947,7 @@ export default function TradingView() {
       const order = await res.json()
       // Backend waited for fill — fill_price is guaranteed
       const fillPrice = order.fill_price
+      const qtyNum = parseInt(qty) || 1
       setOrderStatus('filled')
       setManualPosition({
         orderId: order.order_id,
@@ -932,12 +956,31 @@ export default function TradingView() {
         direction: resolvedDirection,
         optionType: resolvedOptionType,
         expiry: resolvedExpiry,
-        qty: parseInt(qty) || 1,
+        qty: qtyNum,
         fillPrice,
         entryTime: cdtTime(),
         backendMonitored: true,  // backend exit strategy is running
       })
       setContractPrice(fillPrice)
+      // Optimistic insert so Open Positions shows immediately after fill (no poll delay).
+      setLivePositions(prev => {
+        const sym = String(contractSymbol || '')
+        const optimistic = {
+          symbol: sym,
+          qty: qtyNum,
+          side: 'long',
+          entry_time: new Date().toISOString(),
+          avg_entry_price: fillPrice,
+          current_price: fillPrice,
+          unrealized_pl: 0,
+          unrealized_plpc: 0,
+        }
+        const exists = prev.some(p => String(p.symbol || '') === sym)
+        if (exists) {
+          return prev.map(p => String(p.symbol || '') === sym ? { ...p, ...optimistic } : p)
+        }
+        return [optimistic, ...prev]
+      })
       pushToast(`Bought · ${contractSymbol.slice(0, 22)} @ $${fillPrice.toFixed(2)} · Bot monitoring exit`, 'success')
     } catch (err) {
       setOrderStatus('error')
@@ -950,10 +993,10 @@ export default function TradingView() {
     if (manualPosition) {
       setOrderStatus('selling')
       let exitPrice = contractPrice
+      const closeSymbol = manualPosition.contractSymbol || selected.symbol
       try {
         // Close option position by contract symbol
-        const sym = manualPosition.contractSymbol || selected.symbol
-        const res = await fetch(`${API}/api/positions/${encodeURIComponent(sym)}/close`, { method: 'POST' })
+        const res = await fetch(`${API}/api/positions/${encodeURIComponent(closeSymbol)}/close`, { method: 'POST' })
         if (res.ok) {
           const closed = await res.json()
           exitPrice = closed.exit_price ?? contractPrice
@@ -1011,6 +1054,7 @@ export default function TradingView() {
           })
         } catch (_) {}
       }
+      setLivePositions(prev => prev.filter(p => String(p.symbol || '') !== String(closeSymbol || '')))
     }
     setManualPosition(null)
     setContractPrice(0)
@@ -1403,9 +1447,27 @@ export default function TradingView() {
 
         {/* ── Live Open Positions for selected symbol ── */}
         {(() => {
-          const symPositions = livePositions.filter(p =>
+          const basePositions = livePositions.filter(p =>
             p.symbol && p.symbol.startsWith(selected.symbol)
           )
+          const optimisticManual =
+            manualPosition?.contractSymbol &&
+            String(manualPosition.contractSymbol).startsWith(selected.symbol) &&
+            !basePositions.some(p => String(p.symbol || '') === String(manualPosition.contractSymbol || ''))
+              ? [{
+                  symbol: manualPosition.contractSymbol,
+                  qty: Number(manualPosition.qty) || 1,
+                  side: 'long',
+                  entry_time: new Date().toISOString(),
+                  avg_entry_price: Number(manualPosition.fillPrice) || 0,
+                  current_price: Number(contractPrice) || Number(manualPosition.fillPrice) || 0,
+                  unrealized_pl: ((Number(contractPrice) || Number(manualPosition.fillPrice) || 0) - (Number(manualPosition.fillPrice) || 0)) * ((Number(manualPosition.qty) || 1) * 100),
+                  unrealized_plpc: (Number(manualPosition.fillPrice) || 0) > 0
+                    ? (((Number(contractPrice) || Number(manualPosition.fillPrice) || 0) - (Number(manualPosition.fillPrice) || 0)) / (Number(manualPosition.fillPrice) || 1))
+                    : 0,
+                }]
+              : []
+          const symPositions = [...optimisticManual, ...basePositions]
           if (symPositions.length === 0) return null
           return (
             <div style={{
@@ -1430,20 +1492,29 @@ export default function TradingView() {
                     {symPositions.length}
                   </span>
                 </div>
-                <span style={{ fontSize: '0.7rem', color: '#bbb', fontWeight: 600 }}>Live · updates every 15 s</span>
+                <span style={{ fontSize: '0.7rem', color: '#bbb', fontWeight: 600 }}>Live · sync every 5 s</span>
               </div>
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))', gap: '0.85rem', padding: '1rem 1.5rem' }}>
                 {symPositions.map((p, i) => {
-                  const uPl = Number(p.unrealized_pl) || 0
-                  const uPlPct = Number(p.unrealized_plpc) || 0
-                  const curPct = uPlPct * 100
-                  const isPos = uPl >= 0
-                  const side = String(p.side || '').toLowerCase()
-
                   const livePos = registryPositions.find(lp =>
-                    String(lp.contract_symbol || '') === String(p.symbol || '')
+                    String(lp.contract_symbol || lp.symbol || '') === String(p.symbol || '')
                   )
                   const live = livePos?.live || null
+                  const qtyNum = Number(live?.qty ?? p.qty) || 0
+                  const entryPrice = Number(live?.fill_price ?? p.avg_entry_price) || 0
+                  const currentPrice = Number(live?.current_price ?? p.current_price) || 0
+                  const livePnlPct = Number(live?.pnl_pct)
+                  const livePnlDollar = Number(live?.pnl_dollar)
+                  const uPlPct = Number.isFinite(livePnlPct)
+                    ? (livePnlPct / 100)
+                    : Number(p.unrealized_plpc) || (entryPrice > 0 ? (currentPrice - entryPrice) / entryPrice : 0)
+                  const uPl = Number.isFinite(livePnlDollar)
+                    ? livePnlDollar
+                    : Number(p.unrealized_pl) || ((currentPrice - entryPrice) * (qtyNum || 1) * 100)
+                  const curPct = uPlPct * 100
+                  const isPos = uPl >= 0
+                  const side = String(p.side || live?.side || 'long').toLowerCase()
+
                   const slPctRaw = Number(live?.sl_dynamic_pct ?? live?.sl_static_pct)
                   const tpPctRaw = Number(live?.tp_pct)
                   const qpPctRaw = Number(live?.qp_dynamic_pct ?? live?.qp_floor_pct)
@@ -1461,6 +1532,7 @@ export default function TradingView() {
                   const tpHit = hasTp ? curPct >= tpPct : false
                   const qpArmed = hasQp ? qpPct > 0 : false
                   const qpHit = qpArmed ? curPct <= qpPct : false
+                  const qpLimitSell = qpPct != null && entryPrice > 0 ? (entryPrice * (1 + qpPct / 100)) : null
 
                   const slDelta = hasSl ? Math.max(0, curPct - slPct) : null
                   const tpDelta = hasTp ? Math.max(0, tpPct - curPct) : null
@@ -1477,11 +1549,11 @@ export default function TradingView() {
                       </div>
                       {[
                         { k: 'Side',         v: <span style={{ fontWeight: 800, color: side === 'long' ? '#16a34a' : '#ef4444', textTransform: 'uppercase' }}>{side || '—'}</span> },
-                        { k: 'Qty',          v: p.qty },
+                        { k: 'Qty',          v: qtyNum || p.qty || '—' },
                         { k: 'Entry Time',   v: fmtEntryTime(p.entry_time) },
-                        { k: 'Entry Price',  v: `$${fmt(p.avg_entry_price)}` },
-                        { k: 'Current',      v: <span style={{ fontWeight: 800 }}>${fmt(p.current_price)}</span> },
-                        { k: 'Unrealized P&L', v: <span style={{ fontWeight: 900, color: isPos ? '#16a34a' : '#ef4444' }}>{isPos ? '+' : ''}${fmt(uPl)} ({(uPlPct * 100).toFixed(2)}%)</span> },
+                        { k: 'Entry Price',  v: entryPrice > 0 ? `$${fmt(entryPrice)}` : '—' },
+                        { k: 'Current',      v: <span style={{ fontWeight: 800 }}>{currentPrice > 0 ? `$${fmt(currentPrice)}` : '—'}</span> },
+                        { k: 'Unrealized P&L', v: <span style={{ fontWeight: 900, color: isPos ? '#16a34a' : '#ef4444' }}>{isPos ? '+' : ''}${fmt(uPl)} ({curPct.toFixed(2)}%)</span> },
                       ].map(({k, v}) => (
                         <div key={k} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '0.25rem 0', borderBottom: '1px solid rgba(0,0,0,0.04)', fontSize: '0.78rem' }}>
                           <span style={{ color: '#aaa', fontWeight: 600 }}>{k}</span>
@@ -1508,7 +1580,7 @@ export default function TradingView() {
                         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '0.3rem', marginBottom: '0.45rem' }}>
                           {[
                             { k: 'SL', v: slPct != null ? fmtPctSigned(slPct) : '—', c: '#ef4444', bg: 'rgba(239,68,68,0.07)' },
-                            { k: 'QP', v: qpPct != null ? fmtPctSigned(qpPct) : '—', c: '#d97706', bg: 'rgba(245,158,11,0.08)' },
+                            { k: 'QP LMT', v: qpPct != null ? fmtPctSigned(qpPct) : '—', c: '#d97706', bg: 'rgba(245,158,11,0.08)' },
                             { k: 'TP', v: tpPct != null ? fmtPctSigned(tpPct) : '—', c: '#16a34a', bg: 'rgba(22,163,74,0.07)' },
                           ].map(tile => (
                             <div key={tile.k} style={{ textAlign: 'center', borderRadius: '6px', background: tile.bg, padding: '0.25rem 0.15rem' }}>
@@ -1516,6 +1588,14 @@ export default function TradingView() {
                               <div style={{ fontSize: '0.72rem', fontWeight: 900, color: tile.c }}>{tile.v}</div>
                             </div>
                           ))}
+                        </div>
+
+                        <div style={{
+                          display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                          fontSize: '0.64rem', color: '#a16207', fontWeight: 700, marginBottom: '0.35rem',
+                        }}>
+                          <span>QP = dynamic limit sell floor</span>
+                          <span style={{ color: '#92400e' }}>{qpLimitSell != null ? `$${fmt(qpLimitSell)}` : '—'}</span>
                         </div>
 
                         <div style={{ display: 'grid', gap: '0.2rem' }}>
@@ -1533,16 +1613,16 @@ export default function TradingView() {
                           </div>
                           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '0.67rem' }}>
                             <span style={{ color: '#d97706', fontWeight: 700 }}>
-                              {!qpArmed ? 'QP not armed' : qpHit ? 'Hit QP' : 'Will hit QP'}
+                              {!qpArmed ? 'QP limit not armed' : qpHit ? 'Hit QP limit' : 'Will hit QP limit'}
                             </span>
                             <span style={{ color: '#777', fontWeight: 700 }}>
                               {qpPct == null
                                 ? '—'
                                 : !qpArmed
-                                  ? `Peak ${fmtPctSigned(peakPct)}`
+                                  ? `Peak ${fmtPctSigned(peakPct)} · LMT ${qpLimitSell != null ? `$${fmt(qpLimitSell)}` : '—'}`
                                   : qpHit
-                                    ? fmtPctSigned(qpPct)
-                                    : `${qpDelta.toFixed(2)}% above`}
+                                    ? `${fmtPctSigned(qpPct)} · LMT ${qpLimitSell != null ? `$${fmt(qpLimitSell)}` : '—'}`
+                                    : `${qpDelta.toFixed(2)}% above · LMT ${qpLimitSell != null ? `$${fmt(qpLimitSell)}` : '—'}`}
                             </span>
                           </div>
                         </div>

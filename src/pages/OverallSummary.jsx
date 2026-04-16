@@ -89,6 +89,22 @@ function parseOptionSymbol(sym) {
   }
 }
 
+function normalizeOptionType(rawOptionType, rawDirection, contractName, symbol) {
+  const type = String(rawOptionType || '').trim().toUpperCase()
+  if (type === 'CALL' || type === 'PUT') return type.toLowerCase()
+
+  const dir = String(rawDirection || '').trim().toUpperCase()
+  if (dir === 'CALL' || dir === 'PUT') return dir.toLowerCase()
+  if (dir === 'UPTREND') return 'call'
+  if (dir === 'DOWNTREND') return 'put'
+
+  const fromContract = parseOptionSymbol(contractName || '') || parseOptionSymbol(symbol || '')
+  if (fromContract?.optType === 'CALL') return 'call'
+  if (fromContract?.optType === 'PUT') return 'put'
+
+  return '—'
+}
+
 function cleanSide(raw) {
   if (!raw) return '—'
   return String(raw).replace(/^positionside\./i, '').toUpperCase()
@@ -209,6 +225,194 @@ function fmtDuration(sec) {
   const h = Math.floor(m / 60)
   const rm = m % 60
   return rm > 0 ? `${h}h ${rm}m` : `${h}h`
+}
+
+// ── TradeTimeline component ────────────────────────────────────────────────
+const CDT_LABEL = 'America/Chicago'
+function fmtTickTime(ts) {
+  if (!ts) return '—'
+  try {
+    const d = new Date(ts)
+    return isNaN(d) ? ts : d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit', timeZone: CDT_LABEL })
+  } catch { return ts }
+}
+
+function TradeTimeline({ timeline, fillPrice, qpArmed, qpArmTime, qpArmPrice, qpArmPnlPct, buyFilledTime, sellFilledTime }) {
+  const [open, setOpen] = useState(false)
+  if (!timeline || timeline.length === 0) return null
+
+  const ticks = timeline
+
+  // price domain for mini sparkline
+  const prices = ticks.map(t => t.sellable_price).filter(Boolean)
+  const minP = Math.min(...prices)
+  const maxP = Math.max(...prices)
+  const range = maxP - minP || 0.01
+  const W = 260, H = 50
+
+  const pts = ticks.map((t, idx) => {
+    const x = (idx / Math.max(ticks.length - 1, 1)) * W
+    const y = H - ((t.sellable_price - minP) / range) * (H - 4) - 2
+    return `${x.toFixed(1)},${y.toFixed(1)}`
+  }).join(' ')
+
+  // find QP arm index in timeline
+  const qpArmIdx = qpArmTime
+    ? ticks.findIndex(t => t.ts >= qpArmTime)
+    : -1
+
+  const peakIdx = ticks.reduce((best, t, idx) => t.pnl_pct > (ticks[best]?.pnl_pct ?? -Infinity) ? idx : best, 0)
+
+  return (
+    <div style={{ marginTop: '8px', borderTop: '1px solid rgba(201,162,39,0.12)' }}>
+      <button
+        onClick={() => setOpen(o => !o)}
+        style={{
+          display: 'flex', alignItems: 'center', gap: '6px',
+          padding: '5px 0', background: 'none', border: 'none', cursor: 'pointer',
+          fontSize: '11px', fontWeight: 700, color: '#bbb', width: '100%',
+        }}
+      >
+        <span style={{ fontSize: '9px', textTransform: 'uppercase', letterSpacing: '0.5px', fontWeight: 800 }}>
+          {open ? '▲' : '▼'} Tick Timeline
+        </span>
+        <span style={{ color: '#ccc', fontWeight: 500 }}>({ticks.length} ticks)</span>
+        {qpArmed && (
+          <span style={{
+            padding: '1px 6px', borderRadius: '4px',
+            background: 'rgba(217,119,6,0.1)', color: '#d97706',
+            fontSize: '9px', fontWeight: 800, textTransform: 'uppercase',
+          }}>QP Armed</span>
+        )}
+      </button>
+
+      {open && (
+        <div style={{ paddingBottom: '10px' }}>
+          {/* Sparkline */}
+          <div style={{
+            background: '#f9f9f9', borderRadius: '8px', padding: '8px',
+            marginBottom: '8px', border: '1px solid rgba(0,0,0,0.05)',
+            position: 'relative',
+          }}>
+            <div style={{ fontSize: '9px', fontWeight: 800, color: '#ccc', textTransform: 'uppercase', marginBottom: '4px', letterSpacing: '0.5px' }}>
+              Price Journey — entry ${fmt2(fillPrice)}
+            </div>
+            <svg width={W} height={H} style={{ display: 'block', overflow: 'visible' }}>
+              {/* zero / entry line */}
+              {fillPrice && minP != null && (
+                <line
+                  x1={0} x2={W}
+                  y1={H - ((fillPrice - minP) / range) * (H - 4) - 2}
+                  y2={H - ((fillPrice - minP) / range) * (H - 4) - 2}
+                  stroke="rgba(0,0,0,0.1)" strokeWidth="1" strokeDasharray="3,3"
+                />
+              )}
+              {/* price line */}
+              <polyline
+                points={pts}
+                fill="none"
+                stroke={ticks[ticks.length - 1]?.pnl_pct >= 0 ? '#16a34a' : '#ef4444'}
+                strokeWidth="1.5"
+              />
+              {/* QP arm dot */}
+              {qpArmIdx >= 0 && (() => {
+                const t = ticks[qpArmIdx]
+                const x = (qpArmIdx / Math.max(ticks.length - 1, 1)) * W
+                const y = H - ((t.sellable_price - minP) / range) * (H - 4) - 2
+                return (
+                  <g>
+                    <circle cx={x} cy={y} r={5} fill="#d97706" stroke="#fff" strokeWidth="1.5" />
+                    <text x={x + 7} y={y + 4} fontSize="8" fill="#d97706" fontWeight="800">QP ARM</text>
+                  </g>
+                )
+              })()}
+              {/* Peak dot */}
+              {(() => {
+                const t = ticks[peakIdx]
+                const x = (peakIdx / Math.max(ticks.length - 1, 1)) * W
+                const y = H - ((t.sellable_price - minP) / range) * (H - 4) - 2
+                return (
+                  <g>
+                    <circle cx={x} cy={y} r={4} fill="#6366f1" stroke="#fff" strokeWidth="1.5" />
+                    <text x={x + 6} y={y - 3} fontSize="8" fill="#6366f1" fontWeight="800">PEAK</text>
+                  </g>
+                )
+              })()}
+            </svg>
+            {/* Price range labels */}
+            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '9px', color: '#bbb', marginTop: '2px' }}>
+              <span>${fmt2(minP)}</span>
+              <span>${fmt2(maxP)}</span>
+            </div>
+          </div>
+
+          {/* QP arm detail row */}
+          {qpArmed && qpArmTime && (
+            <div style={{
+              display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap',
+              padding: '5px 8px', borderRadius: '6px',
+              background: 'rgba(217,119,6,0.06)', border: '1px solid rgba(217,119,6,0.15)',
+              marginBottom: '6px',
+            }}>
+              <span style={{ fontSize: '9px', fontWeight: 800, color: '#d97706', textTransform: 'uppercase', letterSpacing: '0.4px' }}>QP Armed At</span>
+              <span style={{ fontSize: '11px', fontFamily: 'monospace', fontWeight: 700, color: '#92400e' }}>{fmtTickTime(qpArmTime)}</span>
+              {qpArmPrice != null && (
+                <span style={{ fontSize: '11px', fontFamily: 'monospace', fontWeight: 700, color: '#92400e' }}>${fmt2(qpArmPrice)}</span>
+              )}
+              {qpArmPnlPct != null && (
+                <span style={{ fontSize: '11px', fontFamily: 'monospace', fontWeight: 700, color: '#d97706' }}>{fmtPctSigned(qpArmPnlPct)}</span>
+              )}
+            </div>
+          )}
+
+          {/* Tick table — capped at 200 rows to avoid DOM overload */}
+          <div style={{ overflowX: 'auto', overflowY: 'auto', maxHeight: '240px' }}>
+            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '10.5px', minWidth: '480px' }}>
+              <thead>
+                <tr style={{ background: '#fdfaf4', position: 'sticky', top: 0, zIndex: 1 }}>
+                  {['Time', 'Src', 'Sellable', 'Bid', 'Mid', 'PnL%', 'QP Lmt', 'SL dyn', 'Peak', 'Armed'].map(h => (
+                    <th key={h} style={{ padding: '3px 6px', textAlign: 'left', fontWeight: 800, color: '#bbb', borderBottom: '1px solid #eee', whiteSpace: 'nowrap', fontSize: '9px', textTransform: 'uppercase', letterSpacing: '0.4px' }}>{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {ticks.slice(0, 200).map((tick, idx) => {
+                  const isArm = qpArmIdx === idx
+                  const isPeak = peakIdx === idx
+                  const isEntry = tick.source === 'entry'
+                  const rowBg = isArm ? 'rgba(217,119,6,0.08)' : isPeak ? 'rgba(99,102,241,0.06)' : isEntry ? 'rgba(22,163,74,0.05)' : idx % 2 === 0 ? '#fff' : '#fafafa'
+                  const pnlColor = tick.pnl_pct > 0 ? '#16a34a' : tick.pnl_pct < 0 ? '#ef4444' : '#888'
+                  return (
+                    <tr key={idx} style={{ background: rowBg }}>
+                      <td style={{ padding: '2px 6px', fontFamily: 'monospace', color: '#555', whiteSpace: 'nowrap' }}>{fmtTickTime(tick.ts)}</td>
+                      <td style={{ padding: '2px 6px', color: '#aaa', textTransform: 'uppercase', fontSize: '9px', fontWeight: 700 }}>{tick.source}</td>
+                      <td style={{ padding: '2px 6px', fontFamily: 'monospace', fontWeight: 700, color: '#111' }}>${fmt2(tick.sellable_price)}</td>
+                      <td style={{ padding: '2px 6px', fontFamily: 'monospace', color: '#777' }}>{tick.bid_price != null ? `$${fmt2(tick.bid_price)}` : '—'}</td>
+                      <td style={{ padding: '2px 6px', fontFamily: 'monospace', color: '#777' }}>{tick.mid_price != null ? `$${fmt2(tick.mid_price)}` : '—'}</td>
+                      <td style={{ padding: '2px 6px', fontFamily: 'monospace', fontWeight: 800, color: pnlColor }}>{fmtPctSigned(tick.pnl_pct)}</td>
+                      <td style={{ padding: '2px 6px', fontFamily: 'monospace', color: '#d97706' }}>{tick.qp_limit_price != null ? `$${fmt2(tick.qp_limit_price)}` : '—'}</td>
+                      <td style={{ padding: '2px 6px', fontFamily: 'monospace', color: '#ef4444' }}>{fmtPctSigned(tick.sl_dynamic_pct)}</td>
+                      <td style={{ padding: '2px 6px', fontFamily: 'monospace', color: '#6366f1' }}>{fmtPctSigned(tick.max_pnl_pct)}</td>
+                      <td style={{ padding: '2px 6px', textAlign: 'center' }}>
+                        {tick.qp_armed ? <span style={{ color: '#d97706', fontSize: '10px' }}>✓</span> : <span style={{ color: '#ddd' }}>—</span>}
+                      </td>
+                    </tr>
+                  )
+                })}
+                {ticks.length > 200 && (
+                  <tr>
+                    <td colSpan={10} style={{ padding: '4px 6px', textAlign: 'center', color: '#bbb', fontSize: '10px', fontStyle: 'italic' }}>
+                      +{ticks.length - 200} more ticks not shown
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+    </div>
+  )
 }
 
 // ── styles ─────────────────────────────────────────────────────────────────
@@ -441,8 +645,9 @@ export default function OverallSummary() {
   // ── Fetch all data ───────────────────────────────────────────────────────
   const fetchAll = useCallback(async (silent = false) => {
     try {
-      const [aitRes, posRes, cfgRes, liveRes] = await Promise.allSettled([
+      const [aitRes, manualRes, posRes, cfgRes, liveRes] = await Promise.allSettled([
         fetch(`${API}/api/options-log?limit=500`),
+        fetch(`${API}/api/manual-trades?limit=500`),
         fetch(`${API}/api/positions`),
         fetch(`${API}/api/config`),
         fetch(`${API}/api/live-positions`),
@@ -450,27 +655,52 @@ export default function OverallSummary() {
 
       if (aitRes.status === 'fulfilled' && aitRes.value.ok) {
         const d = await aitRes.value.json()
-        // All trade types now in one collection — split by trade_type for display
+        // /api/options-log excludes MANUAL types by backend design.
         const all = (d.trades || []).map(t => {
           const tt = String(t.tradeType || '').toUpperCase()
+          const contractName = t.contractName || t.contract_name || t.symbol
+          const optionType = normalizeOptionType(t.optionType || t.option_type, t.direction, contractName, t.symbol)
           const tradeTypeTag = tt === 'STRADDLE'
             ? 'STRADDLE'
             : tt === 'MONITOR_EXIT'
               ? 'MONITOR'
-              : tt === 'MANUAL_LIQUIDATE' || tt === 'MANUAL'
-                ? 'Manual'
-                : tt === 'RECOVERY'
+              : tt === 'RECOVERY'
                   ? 'RECOVERY'
                   : 'AIT'
           const entryReasonRaw = tt === 'STRADDLE' ? 'STRADDLE' : tt === 'AIT' ? 'AIT' : null
-          return { ...t, tradeTypeTag, entryReason_raw: entryReasonRaw }
+          return { ...t, contractName, optionType, tradeTypeTag, entryReason_raw: entryReasonRaw }
         })
-        setAitTrades(all.filter(t => t.tradeTypeTag !== 'Manual'))
-        setManualTrades(all.filter(t => t.tradeTypeTag === 'Manual'))
+        setAitTrades(all)
+      } else {
+        setAitTrades([])
+      }
+
+      if (manualRes.status === 'fulfilled' && manualRes.value.ok) {
+        const d = await manualRes.value.json()
+        const manual = (d.trades || []).map(t => {
+          const contractName = t.contractName || t.contract_name || t.symbol
+          const optionType = normalizeOptionType(t.optionType || t.option_type, t.direction, contractName, t.symbol)
+          return {
+            ...t,
+            tradeTypeTag: 'Manual',
+            tradeType: 'MANUAL',
+            contractName,
+            optionType,
+            entryReason_raw: 'MANUAL',
+          }
+        })
+        setManualTrades(manual)
+      } else {
+        setManualTrades([])
       }
       if (posRes.status === 'fulfilled' && posRes.value.ok) {
         const d = await posRes.value.json()
-        setPositions(d.positions || [])
+        const rows = Array.isArray(d)
+          ? d
+          : Array.isArray(d?.positions)
+            ? d.positions
+            : []
+        setPositions(rows)
       }
       if (cfgRes.status === 'fulfilled' && cfgRes.value.ok) {
         setCfg(await cfgRes.value.json())
@@ -1193,7 +1423,14 @@ export default function OverallSummary() {
                 {sorted.map((t, i) => {
                   const pnl    = Number(t.pnl) || 0
                   const pnlPos = pnl >= 0
-                  const optRaw = t.optionType ? String(t.optionType).toUpperCase() : null
+                  const optRaw = String(
+                    normalizeOptionType(
+                      t.optionType,
+                      t.direction,
+                      t.contractName,
+                      t.symbol,
+                    ) || '—'
+                  ).toUpperCase()
                   const raw    = t.entryReason_raw
                   const entryMeaning = entryReasonMeaning(raw)
                   const exitReasonRaw = (t.exitReason || t.exit_reason || '')
@@ -1318,12 +1555,12 @@ export default function OverallSummary() {
                               )
                             })()}
 
-                            {/* Option type: use optionType from API directly */}
-                            {t.optionType && (
+                            {/* Option type: normalized from optionType/direction/contract symbol */}
+                            {optRaw && (
                               <span style={S.badge(
-                                String(t.optionType).toUpperCase() === 'CALL' ? 'rgba(37,99,235,0.1)' : 'rgba(124,58,237,0.1)',
-                                String(t.optionType).toUpperCase() === 'CALL' ? '#1d4ed8' : '#6d28d9',
-                              )}>{String(t.optionType).toUpperCase()}</span>
+                                optRaw === 'CALL' ? 'rgba(37,99,235,0.1)' : optRaw === 'PUT' ? 'rgba(124,58,237,0.1)' : 'rgba(0,0,0,0.05)',
+                                optRaw === 'CALL' ? '#1d4ed8' : optRaw === 'PUT' ? '#6d28d9' : '#777',
+                              )}>{optRaw}</span>
                             )}
 
                             {/* Entry reason */}
@@ -1630,6 +1867,18 @@ export default function OverallSummary() {
                             </span>
                           </div>
                         )}
+
+                        {/* ── Tick-by-tick timeline ── */}
+                        <TradeTimeline
+                          timeline={t.timeline}
+                          fillPrice={toNum(t.buyPrice) ?? toNum(t.buyFilledPrice)}
+                          qpArmed={t.qpArmed}
+                          qpArmTime={t.qpArmTime}
+                          qpArmPrice={t.qpArmPrice}
+                          qpArmPnlPct={t.qpArmPnlPct}
+                          buyFilledTime={buyFilledTime}
+                          sellFilledTime={sellFilledTime}
+                        />
                       </div>
                     </div>
                   )

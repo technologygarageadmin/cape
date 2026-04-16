@@ -1298,6 +1298,12 @@ def _ait_run_straddle(
                     "exit_sl_pct":  round(float(exit_state.get("sl_dynamic_pct", 0.0)), 4),
                     "exit_qp_pct":  round(float(exit_state.get("qp_dynamic_pct", 0.0)), 4),
                     "exit_tp_pct":  round(float(exit_state.get("tp_pct", 0.0)), 4),
+                    "qp_armed":       bool(exit_state.get("qp_armed", False)),
+                    "qp_arm_time":    exit_state.get("qp_arm_time"),
+                    "qp_arm_price":   exit_state.get("qp_arm_price"),
+                    "qp_arm_pnl_pct": exit_state.get("qp_arm_pnl_pct"),
+                    "qp_arm_peak_pct":exit_state.get("qp_arm_peak_pct"),
+                    "timeline":       exit_state.get("timeline") or [],
                 }
                 _options_log_col.insert_one(_straddle_doc)
                 log_trade("STRADDLE", _straddle_doc)
@@ -1500,6 +1506,7 @@ def _ait_trade_loop(
                         underlying_symbol=symbol,
                         min_exit_epoch_ts=min_exit_epoch_ts,
                         buy_order_id=rsi_buy_order_id,
+                        initial_exit_state=exit_state if exit_state else None,
                     )
 
                 # Guard against stale quote spikes for same-candle positive exits.
@@ -1657,6 +1664,14 @@ def _ait_trade_loop(
                     "exit_sl_pct":  round(float(exit_state.get("sl_dynamic_pct", 0.0)), 4),
                     "exit_qp_pct":  round(float(exit_state.get("qp_dynamic_pct", 0.0)), 4),
                     "exit_tp_pct":  round(float(exit_state.get("tp_pct", 0.0)), 4),
+                    # QP arm metadata
+                    "qp_armed":       bool(exit_state.get("qp_armed", False)),
+                    "qp_arm_time":    exit_state.get("qp_arm_time"),
+                    "qp_arm_price":   exit_state.get("qp_arm_price"),
+                    "qp_arm_pnl_pct": exit_state.get("qp_arm_pnl_pct"),
+                    "qp_arm_peak_pct":exit_state.get("qp_arm_peak_pct"),
+                    # Full tick-by-tick lifecycle timeline
+                    "timeline":       exit_state.get("timeline") or [],
                     # Entry indicators (RSI, EMA, volume, candle data at signal time)
                     "entry_rsi": _indicators.get("rsi"),
                     "entry_rsi_ma": round(float(rsi_result.get("latest_rsi_ma", 0)), 2),
@@ -1819,6 +1834,7 @@ def _recovery_monitor_thread(
             signal=signal,
             underlying_symbol=underlying,
             buy_order_id=buy_order_id,
+            initial_exit_state=exit_state if exit_state else None,
         )
 
     exit_reason = exit_reason or "FORCED_EXIT_NO_SIGNAL"
@@ -1954,6 +1970,12 @@ def _recovery_monitor_thread(
             "exit_sl_pct": round(float(exit_state.get("sl_dynamic_pct", 0.0)), 4),
             "exit_qp_pct": round(float(exit_state.get("qp_dynamic_pct", 0.0)), 4),
             "exit_tp_pct": round(float(exit_state.get("tp_pct", 0.0)), 4),
+            "qp_armed":       bool(exit_state.get("qp_armed", False)),
+            "qp_arm_time":    exit_state.get("qp_arm_time"),
+            "qp_arm_price":   exit_state.get("qp_arm_price"),
+            "qp_arm_pnl_pct": exit_state.get("qp_arm_pnl_pct"),
+            "qp_arm_peak_pct":exit_state.get("qp_arm_peak_pct"),
+            "timeline":       exit_state.get("timeline") or [],
             "log_source": "startup_recovery",
         })
 
@@ -3073,6 +3095,7 @@ def _manual_trade_monitor_thread(
             signal=signal,
             underlying_symbol=underlying,
             buy_order_id=buy_order_id,
+            initial_exit_state=exit_state if exit_state else None,
         )
 
     exit_reason = exit_reason or "FORCED_EXIT_NO_SIGNAL"
@@ -3133,10 +3156,11 @@ def _manual_trade_monitor_thread(
     pnl_dollar = round((sell_price - entry_price) * qty * 100, 2)
     result = "WIN" if pnl_pct > 0 else "LOSS" if pnl_pct < 0 else "BREAKEVEN"
 
-    peak_pnl_pct   = exit_state.get("peak_pnl_pct")
-    exit_sl_pct    = exit_state.get("exit_sl_pct")
-    exit_tp_pct    = exit_state.get("exit_tp_pct")
-    exit_qp_pct    = exit_state.get("exit_qp_pct")
+    # Correct key reads — exit_state uses max_pnl_pct/sl_dynamic_pct/qp_dynamic_pct/tp_pct
+    peak_pnl_pct = round(float(exit_state.get("max_pnl_pct", 0.0)), 4)
+    exit_sl_pct  = round(float(exit_state.get("sl_dynamic_pct", 0.0)), 4)
+    exit_qp_pct  = round(float(exit_state.get("qp_dynamic_pct", 0.0)), 4)
+    exit_tp_pct  = round(float(exit_state.get("tp_pct", 0.0)), 4)
 
     print(
         f"[MT:{underlying}] SOLD {contract_symbol}: {sell_price:.4f} "
@@ -3172,6 +3196,14 @@ def _manual_trade_monitor_thread(
                 "exit_sl_pct": exit_sl_pct,
                 "exit_tp_pct": exit_tp_pct,
                 "exit_qp_pct": exit_qp_pct,
+                # QP arm metadata
+                "qp_armed":       bool(exit_state.get("qp_armed", False)),
+                "qp_arm_time":    exit_state.get("qp_arm_time"),
+                "qp_arm_price":   exit_state.get("qp_arm_price"),
+                "qp_arm_pnl_pct": exit_state.get("qp_arm_pnl_pct"),
+                "qp_arm_peak_pct":exit_state.get("qp_arm_peak_pct"),
+                # Full tick-by-tick lifecycle timeline
+                "timeline":       exit_state.get("timeline") or [],
                 "created_at": datetime.now(CDT),
             }
             _manual_trades_col.insert_one(_manual_doc)
@@ -3309,6 +3341,21 @@ def get_manual_trades(
                 "exitQpPct": r.get("exit_qp_pct"),
                 "exitTpPct": r.get("exit_tp_pct"),
                 "createdAt": _to_iso(r.get("created_at")) or r.get("created_at"),
+                "buyFilledTime":  r.get("buy_filled_time") or r.get("entry_time"),
+                "buyFilledPrice": r.get("buy_price", 0),
+                "exitSignalTime": r.get("exit_signal_time") or r.get("exit_time"),
+                "sellFilledTime": r.get("sell_filled_time") or r.get("exit_time"),
+                "sellFilledPrice":r.get("sell_price", 0),
+                "pnlPct":        r.get("pnl_pct"),
+                "tradeDurationSec": r.get("trade_duration_sec"),
+                # QP arm metadata
+                "qpArmed":       r.get("qp_armed", False),
+                "qpArmTime":     r.get("qp_arm_time"),
+                "qpArmPrice":    r.get("qp_arm_price"),
+                "qpArmPnlPct":   r.get("qp_arm_pnl_pct"),
+                "qpArmPeakPct":  r.get("qp_arm_peak_pct"),
+                # Full tick-by-tick timeline
+                "timeline":      r.get("timeline") or [],
             }
         )
 
@@ -3396,6 +3443,14 @@ def get_options_log(
                 "entryTrend": r.get("entry_trend"),
                 "entryVwap": r.get("entry_vwap"),
                 "entryPriceAboveVwap": r.get("entry_price_above_vwap"),
+                # QP arm metadata
+                "qpArmed":       r.get("qp_armed", False),
+                "qpArmTime":     r.get("qp_arm_time"),
+                "qpArmPrice":    r.get("qp_arm_price"),
+                "qpArmPnlPct":   r.get("qp_arm_pnl_pct"),
+                "qpArmPeakPct":  r.get("qp_arm_peak_pct"),
+                # Full tick-by-tick timeline
+                "timeline":      r.get("timeline") or [],
             }
         )
 
