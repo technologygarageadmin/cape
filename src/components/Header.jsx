@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Settings, Bell, X, TrendingUp, Lock, DollarSign } from 'lucide-react'
+import { Settings, Bell, X, TrendingUp, Lock, DollarSign, LogOut } from 'lucide-react'
 import logo from '../assets/logo.png'
 
 const styles = {
@@ -219,9 +219,23 @@ const styles = {
     color: '#A07C10',
     background: 'rgba(201,162,39,0.08)',
   },
+  logoutButton: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '0.4rem',
+    border: '1px solid rgba(239,68,68,0.28)',
+    background: 'rgba(239,68,68,0.08)',
+    color: '#dc2626',
+    borderRadius: '8px',
+    padding: '0.45rem 0.65rem',
+    cursor: 'pointer',
+    fontSize: '0.76rem',
+    fontWeight: 700,
+    transition: 'all 0.2s ease',
+  },
 }
 
-function Header({ activeTab, onTabChange }) {
+function Header({ activeTab, onTabChange, onLogout }) {
   const navigate = useNavigate()
   const [brandHover, setBrandHover] = useState(false)
   const [settingsHover, setSettingsHover] = useState(false)
@@ -279,6 +293,11 @@ function Header({ activeTab, onTabChange }) {
   const handleTabChange = (itemId, route) => {
     onTabChange(itemId)
     navigate(route)
+  }
+
+  const handleLogoutClick = () => {
+    onLogout?.()
+    navigate('/lock', { replace: true })
   }
 
   return (
@@ -403,6 +422,22 @@ function Header({ activeTab, onTabChange }) {
             title="Go to Profile"
           >
             <Settings size={22} />
+          </button>
+          <button
+            style={styles.logoutButton}
+            onClick={handleLogoutClick}
+            onMouseEnter={(e) => {
+              e.currentTarget.style.background = 'rgba(239,68,68,0.14)'
+              e.currentTarget.style.transform = 'translateY(-1px)'
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.background = 'rgba(239,68,68,0.08)'
+              e.currentTarget.style.transform = 'translateY(0)'
+            }}
+            title="End session"
+          >
+            <LogOut size={15} />
+            Logout
           </button>
         </div>
         </div>
