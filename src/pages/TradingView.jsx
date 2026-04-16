@@ -1048,10 +1048,20 @@ export default function TradingView() {
     }
     setTradeMode(mode)
     // Sync left watchlist symbolMode for the selected symbol
+    const backendMode = mode === 'ai' ? 'auto' : 'manual'
     setSymbolMode(prev => ({
       ...prev,
-      [selected.symbol]: mode === 'ai' ? 'auto' : 'manual',
+      [selected.symbol]: backendMode,
     }))
+    // Persist to backend — without this, config polling resets tradeMode back to 'ai'
+    // every 30s, causing the Buy button to disappear after sell
+    try {
+      await fetch(`${API}/api/symbol/mode`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ symbol: selected.symbol, mode: backendMode }),
+      })
+    } catch (_) {}
   }
 
   // Auto-fetch suggest on symbol/mode change, then refresh every 10 s while no open position
