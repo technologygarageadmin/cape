@@ -56,6 +56,7 @@ const CandleChart = ({
   onPointHover,
   onPointLeave,
   fitKey,
+  livePrice,
 }) => {
   const containerRef = useRef(null);
   const chartRef = useRef(null);
@@ -412,6 +413,28 @@ const CandleChart = ({
       console.error("CandleChart Error:", error);
     }
   }, [data, obrLines, rsiPoints, rsiMaPoints, rsiMarkers]);
+
+  // ── Live price tick: update last candle's close/high/low in real time ──────
+  useLayoutEffect(() => {
+    if (!candleSeriesRef.current || livePrice == null || !data || !data.length) return
+    const lastBar = data[data.length - 1]
+    if (!lastBar) return
+    const lastTime = typeof lastBar.time === 'string'
+      ? Math.floor(new Date(lastBar.time).getTime() / 1000)
+      : lastBar.time
+    if (!lastTime) return
+    const price = Number(livePrice)
+    if (!isFinite(price) || price <= 0) return
+    try {
+      candleSeriesRef.current.update({
+        time: lastTime,
+        open:  Number(lastBar.open),
+        high:  Math.max(Number(lastBar.high), price),
+        low:   Math.min(Number(lastBar.low), price),
+        close: price,
+      })
+    } catch (_) {}
+  }, [livePrice]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const fmtP = (v) => v?.toFixed(2) ?? '—';
   const isUp = hoveredBar ? hoveredBar.close >= hoveredBar.open : true;

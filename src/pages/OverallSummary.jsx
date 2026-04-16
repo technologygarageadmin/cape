@@ -434,26 +434,15 @@ export default function OverallSummary() {
   const [sortCol,      setSortCol]      = useState('createdAt')
   const [sortDir,      setSortDir]      = useState('desc')
   const [hideStraddle, setHideStraddle]  = useState(true)
-  const [tradeFilterSet, setTradeFilterSet] = useState(() => new Set())
   const [sellingSymbol, setSellingSymbol] = useState(null)
-
-  const toggleTradeFilter = useCallback((key) => {
-    setTradeFilterSet(prev => {
-      const next = new Set(prev)
-      if (next.has(key)) next.delete(key)
-      else next.add(key)
-      return next
-    })
-  }, [])
   const alertedPositionKeysRef = useRef(new Set())
   const lastDingAtRef = useRef(0)
 
   // ── Fetch all data ───────────────────────────────────────────────────────
   const fetchAll = useCallback(async (silent = false) => {
     try {
-      const [aitRes, manualRes, posRes, cfgRes, liveRes] = await Promise.allSettled([
+      const [aitRes, posRes, cfgRes, liveRes] = await Promise.allSettled([
         fetch(`${API}/api/options-log?limit=500`),
-        fetch(`${API}/api/manual-trades?limit=500`),
         fetch(`${API}/api/positions`),
         fetch(`${API}/api/config`),
         fetch(`${API}/api/live-positions`),
@@ -461,28 +450,23 @@ export default function OverallSummary() {
 
       if (aitRes.status === 'fulfilled' && aitRes.value.ok) {
         const d = await aitRes.value.json()
-        setAitTrades((d.trades || []).map(t => {
+        // All trade types now in one collection — split by trade_type for display
+        const all = (d.trades || []).map(t => {
           const tt = String(t.tradeType || '').toUpperCase()
           const tradeTypeTag = tt === 'STRADDLE'
             ? 'STRADDLE'
             : tt === 'MONITOR_EXIT'
               ? 'MONITOR'
-              : tt === 'MANUAL_LIQUIDATE'
-                ? 'MANUAL'
+              : tt === 'MANUAL_LIQUIDATE' || tt === 'MANUAL'
+                ? 'Manual'
                 : tt === 'RECOVERY'
                   ? 'RECOVERY'
                   : 'AIT'
-          const entryReasonRaw = tt === 'STRADDLE'
-            ? 'STRADDLE'
-            : tt === 'AIT'
-              ? 'AIT'
-              : null
+          const entryReasonRaw = tt === 'STRADDLE' ? 'STRADDLE' : tt === 'AIT' ? 'AIT' : null
           return { ...t, tradeTypeTag, entryReason_raw: entryReasonRaw }
-        }))
-      }
-      if (manualRes.status === 'fulfilled' && manualRes.value.ok) {
-        const d = await manualRes.value.json()
-        setManualTrades((d.trades || []).map(t => ({ ...t, tradeTypeTag: 'Manual', entryReason_raw: 'MANUAL' })))
+        })
+        setAitTrades(all.filter(t => t.tradeTypeTag !== 'Manual'))
+        setManualTrades(all.filter(t => t.tradeTypeTag === 'Manual'))
       }
       if (posRes.status === 'fulfilled' && posRes.value.ok) {
         const d = await posRes.value.json()
@@ -563,41 +547,8 @@ export default function OverallSummary() {
     })
   ), [allTrades, dateFilter, resultFilter, symbolFilter, hideStraddle])
 
-  // History card display list — responds to sidebar checkbox filters
-  const historyDisplayed = useMemo(() => {
-    let list = allTrades.filter(t =>
-      symbolFilter === 'ALL' || t.symbol === symbolFilter
-    )
-    const timeKeys = ['1H', '2H', '3H'].filter(k => tradeFilterSet.has(k))
-    const typeKeys = ['STRADDLE', 'WIN', 'LOSS'].filter(k => tradeFilterSet.has(k))
-    if (tradeFilterSet.size === 0) {
-      // No sidebar filters — fall back to global filter bar
-      return list.filter(t => {
-        if (hideStraddle && t.tradeTypeTag === 'STRADDLE') return false
-        const dateOk = isWithinRange(t.createdAt || t.entryTime, dateFilter)
-        const resOk  = resultFilter === 'ALL' || t.result === resultFilter
-        return dateOk && resOk
-      })
-    }
-    return list.filter(t => {
-      // Time: use the largest checked window
-      if (timeKeys.length > 0) {
-        const maxHrs = timeKeys.reduce((acc, k) => Math.max(acc, parseInt(k)), 0)
-        const d = parseApiDate(t.createdAt || t.entryTime)
-        if (!d || d < new Date(Date.now() - maxHrs * 3_600_000)) return false
-      }
-      // Type/result: match at least one checked category
-      if (typeKeys.length > 0) {
-        const match = typeKeys.some(k =>
-          (k === 'STRADDLE' && t.tradeTypeTag === 'STRADDLE') ||
-          (k === 'WIN'      && t.result === 'WIN')             ||
-          (k === 'LOSS'     && t.result === 'LOSS')
-        )
-        if (!match) return false
-      }
-      return true
-    })
-  }, [allTrades, symbolFilter, tradeFilterSet, hideStraddle, dateFilter, resultFilter])
+  // History card display list — same as filtered (unified filter)
+  const historyDisplayed = filtered
 
   // Sort
   const sorted = useMemo(() => {
@@ -625,6 +576,7 @@ export default function OverallSummary() {
   const {
     wins,
     losses,
+    breakevens,
     netPnl,
     totalProfit,
     totalLoss,
@@ -640,6 +592,7 @@ export default function OverallSummary() {
   } = useMemo(() => {
     let winsCount = 0
     let lossesCount = 0
+    let breakevenCount = 0
     let net = 0
     let profit = 0
     let loss = 0
@@ -653,6 +606,7 @@ export default function OverallSummary() {
     filtered.forEach((t) => {
       if (t.result === 'WIN') winsCount += 1
       if (t.result === 'LOSS') lossesCount += 1
+      if (t.result === 'BREAKEVEN') breakevenCount += 1
       if (t.tradeTypeTag === 'AIT') ait += 1
       if (t.tradeTypeTag === 'Manual') manual += 1
 
@@ -674,6 +628,7 @@ export default function OverallSummary() {
     return {
       wins: winsCount,
       losses: lossesCount,
+      breakevens: breakevenCount,
       netPnl: net,
       totalProfit: profit,
       totalLoss: loss,
@@ -896,7 +851,7 @@ export default function OverallSummary() {
             iconBg="rgba(201,162,39,0.1)"
             label="Total Trades"
             value={filtered.length}
-            sub={`AIT: ${aitCount} · Manual: ${manualCount}`}
+            sub={`AIT: ${aitCount} · Manual: ${manualCount}${breakevens > 0 ? ' · BE: ' + breakevens : ''}`}
           />
           <StatCard
             icon={<TrendingUp size={16} color="#16a34a" />}
@@ -1189,63 +1144,7 @@ export default function OverallSummary() {
             </span>
           </div>
 
-          <div style={{ display: 'flex', alignItems: 'flex-start' }}>
-            {/* ── Left filter sidebar ── */}
-            <div style={{
-              width: '155px', flexShrink: 0,
-              borderRight: '1px solid rgba(201,162,39,0.12)',
-              padding: '1.1rem 0.9rem 1.5rem',
-              background: 'rgba(253,250,244,0.55)',
-              minHeight: '200px',
-            }}>
-              <div style={{ fontSize: '0.67rem', fontWeight: 800, color: '#bbb', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: '1rem', display: 'flex', alignItems: 'center', gap: '0.3rem' }}>
-                <Filter size={11} /> Filters
-                {tradeFilterSet.size > 0 && (
-                  <span style={{ marginLeft: 'auto', background: GOLD, color: '#111', borderRadius: '50%', width: '16px', height: '16px', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '0.62rem', fontWeight: 900 }}>
-                    {tradeFilterSet.size}
-                  </span>
-                )}
-              </div>
-
-              <div style={{ fontSize: '0.62rem', fontWeight: 700, color: '#ccc', textTransform: 'uppercase', letterSpacing: '0.07em', marginBottom: '0.5rem' }}>Type</div>
-              {[
-                { key: 'STRADDLE', color: GOLD_DEEP },
-                { key: 'WIN',      color: '#16a34a' },
-                { key: 'LOSS',     color: '#dc2626' },
-              ].map(({ key, color }) => {
-                const on = tradeFilterSet.has(key)
-                return (
-                  <div key={key} onClick={() => toggleTradeFilter(key)} style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer', padding: '0.3rem 0.4rem', borderRadius: '7px', userSelect: 'none', transition: 'background 0.13s', background: on ? `${color}18` : 'transparent' }}>
-                    <span style={{ width: '16px', height: '16px', borderRadius: '4px', flexShrink: 0, border: `2px solid ${on ? color : 'rgba(0,0,0,0.15)'}`, background: on ? color : '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', transition: 'all 0.14s' }}>
-                      {on && <span style={{ color: '#fff', fontSize: '9px', fontWeight: 900, lineHeight: 1 }}>✓</span>}
-                    </span>
-                    <span style={{ fontSize: '0.8rem', fontWeight: 700, color: on ? '#111' : '#888', transition: 'color 0.14s' }}>{key}</span>
-                  </div>
-                )
-              })}
-
-              <div style={{ fontSize: '0.62rem', fontWeight: 700, color: '#ccc', textTransform: 'uppercase', letterSpacing: '0.07em', margin: '0.85rem 0 0.5rem' }}>Time</div>
-              {['1H', '2H', '3H'].map(key => {
-                const on = tradeFilterSet.has(key)
-                return (
-                  <div key={key} onClick={() => toggleTradeFilter(key)} style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer', padding: '0.3rem 0.4rem', borderRadius: '7px', userSelect: 'none', transition: 'background 0.13s', background: on ? 'rgba(99,102,241,0.08)' : 'transparent' }}>
-                    <span style={{ width: '16px', height: '16px', borderRadius: '4px', flexShrink: 0, border: `2px solid ${on ? '#6366f1' : 'rgba(0,0,0,0.15)'}`, background: on ? '#6366f1' : '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', transition: 'all 0.14s' }}>
-                      {on && <span style={{ color: '#fff', fontSize: '9px', fontWeight: 900, lineHeight: 1 }}>✓</span>}
-                    </span>
-                    <span style={{ fontSize: '0.8rem', fontWeight: 700, color: on ? '#111' : '#888', transition: 'color 0.14s' }}>{key}</span>
-                  </div>
-                )
-              })}
-
-              {tradeFilterSet.size > 0 && (
-                <button onClick={() => setTradeFilterSet(new Set())} style={{ marginTop: '0.9rem', width: '100%', padding: '0.35rem 0', borderRadius: '7px', border: '1px solid rgba(239,68,68,0.25)', background: 'rgba(239,68,68,0.06)', color: '#ef4444', fontSize: '0.74rem', fontWeight: 700, cursor: 'pointer', transition: 'all 0.14s' }}>
-                  ✕ Clear
-                </button>
-              )}
-            </div>
-
-            {/* ── Right content ── */}
-            <div style={{ flex: 1, minWidth: 0 }}>
+          <div>
           {sorted.length === 0 ? (
             <div style={S.empty}>
               <div style={S.emptyIcon}>📋</div>
@@ -1738,7 +1637,6 @@ export default function OverallSummary() {
               </div>
             </>
           )}
-            </div>
           </div>
         </div>
 

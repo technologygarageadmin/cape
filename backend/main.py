@@ -94,7 +94,7 @@ from monitoring import monitor_with_polling, monitor_with_websocket
 from order_execution import place_market_order, wait_for_fill
 from rsi_analyer import analyze_rsi
 from strategy_helpers import determine_signal, get_expiry_date
-from symbol_mode import get_mode, set_mode
+from symbol_mode import ensure_defaults, get_mode, set_mode
 
 
 CST = ZoneInfo("America/Chicago")
@@ -612,9 +612,10 @@ def main() -> None:
 
     write_log({"action": "STARTUP", "symbol": SYMBOL, "status": "Monitoring started"})
 
-    # Always boot in AIT (auto) mode — frontend can override via /api/symbol/mode
-    set_mode(SYMBOL, "auto")
-    info(f" Symbol mode: AIT (auto) — frontend can switch via the watchlist toggle.")
+    # Ensure symbol_modes.json has defaults for all watchlist symbols.
+    # Only fills in MISSING entries — never overwrites a mode the user set via the UI.
+    ensure_defaults()
+    info(f" Symbol mode for {SYMBOL}: {get_mode(SYMBOL)} (from symbol_modes.json)")
 
     stock_client = StockHistoricalDataClient(API_KEY, SECRET_KEY)
     option_data_client = OptionHistoricalDataClient(API_KEY, SECRET_KEY)

@@ -154,15 +154,25 @@ from config import (
     EXIT_SAME_CANDLE_USE_BID_PRICE,
     ENTRY_ALLOW_PREV_BAR_CROSS, MIN_RSI_MA_GAP, PAPER_TRADING, POST_TRADE_COOLDOWN_BARS,
     QTY, QP_GAP_PCT, RSI_MA_PERIOD, RSI_PERIOD, SECRET_KEY,
-    STOCK_DATA_FEED, STOP_LOSS_PCT, STRADDLE_ENABLED, SYMBOL, TAKE_PROFIT_PCT, WATCHLIST_SYMBOLS,
+    STOCK_DATA_FEED, STOP_LOSS_PCT, STRADDLE_ENABLED, STRADDLE_OPEN_WINDOW_MIN,
+    SYMBOL, TAKE_PROFIT_PCT, WATCHLIST_SYMBOLS,
+    EXIT_TAKE_PROFIT_ENABLED, EXIT_STOP_LOSS_ENABLED, PRICE_POLL_SEC,
+    AIT_ENABLED, MT_ENABLED,
+    AIT_ENTRY_ENABLED, AIT_EXIT_ENABLED,
+    MONGO_COLLECTION_NAME,
 )
 from market_data import fetch_current_price_1m, fetch_obr, get_option_price, select_best_contract
 from strategy_helpers import determine_signal, get_expiry_date, ny_trading_date
 from rsi_analyer import analyze_rsi
-from symbol_mode import get_mode, set_mode, get_all_modes, VALID_MODES
+from symbol_mode import ensure_defaults, get_mode, set_mode, get_all_modes, VALID_MODES
 from monitoring import monitor_with_polling, monitor_with_websocket
-from order_execution import place_market_order, wait_for_fill, register_position, mark_selling, close_position, get_open_positions, get_live_positions
+from order_execution import (
+    place_market_order, wait_for_fill, register_position, mark_selling,
+    close_position, get_open_positions, get_live_positions,
+    update_live_exit_state, set_live_exit_reason,
+)
 from position_monitor_loop import start_position_monitor_service
+from logger import log_trade
 
 
 WATCHLIST_DEFAULT = [
@@ -484,8 +494,8 @@ app.add_middleware(
 # ─────────────────────────────────────────────────────────────────────────────
 
 _straddle_col = None                 # pymongo Collection, set at startup
-_manual_trades_col = None            # pymongo Collection, set at startup
-_options_log_col = None              # pymongo Collection, set at startup
+_options_log_col = None              # pymongo Collection — single collection for ALL trade types
+_manual_trades_col = None            # alias → same as _options_log_col (kept for backward compat)
 _STRADDLE_TP_PCT = 0.02              # 2% stock move → WIN
 ET = ZoneInfo("America/New_York")
 
@@ -500,15 +510,15 @@ def _init_straddle_mongo() -> None:
         client.admin.command("ping")
         db = client[MONGO_DB_NAME]
         _straddle_col = db["straddle_trades"]
-        _manual_trades_col = db["manual_trade_history"]
-        _options_log_col = db["options_log"]
+        _options_log_col = db[MONGO_COLLECTION_NAME]   # single collection for all trade types
+        _manual_trades_col = _options_log_col           # same collection — no separate manual store
         # Index for fast per-symbol queries
         _straddle_col.create_index([("symbol", 1), ("date", -1)])
-        _manual_trades_col.create_index([("symbol", 1), ("created_at", -1)])
         _options_log_col.create_index([("symbol", 1), ("created_at", -1)])
-        print("[straddle] MongoDB connected — straddle_trades ready")
+        _options_log_col.create_index([("trade_type", 1), ("created_at", -1)])
+        print("[straddle] MongoDB connected — all trades → options_log")
     except Exception as ex:
-        print(f"[straddle] MongoDB unavailable ({ex}) — straddle trades will not be persisted")
+        print(f"[straddle] MongoDB unavailable ({ex}) — trades will not be persisted")
         _straddle_col = None
         _manual_trades_col = None
         _options_log_col = None
@@ -912,6 +922,168 @@ def _ait_wait_for_market_open(tc: TradingClient, symbol: str) -> None:
             time.sleep(30)
 
 
+def _poll_straddle_call_call_day(
+    odc: "OptionHistoricalDataClient",
+    contract_symbol: str,
+    fill_price: float,
+    tp_pct: float,
+    sl_pct: float,
+    buy_order_id: str | None,
+    symbol: str,
+    call_day_event: threading.Event,
+) -> tuple[str, float, dict]:
+    """
+    Polling monitor for the CALL straddle leg with CALL-day override.
+
+    Normal mode : exits at TP or SL (like standard straddle monitoring).
+    CALL-day    : call_day_event is set when PUT exited at a loss first.
+                  In CALL-day mode the SL is suppressed — we wait for TP only,
+                  because the market direction has been confirmed bullish.
+    """
+    max_pnl_pct = 0.0
+    label = f"[STRADDLE {symbol} CALL] "
+    exit_state = {
+        "tp_pct": tp_pct,
+        "sl_static_pct": sl_pct,
+        "sl_dynamic_pct": sl_pct,
+        "qp_dynamic_pct": 0.0,
+        "qp_floor_pct": 0.0,
+        "qp_gap_pct": 0.0,
+        "max_pnl_pct": 0.0,
+        "peak_pnl_pct": 0.0,
+    }
+
+    while True:
+        time.sleep(PRICE_POLL_SEC)
+        try:
+            snaps = odc.get_option_snapshot(
+                build_option_snapshot_request([contract_symbol])
+            )
+            snap = extract_snapshot_for_symbol(snaps, contract_symbol)
+            price = extract_snapshot_mid_price(snap)
+        except Exception as ex:
+            print(f"{label}Price fetch error: {ex}")
+            continue
+
+        if price <= 0:
+            continue
+
+        quote = getattr(snap, "latest_quote", None) or getattr(snap, "quote", None)
+        bid = float(
+            getattr(quote, "bid_price", 0) or getattr(quote, "bp", 0) or 0
+        ) if quote else 0.0
+        sellable = bid if bid > 0 else price
+
+        pnl_pct = (sellable - fill_price) / fill_price * 100
+        max_pnl_pct = max(max_pnl_pct, pnl_pct)
+        exit_state["max_pnl_pct"] = max_pnl_pct
+        exit_state["peak_pnl_pct"] = max_pnl_pct
+
+        if buy_order_id:
+            update_live_exit_state(buy_order_id, exit_state, pnl_pct, sellable)
+
+        call_day = call_day_event.is_set()
+        print(
+            f"{label}Poll mid={price:.4f} sellable={sellable:.4f} pnl={pnl_pct:+.2f}%"
+            + (" [CALL DAY — SL disabled]" if call_day else "")
+        )
+
+        # Always check TP
+        if EXIT_TAKE_PROFIT_ENABLED and pnl_pct >= tp_pct:
+            if buy_order_id:
+                set_live_exit_reason(buy_order_id, "TAKE_PROFIT_EXIT")
+            print(f"{label}TAKE_PROFIT_EXIT at {sellable:.4f}")
+            return "TAKE_PROFIT_EXIT", sellable, exit_state
+
+        # SL only active in normal mode (not CALL day)
+        if not call_day and EXIT_STOP_LOSS_ENABLED and pnl_pct <= sl_pct:
+            if buy_order_id:
+                set_live_exit_reason(buy_order_id, "STOP_LOSS_EXIT")
+            print(f"{label}STOP_LOSS_EXIT at {sellable:.4f}")
+            return "STOP_LOSS_EXIT", sellable, exit_state
+
+
+def _poll_straddle_call_call_day(
+    odc: "OptionHistoricalDataClient",
+    contract_symbol: str,
+    fill_price: float,
+    tp_pct: float,
+    sl_pct: float,
+    buy_order_id: str | None,
+    symbol: str,
+    call_day_event: threading.Event,
+) -> tuple[str, float, dict]:
+    """
+    Polling monitor for the CALL straddle leg with CALL-day override.
+
+    Normal mode : exits at TP or SL (like standard straddle monitoring).
+    CALL-day    : call_day_event is set when PUT exited at a loss first.
+                  In CALL-day mode the SL is suppressed — we wait for TP only,
+                  because the market direction has been confirmed bullish.
+    """
+    max_pnl_pct = 0.0
+    label = f"[STRADDLE {symbol} CALL] "
+    exit_state = {
+        "tp_pct": tp_pct,
+        "sl_static_pct": sl_pct,
+        "sl_dynamic_pct": sl_pct,
+        "qp_dynamic_pct": 0.0,
+        "qp_floor_pct": 0.0,
+        "qp_gap_pct": 0.0,
+        "max_pnl_pct": 0.0,
+        "peak_pnl_pct": 0.0,
+    }
+
+    while True:
+        time.sleep(PRICE_POLL_SEC)
+        try:
+            snaps = odc.get_option_snapshot(
+                build_option_snapshot_request([contract_symbol])
+            )
+            snap = extract_snapshot_for_symbol(snaps, contract_symbol)
+            price = extract_snapshot_mid_price(snap)
+        except Exception as ex:
+            print(f"{label}Price fetch error: {ex}")
+            continue
+
+        if price <= 0:
+            continue
+
+        quote = getattr(snap, "latest_quote", None) or getattr(snap, "quote", None)
+        bid = float(
+            getattr(quote, "bid_price", 0) or getattr(quote, "bp", 0) or 0
+        ) if quote else 0.0
+        sellable = bid if bid > 0 else price
+
+        pnl_pct = (sellable - fill_price) / fill_price * 100
+        max_pnl_pct = max(max_pnl_pct, pnl_pct)
+        exit_state["max_pnl_pct"] = max_pnl_pct
+        exit_state["peak_pnl_pct"] = max_pnl_pct
+
+        if buy_order_id:
+            update_live_exit_state(buy_order_id, exit_state, pnl_pct, sellable)
+
+        call_day = call_day_event.is_set()
+        print(
+            f"{label}Poll mid={price:.4f} sellable={sellable:.4f} pnl={pnl_pct:+.2f}%"
+            + (" [CALL DAY — SL disabled]" if call_day else "")
+        )
+
+        # Always check TP
+        if EXIT_TAKE_PROFIT_ENABLED and pnl_pct >= tp_pct:
+            if buy_order_id:
+                set_live_exit_reason(buy_order_id, "TAKE_PROFIT_EXIT")
+            print(f"{label}TAKE_PROFIT_EXIT at {sellable:.4f}")
+            return "TAKE_PROFIT_EXIT", sellable, exit_state
+
+        # SL only active in normal mode (not CALL day)
+        if not call_day and EXIT_STOP_LOSS_ENABLED and pnl_pct <= sl_pct:
+            if buy_order_id:
+                set_live_exit_reason(buy_order_id, "STOP_LOSS_EXIT")
+            print(f"{label}STOP_LOSS_EXIT at {sellable:.4f}")
+            return "STOP_LOSS_EXIT", sellable, exit_state
+
+
 def _ait_run_straddle(
     symbol: str,
     sc: StockHistoricalDataClient,
@@ -919,6 +1091,42 @@ def _ait_run_straddle(
     tc: TradingClient,
 ) -> None:
     """Execute a CALL+PUT straddle for symbol: place real orders, monitor, sell, log to MongoDB."""
+
+    # ── Timing guard: straddle only in first STRADDLE_OPEN_WINDOW_MIN after open ──
+    now_et = datetime.now(ET)
+    mkt_open_et = now_et.replace(hour=9, minute=30, second=0, microsecond=0)
+    seconds_since_open = (now_et - mkt_open_et).total_seconds()
+
+    if seconds_since_open < 0:
+        print(f"[AIT:{symbol}] Straddle skipped — market not yet open.")
+        return
+
+    if seconds_since_open >= STRADDLE_OPEN_WINDOW_MIN * 60:
+        print(
+            f"[AIT:{symbol}] Straddle skipped — past {STRADDLE_OPEN_WINDOW_MIN}-min "
+            f"entry window ({now_et.strftime('%H:%M:%S')} ET)."
+        )
+        return
+
+    # ── Wait for second candle (at least 60 s after open = 9:31 ET) ──
+    wait_for_candle = max(0.0, 60.0 - seconds_since_open)
+    if wait_for_candle > 0:
+        print(
+            f"[AIT:{symbol}] Straddle: waiting {wait_for_candle:.0f}s for second candle "
+            f"(first candle still open)..."
+        )
+        time.sleep(wait_for_candle)
+
+    # Re-check window after the candle wait
+    now_et = datetime.now(ET)
+    seconds_since_open = (now_et - mkt_open_et).total_seconds()
+    if seconds_since_open >= STRADDLE_OPEN_WINDOW_MIN * 60:
+        print(
+            f"[AIT:{symbol}] Straddle skipped — past window after candle wait "
+            f"({now_et.strftime('%H:%M:%S')} ET)."
+        )
+        return
+
     current_price: float | None = None
     price_bartime = "N/A"
     for attempt in range(1, 25):
@@ -990,6 +1198,9 @@ def _ait_run_straddle(
 
     expiry_ref = expiry   # capture for closures
 
+    # Shared state: fires when PUT exits at a loss → CALL day (CALL SL disabled).
+    call_day_event = threading.Event()
+
     def _monitor_and_sell(leg: dict) -> None:
         leg_name = leg["leg_name"]
         contract = leg["contract"]
@@ -997,24 +1208,18 @@ def _ait_run_straddle(
         tp_price = leg["tp_price"]
         sl_price = leg["sl_price"]
         buy_order_id = leg["buy_order_id"]
+        tp_pct = (tp_price / fill_price - 1.0) * 100.0
+        sl_pct = (sl_price / fill_price - 1.0) * 100.0
         try:
             if leg_name == "CALL":
-                exit_reason, opt_price, exit_state = monitor_with_websocket(
-                    contract.symbol, fill_price, tp_price, sl_price,
-                    context_label=f"STRADDLE {symbol} {leg_name}", signal=leg_name,
-                    underlying_symbol=symbol,
-                    use_extended_exit_criteria=False,
-                    buy_order_id=buy_order_id,
+                # CALL leg: custom polling that respects the CALL-day override
+                # (SL disabled once PUT exits at loss, confirming bullish direction).
+                exit_reason, opt_price, exit_state = _poll_straddle_call_call_day(
+                    odc, contract.symbol, fill_price, tp_pct, sl_pct,
+                    buy_order_id, symbol, call_day_event,
                 )
-                if exit_reason is None:
-                    exit_reason, opt_price, exit_state = monitor_with_polling(
-                        odc, contract.symbol, fill_price, tp_price, sl_price,
-                        context_label=f"STRADDLE {symbol} {leg_name}", signal=leg_name,
-                        underlying_symbol=symbol,
-                        use_extended_exit_criteria=False,
-                        buy_order_id=buy_order_id,
-                    )
             else:
+                # PUT leg: standard no-extended polling (TP + SL only).
                 exit_reason, opt_price, exit_state = monitor_with_polling(
                     odc, contract.symbol, fill_price, tp_price, sl_price,
                     context_label=f"STRADDLE {symbol} {leg_name}", signal=leg_name,
@@ -1043,6 +1248,16 @@ def _ait_run_straddle(
             pnl_pct = (sell_price - fill_price) / fill_price * 100
             pnl_dollar = round((sell_price - fill_price) * QTY * 100, 2)
             result = "WIN" if pnl_pct > 0 else "LOSS" if pnl_pct < 0 else "BREAKEVEN"
+
+            # ── CALL day: PUT exited at a loss → market is moving up ──
+            # Signal the CALL leg to disable its SL so it can ride to TP.
+            if leg_name == "PUT" and result == "LOSS" and not call_day_event.is_set():
+                call_day_event.set()
+                print(
+                    f"[AIT:{symbol}] Straddle PUT exited at LOSS ({pnl_pct:+.2f}%) "
+                    f"— CALL day declared, CALL SL disabled"
+                )
+
             print(
                 f"[AIT:{symbol}] Straddle {leg_name} SOLD: {sell_price:.4f} "
                 f"| PnL: {pnl_pct:+.2f}% | {exit_reason} "
@@ -1057,7 +1272,7 @@ def _ait_run_straddle(
                         _s_dur = round((datetime.fromisoformat(sell_filled_time_iso) - datetime.fromisoformat(_bt)).total_seconds())
                 except Exception:
                     pass
-                _options_log_col.insert_one({
+                _straddle_doc = {
                     "symbol": symbol, "contract_name": contract.symbol,
                     "direction": leg_name, "option_type": leg_name,
                     "strike_price": float(contract.strike_price), "expiry": str(expiry_ref),
@@ -1083,7 +1298,9 @@ def _ait_run_straddle(
                     "exit_sl_pct":  round(float(exit_state.get("sl_dynamic_pct", 0.0)), 4),
                     "exit_qp_pct":  round(float(exit_state.get("qp_dynamic_pct", 0.0)), 4),
                     "exit_tp_pct":  round(float(exit_state.get("tp_pct", 0.0)), 4),
-                })
+                }
+                _options_log_col.insert_one(_straddle_doc)
+                log_trade("STRADDLE", _straddle_doc)
         except Exception as ex:
             print(f"[AIT:{symbol}] Straddle {leg_name} monitor/sell error: {ex}")
 
@@ -1412,7 +1629,7 @@ def _ait_trade_loop(
                 _indicators = entry_info.get("indicators", {}) if entry_info else {}
                 _filters = entry_info.get("filters_passed", []) if entry_info else []
 
-                _options_log_col.insert_one({
+                _ait_doc = {
                     "symbol": symbol, "contract_name": contract_symbol,
                     "direction": signal, "option_type": signal,
                     "strike_price": contract_strike, "expiry": str(expiry),
@@ -1459,7 +1676,9 @@ def _ait_trade_loop(
                     "entry_trend": rsi_result.get("base_trend"),
                     "entry_vwap": _indicators.get("vwap"),
                     "entry_price_above_vwap": _indicators.get("price_above_vwap"),
-                })
+                }
+                _options_log_col.insert_one(_ait_doc)
+                log_trade("AIT", _ait_doc)
 
             cooldown_bars_remaining = POST_TRADE_COOLDOWN_BARS
             time.sleep(CHECK_INTERVAL_SEC)
@@ -1921,6 +2140,9 @@ def _start_ait_threads() -> None:
 
 @app.on_event("startup")
 async def _startup() -> None:
+    # Ensure symbol_modes.json has defaults for all watchlist symbols.
+    # Only fills MISSING entries — never overwrites a mode the user/frontend already set.
+    ensure_defaults()
     _init_straddle_mongo()
     asyncio.create_task(_straddle_runner_loop())
     asyncio.create_task(_straddle_monitor_loop())
@@ -2261,64 +2483,22 @@ def close_position_endpoint(symbol: str) -> dict[str, Any]:
             elif cp == "P":
                 option_type = "put"
 
-        if _manual_trades_col is not None:
+        if _options_log_col is not None:
             _sl_base = -STOP_LOSS_PCT * 100
-            _pnl_pct = (sell_price - float(buy_price)) / float(buy_price) * 100
+            _m_pnl_pct = round((float(sell_price) - float(buy_price)) / float(buy_price) * 100, 4) if float(buy_price) else None
             _snap = {
-                "peak_pnl_pct": round(_pnl_pct, 4),
-                "exit_sl_pct":  round(max(_sl_base, _pnl_pct + _sl_base), 4),
-                "exit_qp_pct":  round(max(0.0, _pnl_pct - QP_GAP_PCT) if _pnl_pct > 0.0 else 0.0, 4),
+                "peak_pnl_pct": round(_m_pnl_pct or 0.0, 4),
+                "exit_sl_pct":  round(max(_sl_base, (_m_pnl_pct or 0.0) + _sl_base), 4),
+                "exit_qp_pct":  round(max(0.0, (_m_pnl_pct or 0.0) - QP_GAP_PCT) if (_m_pnl_pct or 0.0) > 0.0 else 0.0, 4),
                 "exit_tp_pct":  round(TAKE_PROFIT_PCT * 100, 4),
             }
-            doc = {
-                "symbol": underlying_symbol,
-                "name": underlying_symbol,
-                "contract_name": contract_name,
-                "strike_price": "—",
-                "option_type": option_type,
-                "direction": direction,
-                "expiry": "—",
-                "qty": qty,
-                "buy_price": float(buy_price),
-                "sell_price": float(sell_price),
-                "pnl": float(pnl),
-                "result": result_label,
-                "entry_time": entry_time or "—",
-                "exit_time": now_iso,
-                "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-                "exit_reason": exit_reason,
-                **_snap,
-            }
-            ins = _manual_trades_col.insert_one(doc)
-            logged_trade = {
-                "id": str(ins.inserted_id),
-                "type": "manual",
-                "symbol": doc["symbol"],
-                "name": doc["name"],
-                "contractName": doc["contract_name"],
-                "strikePrice": doc["strike_price"],
-                "optionType": doc["option_type"],
-                "direction": doc["direction"],
-                "expiry": doc["expiry"],
-                "qty": doc["qty"],
-                "buyPrice": doc["buy_price"],
-                "sellPrice": doc["sell_price"],
-                "pnl": doc["pnl"],
-                "result": doc["result"],
-                "entryTime": doc["entry_time"],
-                "exitTime": doc["exit_time"],
-                "exitReason": exit_reason,
-            }
-
-        if _options_log_col is not None:
-            _m_pnl_pct = round((float(sell_price) - float(buy_price)) / float(buy_price) * 100, 4) if float(buy_price) else None
             _m_dur = None
             try:
                 if entry_time and now_iso:
                     _m_dur = round((datetime.fromisoformat(now_iso) - datetime.fromisoformat(entry_time)).total_seconds())
             except Exception:
                 pass
-            _options_log_col.insert_one({
+            _ml_doc = {
                 "symbol": underlying_symbol,
                 "name": underlying_symbol,
                 "contract_name": contract_name,
@@ -2347,7 +2527,27 @@ def close_position_endpoint(symbol: str) -> dict[str, Any]:
                 "created_at": datetime.now(CDT),
                 "trade_duration_sec": _m_dur,
                 **_snap,
-            })
+            }
+            ins = _options_log_col.insert_one(_ml_doc)
+            logged_trade = {
+                "id": str(ins.inserted_id),
+                "type": "manual",
+                "symbol": _ml_doc["symbol"],
+                "name": _ml_doc["name"],
+                "contractName": _ml_doc["contract_name"],
+                "strikePrice": _ml_doc["strike_price"],
+                "optionType": _ml_doc["option_type"],
+                "direction": _ml_doc["direction"],
+                "expiry": _ml_doc["expiry"],
+                "qty": _ml_doc["qty"],
+                "buyPrice": _ml_doc["buy_price"],
+                "sellPrice": _ml_doc["sell_price"],
+                "pnl": _ml_doc["pnl"],
+                "result": _ml_doc["result"],
+                "entryTime": _ml_doc["entry_time"],
+                "exitTime": _ml_doc["exit_time"],
+                "exitReason": exit_reason,
+            }
 
     return {
         "message": "position_close_requested",
@@ -2517,7 +2717,11 @@ def get_account() -> dict[str, Any]:
 
 
 @app.get("/api/options/suggest")
-def suggest_options(symbol: str = Query(default=SYMBOL)) -> dict[str, Any]:
+def suggest_options(
+    symbol: str = Query(default=SYMBOL),
+    option_type: str | None = Query(default=None, description="Override RSI signal: 'call' or 'put'"),
+    strike_price: float | None = Query(default=None, description="Override strike anchor; finds nearest listed contract"),
+) -> dict[str, Any]:
     """
     Suggest the best option contract for manual trading.
     Uses live price → OBR → RSI trend → select_best_contract from existing modules.
@@ -2578,7 +2782,17 @@ def suggest_options(symbol: str = Query(default=SYMBOL)) -> dict[str, Any]:
     direction   = "uptrend"  if signal_name == "CALL" else "downtrend"
     option_type = "call"     if signal_name == "CALL" else "put"
 
-    # ── 5. Candidate expiries (try nearest first, then next weekly expiries) ─────────
+    # ── 4b. Honour manual overrides from the UI ──────────────────────────────
+    if option_type is not None:
+        forced = option_type.strip().lower()
+        if forced in ("call", "put"):
+            signal_name   = forced.upper()
+            contract_type = ContractType.CALL if forced == "call" else ContractType.PUT
+            direction     = "uptrend" if forced == "call" else "downtrend"
+            option_type   = forced
+
+    # Anchor for contract selection: prefer user-supplied strike, fall back to live price
+    price_anchor = float(strike_price) if strike_price else current_price
     base_expiry = get_expiry_date(ny_trading_date())
     expiry_candidates = [
         base_expiry,
@@ -2589,7 +2803,7 @@ def suggest_options(symbol: str = Query(default=SYMBOL)) -> dict[str, Any]:
 
     # ── 6. Best liquid contract — must come from Alpaca listed contracts ─────────────
     contract_name: str | None = None
-    strike_price: float | None = None
+    found_strike: float | None = None
     expiry = base_expiry
     last_err_msg = ""
 
@@ -2601,12 +2815,12 @@ def suggest_options(symbol: str = Query(default=SYMBOL)) -> dict[str, Any]:
                 ticker,
                 exp,
                 contract_type,
-                current_price,
+                price_anchor,          # use user's strike as anchor if provided
                 min_option_volume=5,
                 allow_low_volume_fallback=True,
                 fallback_windows=[1.0, 2.5, 5.0],
             )
-            strike_price = float(contract.strike_price)
+            found_strike = float(contract.strike_price)
             contract_name = contract.symbol
             expiry = exp
             break
@@ -2626,7 +2840,7 @@ def suggest_options(symbol: str = Query(default=SYMBOL)) -> dict[str, Any]:
     return {
         "symbol":        ticker,
         "current_price": current_price,
-        "strike_price":  strike_price,
+        "strike_price":  found_strike,
         "direction":     direction,
         "option_type":   option_type,
         "expiry":        str(expiry),
@@ -2760,8 +2974,8 @@ def get_order_status(order_id: str) -> dict[str, Any]:
 
 @app.post("/api/manual-trades")
 def create_manual_trade(body: ManualTradeHistoryBody) -> dict[str, Any]:
-    if _manual_trades_col is None:
-        raise HTTPException(status_code=503, detail="Manual trade DB is unavailable")
+    if _options_log_col is None:
+        raise HTTPException(status_code=503, detail="Trade DB is unavailable")
 
     doc = {
         "symbol": body.symbol.strip().upper(),
@@ -2778,10 +2992,257 @@ def create_manual_trade(body: ManualTradeHistoryBody) -> dict[str, Any]:
         "result": body.result,
         "entry_time": body.entry_time,
         "exit_time": body.exit_time,
+        "trade_type": "MANUAL",
         "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
-    ins = _manual_trades_col.insert_one(doc)
+    ins = _options_log_col.insert_one(doc)
     return {"id": str(ins.inserted_id), "message": "manual_trade_saved"}
+
+
+# ── Manual Trade: immediate buy + backend-monitored exit ─────────────────────
+
+class ManualTradeBuyBody(BaseModel):
+    contract_symbol: str = Field(..., description="Alpaca option contract symbol, e.g. SPY260403C00650000")
+    underlying: str = Field(..., description="Underlying ticker, e.g. SPY")
+    qty: int = Field(default=1, gt=0)
+
+
+def _manual_trade_monitor_thread(
+    tc: "TradingClient",
+    odc: "OptionHistoricalDataClient",
+    contract_symbol: str,
+    underlying: str,
+    entry_price: float,
+    qty: int,
+    buy_order_id: str,
+    entry_time_iso: str,
+) -> None:
+    """
+    Monitor a manually entered option position using the same exit strategy as AIT.
+    Sells when TP/SL/QP/bad-entry/time triggers fire, then logs to manual_trade_history.
+    """
+    parsed = _parse_option_contract(contract_symbol)
+    option_type = parsed.get("option_type", "").upper() if parsed else "—"
+    signal = option_type or "CALL"   # fallback so monitor_with_polling gets a direction label
+
+    tp_price = entry_price * (1 + TAKE_PROFIT_PCT)
+    sl_price = entry_price * (1 - STOP_LOSS_PCT)
+
+    print(
+        f"[MT:{underlying}] Monitor started for {contract_symbol} "
+        f"entry={entry_price:.4f} tp={tp_price:.4f} sl={sl_price:.4f}"
+    )
+
+    # 1. Monitor via websocket first, fallback to polling (same as AIT/recovery)
+    exit_reason, opt_price, exit_state = monitor_with_websocket(
+        contract_symbol, entry_price, tp_price, sl_price,
+        context_label=f"MANUAL {underlying} {signal}",
+        signal=signal,
+        underlying_symbol=underlying,
+        buy_order_id=buy_order_id,
+    )
+    if exit_reason is None:
+        exit_reason, opt_price, exit_state = monitor_with_polling(
+            odc, contract_symbol, entry_price, tp_price, sl_price,
+            context_label=f"MANUAL {underlying} {signal}",
+            signal=signal,
+            underlying_symbol=underlying,
+            buy_order_id=buy_order_id,
+        )
+
+    exit_reason = exit_reason or "FORCED_EXIT_NO_SIGNAL"
+    exit_signal_time_iso = datetime.now(CDT).isoformat(timespec="seconds")
+
+    # 2. Sell — try close_position, then market sell
+    sell_price = None
+    sell_order_id = None
+    sell_filled_time_iso = None
+    for _attempt in range(3):
+        try:
+            response = tc.close_position(contract_symbol)
+            order_id = str(getattr(response, "id", ""))
+            sell_order_id = order_id
+            mark_selling(buy_order_id, order_id)
+            filled = wait_for_fill(tc, order_id, FILL_WAIT_SEC)
+            if filled.status == OrderStatus.FILLED:
+                sell_price = float(filled.filled_avg_price or opt_price or 0)
+                sell_filled_time_iso = (
+                    _to_iso(getattr(filled, "filled_at", None))
+                    or datetime.now(CDT).isoformat(timespec="seconds")
+                )
+                break
+        except Exception as ex:
+            ex_str = str(ex)
+            if "position does not exist" in ex_str.lower() or "404" in ex_str:
+                close_position(buy_order_id)
+                print(f"[MT:{underlying}] Position already closed externally")
+                return
+            print(f"[MT:{underlying}] Close attempt {_attempt+1}/3: {ex}")
+            time.sleep(5)
+
+    if sell_price is None:
+        try:
+            sell_order = place_market_order(tc, contract_symbol, qty, OrderSide.SELL, allow_limit=False)
+            sell_order_id = str(sell_order.id)
+            mark_selling(buy_order_id, sell_order_id)
+            filled_sell = wait_for_fill(tc, sell_order_id, FILL_WAIT_SEC)
+            if filled_sell.status == OrderStatus.FILLED:
+                sell_price = float(filled_sell.filled_avg_price or opt_price or 0)
+                sell_filled_time_iso = (
+                    _to_iso(getattr(filled_sell, "filled_at", None))
+                    or datetime.now(CDT).isoformat(timespec="seconds")
+                )
+        except Exception as ex:
+            print(f"[MT:{underlying}] Market sell failed: {ex}")
+
+    close_position(buy_order_id)
+
+    if sell_price is None:
+        print(f"[MT:{underlying}] Could not obtain sell price for {contract_symbol}")
+        return
+
+    if sell_filled_time_iso is None:
+        sell_filled_time_iso = datetime.now(CDT).isoformat(timespec="seconds")
+
+    pnl_pct = (sell_price - entry_price) / entry_price * 100
+    pnl_dollar = round((sell_price - entry_price) * qty * 100, 2)
+    result = "WIN" if pnl_pct > 0 else "LOSS" if pnl_pct < 0 else "BREAKEVEN"
+
+    peak_pnl_pct   = exit_state.get("peak_pnl_pct")
+    exit_sl_pct    = exit_state.get("exit_sl_pct")
+    exit_tp_pct    = exit_state.get("exit_tp_pct")
+    exit_qp_pct    = exit_state.get("exit_qp_pct")
+
+    print(
+        f"[MT:{underlying}] SOLD {contract_symbol}: {sell_price:.4f} "
+        f"| PnL: {pnl_pct:+.2f}% (${pnl_dollar}) | {exit_reason}"
+    )
+
+    # 3. Log to manual_trade_history
+    if _manual_trades_col is not None:
+        try:
+            _manual_doc = {
+                "symbol": underlying,
+                "name": underlying,
+                "contract_name": contract_symbol,
+                "strike_price": parsed.get("strike", "—") if parsed else "—",
+                "option_type": option_type.lower() if option_type else "—",
+                "direction": signal.lower(),
+                "expiry": parsed.get("expiry", "—") if parsed else "—",
+                "qty": qty,
+                "buy_price": entry_price,
+                "sell_price": sell_price,
+                "pnl": pnl_dollar,
+                "pnl_pct": round(pnl_pct, 4),
+                "result": result,
+                "exit_reason": exit_reason,
+                "trade_type": "MANUAL",
+                "buy_order_id": buy_order_id,
+                "sell_order_id": sell_order_id,
+                "entry_time": entry_time_iso,
+                "exit_time": sell_filled_time_iso,
+                "exit_signal_time": exit_signal_time_iso,
+                "sell_filled_time": sell_filled_time_iso,
+                "peak_pnl_pct": peak_pnl_pct,
+                "exit_sl_pct": exit_sl_pct,
+                "exit_tp_pct": exit_tp_pct,
+                "exit_qp_pct": exit_qp_pct,
+                "created_at": datetime.now(CDT),
+            }
+            _manual_trades_col.insert_one(_manual_doc)
+            log_trade("MANUAL", _manual_doc)
+        except Exception as ex:
+            print(f"[MT:{underlying}] Failed to log trade to MongoDB: {ex}")
+
+
+@app.post("/api/manual-trade/buy")
+def manual_trade_buy(body: ManualTradeBuyBody) -> dict[str, Any]:
+    """
+    Place an immediate market buy for a manual option trade, wait for fill,
+    register with the position monitor, and start a background exit-strategy
+    thread. Returns immediately with fill details — no client-side polling needed.
+    """
+    contract = body.contract_symbol.strip().upper()
+    underlying = body.underlying.strip().upper()
+    qty = body.qty
+
+    # 1. Place market buy
+    try:
+        buy_order = place_market_order(trading_client, contract, qty, OrderSide.BUY)
+    except Exception as ex:
+        raise HTTPException(status_code=502, detail=f"Failed to place buy order: {str(ex)}") from ex
+
+    buy_order_id = str(buy_order.id)
+
+    # 2. Wait for fill
+    try:
+        filled = wait_for_fill(trading_client, buy_order_id, FILL_WAIT_SEC)
+    except Exception as ex:
+        raise HTTPException(status_code=502, detail=f"Fill wait error: {str(ex)}") from ex
+
+    fill_raw = getattr(filled, "filled_avg_price", None)
+    try:
+        fill_price = float(fill_raw) if fill_raw else None
+    except (TypeError, ValueError):
+        fill_price = None
+
+    if fill_price is None or fill_price <= 0:
+        # Fallback: fetch live quote
+        try:
+            fill_price = float(get_option_price(option_data_client, contract) or 0) or None
+        except Exception:
+            fill_price = None
+
+    if not fill_price:
+        raise HTTPException(status_code=502, detail="Order placed but fill price unavailable")
+
+    entry_time_iso = (
+        _to_iso(getattr(buy_order, "submitted_at", None))
+        or _to_iso(getattr(filled, "filled_at", None))
+        or datetime.now(CDT).isoformat(timespec="seconds")
+    )
+
+    # 3. Register position so it appears in LivePositions UI
+    tp_price = fill_price * (1 + TAKE_PROFIT_PCT)
+    sl_price = fill_price * (1 - STOP_LOSS_PCT)
+    register_position(
+        buy_order_id=buy_order_id,
+        symbol=underlying,
+        contract_symbol=contract,
+        qty=qty,
+        fill_price=fill_price,
+        tp_price=tp_price,
+        sl_price=sl_price,
+        leg_name="MANUAL",
+        trade_type="MANUAL",
+        entry_time=entry_time_iso,
+    )
+
+    # 4. Start background monitor thread
+    t = threading.Thread(
+        target=_manual_trade_monitor_thread,
+        args=(trading_client, option_data_client, contract, underlying,
+              fill_price, qty, buy_order_id, entry_time_iso),
+        daemon=True,
+        name=f"MT-{underlying}-{buy_order_id[:8]}",
+    )
+    t.start()
+
+    print(
+        f"[MT:{underlying}] BUY filled: {contract} @ {fill_price:.4f} "
+        f"qty={qty} | monitor thread started"
+    )
+
+    return {
+        "order_id":   buy_order_id,
+        "status":     "monitoring",
+        "fill_price": fill_price,
+        "contract":   contract,
+        "qty":        qty,
+        "entry_time": entry_time_iso,
+        "tp_price":   tp_price,
+        "sl_price":   sl_price,
+    }
 
 
 @app.get("/api/manual-trades")
@@ -2789,14 +3250,14 @@ def get_manual_trades(
     symbol: str | None = Query(default=None, description="Optional ticker filter"),
     limit: int = Query(default=100, ge=1, le=500),
 ) -> dict[str, Any]:
-    if _manual_trades_col is None:
+    if _options_log_col is None:
         return {"count": 0, "trades": []}
 
-    q: dict[str, Any] = {}
+    q: dict[str, Any] = {"trade_type": {"$in": ["MANUAL", "MANUAL_LIQUIDATE"]}}
     if symbol:
         q["symbol"] = symbol.strip().upper()
 
-    rows = list(_manual_trades_col.find(q).sort("created_at", -1).limit(limit))
+    rows = list(_options_log_col.find(q).sort("created_at", -1).limit(limit))
     trades = []
     for r in rows:
         trades.append(
@@ -2835,7 +3296,11 @@ def get_options_log(
     result: str | None = Query(default=None, description="Filter by result: WIN or LOSS"),
     limit: int = Query(default=100, ge=1, le=500),
 ) -> dict[str, Any]:
-    """Return options trade log entries from the options_log collection."""
+    """Return options trade log entries from the options_log collection.
+
+    By default returns all trade types (AIT, STRADDLE, RECOVERY, MANUAL, MANUAL_LIQUIDATE).
+    Use ?type_filter=AIT to restrict to a single type.
+    """
     if _options_log_col is None:
         return {"count": 0, "trades": []}
 
@@ -2950,6 +3415,48 @@ class SymbolModeBody(BaseModel):
     mode: str   = Field(..., description="'auto' (AIT) | 'off' | 'manual'")
 
 
+@app.get("/api/config/trading-modes")
+def get_trading_modes_config() -> dict[str, Any]:
+    """
+    Return global AIT / MT enable flags from config.py plus all current per-symbol modes.
+    Frontend uses this to lock/unlock UI controls and display active mode gates.
+    """
+    all_modes = get_all_modes()
+    # Compute per-symbol effective allowed modes
+    per_symbol: list[dict] = []
+    for sym, mode in all_modes.items():
+        allowed: list[str] = ["off"]
+        if AIT_ENABLED:
+            allowed.append("auto")
+        if MT_ENABLED:
+            allowed.append("manual")
+        per_symbol.append({
+            "symbol": sym,
+            "mode": mode,
+            "mode_label": {"auto": "AIT", "manual": "MT", "off": "OFF"}.get(mode, mode.upper()),
+            "watchlist_ait_on": WATCHLIST_SYMBOLS.get(sym, False),
+            "allowed_modes": allowed,
+        })
+
+    # Startup health: both disabled is a misconfiguration
+    config_healthy = AIT_ENABLED or MT_ENABLED
+    config_warning: str | None = None
+    if not AIT_ENABLED and not MT_ENABLED:
+        config_warning = "Both AIT and MT are disabled in config.py — no trades can be placed."
+    elif not AIT_ENABLED:
+        config_warning = "AIT is disabled in config.py — only Manual Trading is allowed."
+    elif not MT_ENABLED:
+        config_warning = "MT is disabled in config.py — only AIT (bot) trades are allowed."
+
+    return {
+        "ait_enabled": AIT_ENABLED,
+        "mt_enabled": MT_ENABLED,
+        "config_healthy": config_healthy,
+        "config_warning": config_warning,
+        "symbols": per_symbol,
+    }
+
+
 @app.get("/api/symbol/mode")
 def get_symbol_mode(symbol: str = Query(..., description="Ticker symbol")) -> dict[str, Any]:
     """
@@ -2981,6 +3488,11 @@ def set_symbol_mode(body: SymbolModeBody) -> dict[str, Any]:
     mode   = body.mode.strip().lower()
     if mode not in VALID_MODES:
         raise HTTPException(status_code=400, detail=f"Invalid mode '{mode}'. Must be one of {VALID_MODES}")
+    # Enforce global config gates
+    if mode == "auto" and not AIT_ENABLED:
+        raise HTTPException(status_code=403, detail="AIT is disabled in config.py — cannot set mode to 'auto'.")
+    if mode == "manual" and not MT_ENABLED:
+        raise HTTPException(status_code=403, detail="MT is disabled in config.py — cannot set mode to 'manual'.")
     set_mode(ticker, mode)
     return {"symbol": ticker, "mode": mode, "status": "updated"}
 

@@ -32,7 +32,7 @@ const INTERVAL_MAP = { '1m': '1Min', '5m': '5Min', '15m': '15Min', '1H': '1Hour'
 // Bars to fetch per interval to cover ~2 trading days
 const BARS_LIMIT = { '1m': 800, '5m': 200, '15m': 70, '1H': 20, '4H': 8, '1D': 5 }
 // Polling interval per chart interval (ms) — no faster than 30s
-const POLL_MS = { '1m': 30_000, '5m': 60_000, '15m': 120_000, '1H': 300_000, '4H': 300_000, '1D': 300_000 }
+const POLL_MS = { '1m': 5_000, '5m': 5_000, '15m': 5_000, '1H': 5_000, '4H': 5_000, '1D': 5_000 }
 // Normalize API bar: map `timestamp` field → `time` that CandleChart expects
 const normalizeBar = (b) => ({ ...b, time: b.time ?? b.timestamp })
 
@@ -105,9 +105,11 @@ export default function TradingView() {
   const autoTimerRef       = useRef(null)
   const lastBarTimeRef     = useRef(null)  // tracks latest bar timestamp for incremental polling
   const suggestContractRef = useRef(null)  // stores latest contract_name from /api/options/suggest
+  const optionTypeRef      = useRef('call')  // always holds latest optionType for stale-closure-safe intervals
 
   // Manual trade mode state
-  const [tradeMode, setTradeMode]           = useState(() => localStorage.getItem('cape_tradeMode') || 'ai')  // 'ai' | 'manual'
+  // Initialized as 'ai' — overwritten by symbolMode sync once /api/config/trading-modes responds
+  const [tradeMode, setTradeMode]           = useState('ai')  // 'ai' | 'manual'
   const [strikePrice, setStrikePrice]       = useState('')
   const [direction, setDirection]           = useState('uptrend')  // 'uptrend' | 'downtrend'
   const [optionType, setOptionType]         = useState('call')     // 'call' | 'put'
@@ -123,6 +125,9 @@ export default function TradingView() {
   const toastIdRef = useRef(0)
   const [livePositions, setLivePositions]     = useState([])
   const [histTimeFilter, setHistTimeFilter]   = useState('Today')
+  const [histTypeFilter, setHistTypeFilter]   = useState('All')  // 'All' | 'MT' | 'AIT'
+  // Global AIT/MT config gate from backend config.py
+  const [tradingConfig, setTradingConfig]     = useState({ ait_enabled: true, mt_enabled: true, config_healthy: true, config_warning: null, symbols: [] })
 
   // symbolMode: 'off' | 'auto' | 'manual' per symbol
   // Default to 'off' for all until backend sync resolves the correct per-symbol mode
@@ -130,26 +135,33 @@ export default function TradingView() {
     Object.fromEntries(STOCK_SYMBOLS.map(s => [s.symbol, 'off']))
   )
 
-  // On mount: sync all symbol modes from backend (backend always boots in 'auto')
+  // On mount: sync all symbol modes + global config gates from backend
   useEffect(() => {
-    Promise.all(
-      STOCK_SYMBOLS.map(s =>
-        fetch(`${API}/api/symbol/mode?symbol=${s.symbol}`)
-          .then(r => r.ok ? r.json() : null)
-          .catch(() => null)
-      )
-    ).then(results => {
-      const merged = {}
-      results.forEach(r => { if (r?.symbol && r?.mode) merged[r.symbol] = r.mode })
-      if (Object.keys(merged).length > 0)
-        setSymbolMode(prev => ({ ...prev, ...merged }))
-    })
+    const fetchConfig = () =>
+      fetch(`${API}/api/config/trading-modes`)
+        .then(r => r.ok ? r.json() : null)
+        .catch(() => null)
+        .then(cfg => {
+          if (!cfg) return
+          setTradingConfig(cfg)
+          const merged = {}
+          ;(cfg.symbols || []).forEach(s => { if (s.symbol && s.mode) merged[s.symbol] = s.mode })
+          if (Object.keys(merged).length > 0)
+            setSymbolMode(prev => ({ ...prev, ...merged }))
+          // Show warning toast if config misconfigured
+          if (!cfg.config_healthy)
+            pushToast(cfg.config_warning || 'Trading config error', 'error')
+          else if (cfg.config_warning)
+            pushToast(cfg.config_warning, 'info')
+        })
+    fetchConfig()
+    // Re-verify every 30s so UI stays in sync if config.py is edited and server restarted
+    const id = setInterval(fetchConfig, 30_000)
+    return () => clearInterval(id)
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Persist tradeMode to localStorage
-  useEffect(() => { localStorage.setItem('cape_tradeMode', tradeMode) }, [tradeMode])
-
   // Keep right-panel tradeMode in sync with the selected symbol's symbolMode
+  // (This is the ONLY place tradeMode is derived from — always backend-driven)
   useEffect(() => {
     const mode = symbolMode[selected.symbol]
     if (mode === 'auto') setTradeMode('ai')
@@ -193,6 +205,16 @@ export default function TradingView() {
     e.stopPropagation()
     const currentMode = symbolMode[sym]
     const newMode = currentMode === mode ? 'off' : mode
+
+    // ── Config gate enforcement ──────────────────────────────────────
+    if (newMode === 'auto' && !tradingConfig.ait_enabled) {
+      pushToast('AIT is disabled in config — cannot switch to AIT mode', 'error')
+      return
+    }
+    if (newMode === 'manual' && !tradingConfig.mt_enabled) {
+      pushToast('Manual Trading is disabled in config — cannot switch to MT mode', 'error')
+      return
+    }
 
     // Confirm before switching to OFF
     if (newMode === 'off') {
@@ -559,6 +581,22 @@ export default function TradingView() {
     return () => clearInterval(id)
   }, [])
 
+  // ── Backend registry positions: poll /api/live-positions for activity panel ──
+  const [registryPositions, setRegistryPositions] = useState([])
+  useEffect(() => {
+    const fetchRegistry = async () => {
+      try {
+        const res = await fetch(`${API}/api/live-positions`)
+        if (!res.ok) return
+        const data = await res.json()
+        setRegistryPositions(Array.isArray(data?.positions) ? data.positions : [])
+      } catch (_) {}
+    }
+    fetchRegistry()
+    const id = setInterval(fetchRegistry, 5_000)
+    return () => clearInterval(id)
+  }, [])
+
   // ── Polling: append new bars as they arrive (no full re-fetch) ────────────
   useEffect(() => {
     const pollNewBars = async () => {
@@ -717,6 +755,65 @@ export default function TradingView() {
     return () => { if (autoTimerRef.current) clearTimeout(autoTimerRef.current) }
   }, [autoTrade, tradeActive]) // eslint-disable-line react-hooks/exhaustive-deps
 
+  // ── Auto-detect backend exit: poll /api/live-positions every 5s ──────────
+  // When the backend monitor thread closes the position, monitoring_active flips
+  // to false. Detect this and auto-clear manualPosition so the UI reflects it.
+  useEffect(() => {
+    if (!manualPosition?.backendMonitored || !manualPosition?.orderId) return
+    const orderId = manualPosition.orderId
+    const checkBackendExit = async () => {
+      try {
+        const res = await fetch(`${API}/api/live-positions`)
+        if (!res.ok) return
+        const data = await res.json()
+        const positions = Array.isArray(data?.positions) ? data.positions : []
+        const myPos = positions.find(p => p.buy_order_id === orderId)
+        // If not found at all OR monitoring_active is false → backend exited
+        if (!myPos || myPos.live?.monitoring_active === false) {
+          // Re-fetch history so the backend-logged trade appears
+          try {
+            const normalize = (t, type) => ({
+              ...t,
+              id: t.id || String(Date.now() + Math.random()),
+              type,
+              name: STOCK_SYMBOLS.find(s => s.symbol === t.symbol)?.name || t.symbol,
+              contractName: t.contractName || t.symbol,
+              strikePrice: t.strikePrice ?? '—',
+              optionType: String(t.optionType || t.direction || '—').toLowerCase(),
+              buyPrice: Number(t.buyPrice) || 0,
+              sellPrice: Number(t.sellPrice) || 0,
+              pnl: Number(t.pnl) || 0,
+              entryTime: fmtEntryTime(t.entryTime),
+              exitTime: fmtEntryTime(t.exitTime),
+              _entryIso: t.entryTime || t.createdAt,
+            })
+            const [optRes, manRes] = await Promise.allSettled([
+              fetch(`${API}/api/options-log?limit=500`),
+              fetch(`${API}/api/manual-trades?limit=500`),
+            ])
+            let combined = []
+            if (optRes.status === 'fulfilled' && optRes.value.ok) {
+              const d = await optRes.value.json()
+              combined = [...combined, ...(d.trades || []).map(t => normalize(t, 'ai'))]
+            }
+            if (manRes.status === 'fulfilled' && manRes.value.ok) {
+              const d = await manRes.value.json()
+              combined = [...combined, ...(d.trades || []).map(t => normalize(t, 'manual'))]
+            }
+            if (combined.length > 0) setTradeHistory(combined)
+          } catch (_) {}
+          const exitReason = myPos?.live?.exit_reason || 'BOT EXIT'
+          pushToast(`Bot exited · ${manualPosition.contractSymbol?.slice(0, 18)} · ${exitReason.replace(/_/g, ' ')}`, 'success')
+          setManualPosition(null)
+          setContractPrice(0)
+          setOrderStatus(null)
+        }
+      } catch (_) {}
+    }
+    const id = setInterval(checkBackendExit, 5_000)
+    return () => clearInterval(id)
+  }, [manualPosition?.orderId, manualPosition?.backendMonitored]) // eslint-disable-line react-hooks/exhaustive-deps
+
   // Poll live contract price while a manual position is open
   useEffect(() => {
     if (!manualPosition?.contractSymbol) return
@@ -765,37 +862,51 @@ export default function TradingView() {
     if (!strikePrice || !expiry) return
     setOrderStatus('waiting')
     try {
-      // Always fetch a fresh Alpaca-listed contract before placing a manual order.
-      const sRes = await fetch(`${API}/api/options/suggest?symbol=${selected.symbol}`)
-      if (!sRes.ok) throw new Error('Could not fetch contract — try clicking Refresh first')
-      const sData = await sRes.json()
-      if (!sData.contract_name) throw new Error('No listed contract available right now (market may be closed or contract unavailable)')
+      // Get a fresh Alpaca-listed contract if not already cached
+      let contractSymbol = suggestContractRef.current
+      let resolvedStrike = strikePrice
+      let resolvedDirection = direction
+      let resolvedOptionType = optionType
+      let resolvedExpiry = expiry
 
-      const contractSymbol = sData.contract_name
-      const resolvedStrike = String(sData.strike_price ?? strikePrice)
-      const resolvedDirection = sData.direction ?? direction
-      const resolvedOptionType = sData.option_type ?? optionType
-      const resolvedExpiry = sData.expiry ?? expiry
+      if (!contractSymbol) {
+        const params = new URLSearchParams({ symbol: selected.symbol })
+        if (optionType) params.set('option_type', optionType)
+        if (strikePrice) params.set('strike_price', strikePrice)
+        const sRes = await fetch(`${API}/api/options/suggest?${params}`)
+        if (!sRes.ok) throw new Error('Could not fetch contract — try clicking Refresh first')
+        const sData = await sRes.json()
+        if (!sData.contract_name) throw new Error('No listed contract available right now (market may be closed or contract unavailable)')
+        contractSymbol = sData.contract_name
+        resolvedStrike = String(sData.strike_price ?? strikePrice)
+        resolvedDirection = sData.direction ?? direction
+        resolvedOptionType = sData.option_type ?? optionType
+        resolvedExpiry = sData.expiry ?? expiry
+        setStrikePrice(resolvedStrike)
+        setDirection(resolvedDirection)
+        setOptionType(resolvedOptionType)
+        setExpiry(resolvedExpiry)
+        suggestContractRef.current = contractSymbol
+      }
 
-      // Keep form + cache aligned to the exact contract we are about to trade.
-      setStrikePrice(resolvedStrike)
-      setDirection(resolvedDirection)
-      setOptionType(resolvedOptionType)
-      setExpiry(resolvedExpiry)
-      suggestContractRef.current = contractSymbol
-
-      const res = await fetch(`${API}/api/options/buy`, {
+      // Call the new endpoint: buy + wait for fill + start backend exit monitor
+      const res = await fetch(`${API}/api/manual-trade/buy`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ contract_symbol: contractSymbol, qty: parseInt(qty) || 1 }),
+        body: JSON.stringify({
+          contract_symbol: contractSymbol,
+          underlying: selected.symbol,
+          qty: parseInt(qty) || 1,
+        }),
       })
       if (!res.ok) {
         const err = await res.json().catch(() => ({}))
         throw new Error(err.detail || `HTTP ${res.status}`)
       }
       const order = await res.json()
-      const fillPrice = order.fill_price ?? null
-      setOrderStatus(fillPrice != null ? 'filled' : 'waiting')
+      // Backend waited for fill — fill_price is guaranteed
+      const fillPrice = order.fill_price
+      setOrderStatus('filled')
       setManualPosition({
         orderId: order.order_id,
         contractSymbol,
@@ -804,11 +915,12 @@ export default function TradingView() {
         optionType: resolvedOptionType,
         expiry: resolvedExpiry,
         qty: parseInt(qty) || 1,
-        fillPrice: fillPrice ?? 0,
+        fillPrice,
         entryTime: cdtTime(),
+        backendMonitored: true,  // backend exit strategy is running
       })
-      if (fillPrice != null) setContractPrice(fillPrice)
-      pushToast(`Manual Buy · ${contractSymbol.slice(0, 22)}`, 'success')
+      setContractPrice(fillPrice)
+      pushToast(`Bought · ${contractSymbol.slice(0, 22)} @ $${fillPrice.toFixed(2)} · Bot monitoring exit`, 'success')
     } catch (err) {
       setOrderStatus('error')
       pushToast(`Order Failed: ${err.message.slice(0, 60)}`, 'error')
@@ -855,29 +967,32 @@ export default function TradingView() {
         closedTrade.pnl >= 0 ? 'success' : 'error'
       )
 
-      // Persist manual trade history row to backend MongoDB.
-      try {
-        await fetch(`${API}/api/manual-trades`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            symbol: closedTrade.symbol,
-            name: closedTrade.name,
-            contract_name: closedTrade.contractName,
-            strike_price: String(closedTrade.strikePrice ?? '—'),
-            option_type: closedTrade.optionType,
-            direction: closedTrade.direction,
-            expiry: closedTrade.expiry,
-            qty: closedTrade.qty,
-            buy_price: closedTrade.buyPrice,
-            sell_price: closedTrade.sellPrice,
-            pnl: closedTrade.pnl,
-            result: closedTrade.result,
-            entry_time: closedTrade.entryTime,
-            exit_time: closedTrade.exitTime,
-          }),
-        })
-      } catch (_) {}
+      // Only log to MongoDB when NOT backendMonitored — if backendMonitored,
+      // the backend monitor thread already logged the trade to avoid duplicates.
+      if (!manualPosition.backendMonitored) {
+        try {
+          await fetch(`${API}/api/manual-trades`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              symbol: closedTrade.symbol,
+              name: closedTrade.name,
+              contract_name: closedTrade.contractName,
+              strike_price: String(closedTrade.strikePrice ?? '—'),
+              option_type: closedTrade.optionType,
+              direction: closedTrade.direction,
+              expiry: closedTrade.expiry,
+              qty: closedTrade.qty,
+              buy_price: closedTrade.buyPrice,
+              sell_price: closedTrade.sellPrice,
+              pnl: closedTrade.pnl,
+              result: closedTrade.result,
+              entry_time: closedTrade.entryTime,
+              exit_time: closedTrade.exitTime,
+            }),
+          })
+        } catch (_) {}
+      }
     }
     setManualPosition(null)
     setContractPrice(0)
@@ -885,10 +1000,15 @@ export default function TradingView() {
   }
 
   // ── Fetch backend-suggested contract for manual trade ──
-  const fetchSuggest = async (sym) => {
+  // keep ref in sync with state so interval closure always reads latest value
+  useEffect(() => { optionTypeRef.current = optionType }, [optionType])
+
+  const fetchSuggest = async (sym, optType = null) => {
     setSuggestLoading(true)
     try {
-      const res = await fetch(`${API}/api/options/suggest?symbol=${sym || selected.symbol}`)
+      const params = new URLSearchParams({ symbol: sym || selected.symbol })
+      if (optType) params.set('option_type', optType)
+      const res = await fetch(`${API}/api/options/suggest?${params}`)
       if (res.ok) {
         const data = await res.json()
         setStrikePrice(String(data.strike_price ?? ''))
@@ -906,6 +1026,15 @@ export default function TradingView() {
   // ── Switch trade mode; stop AI trade if one is active ──
   const handleSetTradeMode = async (mode) => {
     if (mode === tradeMode) return
+    // Config gate
+    if (mode === 'ai' && !tradingConfig.ait_enabled) {
+      pushToast('AIT is disabled in config.py — cannot switch to AI Trade mode', 'error')
+      return
+    }
+    if (mode === 'manual' && !tradingConfig.mt_enabled) {
+      pushToast('Manual Trading is disabled in config.py — cannot switch to Manual mode', 'error')
+      return
+    }
     if (mode === 'manual' && tradeActive) {
       try {
         await fetch(`${API}/api/ai-trade/stop`, {
@@ -925,15 +1054,21 @@ export default function TradingView() {
     }))
   }
 
-  // Auto-fetch suggest on symbol/mode change, then refresh every 30 s while no open position
+  // Auto-fetch suggest on symbol/mode change, then refresh every 10 s while no open position
   useEffect(() => {
     if (manualPosition) return            // don't overwrite fields while a trade is open
-    fetchSuggest(selected.symbol)
+    fetchSuggest(selected.symbol, optionTypeRef.current)
     const id = setInterval(() => {
-      if (!manualPosition) fetchSuggest(selected.symbol)
-    }, 30_000)
+      if (!manualPosition) fetchSuggest(selected.symbol, optionTypeRef.current)
+    }, 10_000)
     return () => clearInterval(id)
   }, [tradeMode, selected.symbol]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // When user manually changes option type or strike, invalidate the cached contract
+  // so handleBuy will re-fetch a contract matching the new values.
+  useEffect(() => {
+    if (!manualPosition) suggestContractRef.current = null
+  }, [optionType, strikePrice]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const totalVolume = candles.reduce((s, c) => s + (c.volume || 0), 0)
 
@@ -1030,23 +1165,34 @@ export default function TradingView() {
                     { val: 'manual', label: 'MT',  activeBg: 'linear-gradient(135deg, #1a1a1a 0%, #333 100%)', activeShadow: 'rgba(0,0,0,0.35)' },
                   ].map(opt => {
                     const active = symbolMode[stock.symbol] === opt.val
+                    // Disabled by global config gate
+                    const gateDisabled =
+                      (opt.val === 'auto'   && !tradingConfig.ait_enabled) ||
+                      (opt.val === 'manual' && !tradingConfig.mt_enabled)
                     return (
                       <button
                         key={opt.val}
-                        onClick={e => setSymbolModeFor(stock.symbol, opt.val, e)}
+                        onClick={e => !gateDisabled && setSymbolModeFor(stock.symbol, opt.val, e)}
+                        title={gateDisabled
+                          ? opt.val === 'auto' ? 'AIT disabled in config.py' : 'MT disabled in config.py'
+                          : undefined}
                         style={{
                           flex: 1, padding: '0.28rem 0.18rem',
-                          borderRadius: '999px', border: 'none', cursor: 'pointer',
+                          borderRadius: '999px', border: 'none',
+                          cursor: gateDisabled ? 'not-allowed' : 'pointer',
                           fontSize: '0.58rem', fontWeight: 800, letterSpacing: '0.04em',
                           transition: 'all 0.2s',
+                          opacity: gateDisabled ? 0.35 : 1,
                           background: active ? opt.activeBg : 'transparent',
                           color: active
                             ? opt.val === 'off' ? '#777' : '#fff'
                             : 'rgba(160,124,16,0.6)',
                           boxShadow: active && opt.val !== 'off' ? `0 0 5px ${opt.activeShadow}` : 'none',
+                          position: 'relative',
                         }}
                       >
                         {opt.label}
+                        {gateDisabled && <span style={{ position: 'absolute', top: 0, right: 2, fontSize: '0.45rem', lineHeight: 1 }}>🔒</span>}
                       </button>
                     )
                   })}
@@ -1115,16 +1261,40 @@ export default function TradingView() {
                 </span>
               )}
             </div>
-            <div style={{ display: 'flex', gap: '0.25rem' }}>
-              {INTERVALS.map(iv => (
-                <button key={iv} onClick={() => setInterval_(iv)} style={{
-                  padding: '0.3rem 0.65rem', borderRadius: '6px', border: 'none', cursor: 'pointer',
-                  background: interval === iv ? 'rgba(201,162,39,0.15)' : 'transparent',
-                  color: interval === iv ? GOLD_DEEP : '#888',
-                  fontWeight: interval === iv ? 700 : 500,
-                  fontSize: '0.78rem', transition: 'all 0.2s',
-                }}>{iv}</button>
-              ))}
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
+              {/* Market status badge */}
+              {mktCountdown === 'open' ? (
+                <span style={{
+                  display: 'inline-flex', alignItems: 'center', gap: '0.3rem',
+                  padding: '0.2rem 0.6rem', borderRadius: '20px',
+                  background: 'rgba(22,163,74,0.1)', border: '1px solid rgba(22,163,74,0.3)',
+                  fontSize: '0.68rem', fontWeight: 800, color: '#16a34a', letterSpacing: '0.04em',
+                }}>
+                  <span style={{ width: '6px', height: '6px', borderRadius: '50%', background: '#22c55e', display: 'inline-block', animation: 'livePulse 1.5s infinite' }} />
+                  MARKET OPEN
+                </span>
+              ) : (
+                <span style={{
+                  display: 'inline-flex', alignItems: 'center', gap: '0.3rem',
+                  padding: '0.2rem 0.6rem', borderRadius: '20px',
+                  background: 'rgba(239,68,68,0.07)', border: '1px solid rgba(239,68,68,0.2)',
+                  fontSize: '0.68rem', fontWeight: 700, color: '#ef4444', letterSpacing: '0.04em',
+                }}>
+                  <span style={{ width: '6px', height: '6px', borderRadius: '50%', background: '#ef4444', display: 'inline-block' }} />
+                  {mktCountdown || 'CLOSED'}
+                </span>
+              )}
+              <div style={{ display: 'flex', gap: '0.25rem' }}>
+                {INTERVALS.map(iv => (
+                  <button key={iv} onClick={() => setInterval_(iv)} style={{
+                    padding: '0.3rem 0.65rem', borderRadius: '6px', border: 'none', cursor: 'pointer',
+                    background: interval === iv ? 'rgba(201,162,39,0.15)' : 'transparent',
+                    color: interval === iv ? GOLD_DEEP : '#888',
+                    fontWeight: interval === iv ? 700 : 500,
+                    fontSize: '0.78rem', transition: 'all 0.2s',
+                  }}>{iv}</button>
+                ))}
+              </div>
             </div>
           </div>
 
@@ -1185,6 +1355,7 @@ export default function TradingView() {
             rsiMaPoints={rsiMaPoints}
             rsiMarkers={rsiMarkers}
             fitKey={selected.symbol + '_' + interval}
+            livePrice={livePrice}
           />
         </div>
 
@@ -1292,12 +1463,17 @@ export default function TradingView() {
             return null
           }
           const cutoff = histCutoff()
-          const filteredHistory = cutoff
+          const timeFiltered = cutoff
             ? symbolHistory.filter(t => {
                 const d = new Date(t._entryIso || t.entryTime || t.exitTime || 0)
                 return !isNaN(d) && d >= cutoff
               })
             : symbolHistory
+          const filteredHistory = histTypeFilter === 'All'
+            ? timeFiltered
+            : histTypeFilter === 'MT'
+              ? timeFiltered.filter(t => t.type === 'manual')
+              : timeFiltered.filter(t => t.type === 'ai')
 
           const hWins   = filteredHistory.filter(t => t.result === 'WIN').length
           const hLosses = filteredHistory.filter(t => t.result === 'LOSS').length
@@ -1331,18 +1507,34 @@ export default function TradingView() {
                 }}>{filteredHistory.length}</span>
               )}
             </div>
-            {/* Time filter tabs */}
-            <div style={{ display: 'flex', gap: '0.25rem', flexWrap: 'wrap' }}>
-              {['Today','1H','3H','5H','1D','3D','1W'].map(f => (
-                <button key={f} onClick={() => setHistTimeFilter(f)} style={{
-                  padding: '0.22rem 0.65rem', borderRadius: '20px', border: 'none', cursor: 'pointer',
-                  fontWeight: 700, fontSize: '0.72rem',
-                  background: histTimeFilter === f ? `linear-gradient(135deg,${GOLD} 0%,${GOLD_LIGHT} 100%)` : 'rgba(201,162,39,0.07)',
-                  color: histTimeFilter === f ? '#111' : '#999',
-                  boxShadow: histTimeFilter === f ? '0 2px 6px rgba(201,162,39,0.25)' : 'none',
-                  transition: 'all 0.15s',
-                }}>{f}</button>
-              ))}
+            <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', alignItems: 'center' }}>
+              {/* Trade type filter */}
+              <div style={{ display: 'flex', gap: '0.2rem', background: 'rgba(0,0,0,0.04)', borderRadius: '20px', padding: '0.15rem' }}>
+                {[{ val: 'All', label: 'All' }, { val: 'MT', label: 'MT' }, { val: 'AIT', label: 'AIT' }].map(f => (
+                  <button key={f.val} onClick={() => setHistTypeFilter(f.val)} style={{
+                    padding: '0.18rem 0.6rem', borderRadius: '20px', border: 'none', cursor: 'pointer',
+                    fontWeight: 800, fontSize: '0.68rem',
+                    background: histTypeFilter === f.val
+                      ? f.val === 'MT' ? '#2563eb' : f.val === 'AIT' ? GOLD_DEEP : '#333'
+                      : 'transparent',
+                    color: histTypeFilter === f.val ? '#fff' : '#aaa',
+                    transition: 'all 0.15s',
+                  }}>{f.label}</button>
+                ))}
+              </div>
+              {/* Time filter tabs */}
+              <div style={{ display: 'flex', gap: '0.25rem', flexWrap: 'wrap' }}>
+                {['Today','1H','3H','5H','1D','3D','1W'].map(f => (
+                  <button key={f} onClick={() => setHistTimeFilter(f)} style={{
+                    padding: '0.22rem 0.65rem', borderRadius: '20px', border: 'none', cursor: 'pointer',
+                    fontWeight: 700, fontSize: '0.72rem',
+                    background: histTimeFilter === f ? `linear-gradient(135deg,${GOLD} 0%,${GOLD_LIGHT} 100%)` : 'rgba(201,162,39,0.07)',
+                    color: histTimeFilter === f ? '#111' : '#999',
+                    boxShadow: histTimeFilter === f ? '0 2px 6px rgba(201,162,39,0.25)' : 'none',
+                    transition: 'all 0.15s',
+                  }}>{f}</button>
+                ))}
+              </div>
             </div>
           </div>
 
@@ -1373,7 +1565,7 @@ export default function TradingView() {
               <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.76rem' }}>
                 <thead>
                   <tr style={{ background: 'rgba(201,162,39,0.04)' }}>
-                    {['#', 'Contract', 'Type', 'Strike', 'Buy Price', 'Sell Price', 'P&L', 'Result', 'Reason', 'Entry', 'Exit'].map(h => (
+                    {['#', 'Source', 'Contract', 'Type', 'Strike', 'Buy Price', 'Sell Price', 'P&L', 'Result', 'Reason', 'Entry', 'Exit'].map(h => (
                       <th key={h} style={{
                         padding: '0.55rem 0.75rem', textAlign: 'left', fontWeight: 700, color: '#999',
                         fontSize: '0.65rem', textTransform: 'uppercase', letterSpacing: '0.06em',
@@ -1387,6 +1579,14 @@ export default function TradingView() {
                   {filteredHistory.map((t, i) => (
                     <tr key={t.id} style={{ borderBottom: '1px solid rgba(0,0,0,0.03)', background: i % 2 === 0 ? '#fff' : 'rgba(201,162,39,0.015)' }}>
                       <td style={{ padding: '0.6rem 0.75rem', color: '#bbb', fontWeight: 600 }}>{filteredHistory.length - i}</td>
+                      <td style={{ padding: '0.6rem 0.75rem', whiteSpace: 'nowrap' }}>
+                        <span style={{
+                          padding: '0.15rem 0.45rem', borderRadius: '4px', fontWeight: 800, fontSize: '0.64rem',
+                          background: t.type === 'manual' ? 'rgba(37,99,235,0.12)' : 'rgba(201,162,39,0.12)',
+                          color: t.type === 'manual' ? '#2563eb' : GOLD_DEEP,
+                          letterSpacing: '0.03em',
+                        }}>{t.type === 'manual' ? 'MT' : 'AIT'}</span>
+                      </td>
                       <td style={{ padding: '0.6rem 0.75rem', color: GOLD_DEEP, fontWeight: 700, whiteSpace: 'nowrap', maxWidth: '180px', overflow: 'hidden', textOverflow: 'ellipsis' }}
                           title={t.contractName}>{t.contractName}</td>
                       <td style={{ padding: '0.6rem 0.75rem', whiteSpace: 'nowrap' }}>
@@ -1431,35 +1631,55 @@ export default function TradingView() {
       <div className="no-scroll-panel" style={{ width: '254px', flexShrink: 0, display: 'flex', flexDirection: 'column', gap: '1rem', position: 'sticky', top: '90px', maxHeight: 'calc(100vh - 110px)', overflowY: 'auto', paddingRight: '2px', scrollbarWidth: 'none', msOverflowStyle: 'none' }}>
         <style>{`.no-scroll-panel::-webkit-scrollbar { display: none; }`}</style>
 
+        {/* Config warning banner */}
+        {tradingConfig.config_warning && (
+          <div style={{
+            background: tradingConfig.config_healthy ? 'rgba(37,99,235,0.08)' : 'rgba(239,68,68,0.08)',
+            border: `1px solid ${tradingConfig.config_healthy ? 'rgba(37,99,235,0.25)' : 'rgba(239,68,68,0.3)'}`,
+            borderRadius: '10px', padding: '0.6rem 0.85rem',
+            fontSize: '0.7rem', fontWeight: 600,
+            color: tradingConfig.config_healthy ? '#1d4ed8' : '#ef4444',
+            lineHeight: 1.4, flexShrink: 0,
+          }}>
+            ⚠️ {tradingConfig.config_warning}
+          </div>
+        )}
+
         {/* AI Trade / Manual Trade Toggle */}
         <div style={{ display: 'flex', background: '#f3f4f6', borderRadius: '12px', padding: '4px', border: '1px solid rgba(201,162,39,0.15)', flexShrink: 0 }}>
           <button
             onClick={() => handleSetTradeMode('ai')}
+            disabled={!tradingConfig.ait_enabled}
+            title={!tradingConfig.ait_enabled ? 'AIT disabled in config.py' : undefined}
             style={{
-              flex: 1, padding: '0.55rem 0.5rem', borderRadius: '9px', border: 'none', cursor: 'pointer',
+              flex: 1, padding: '0.55rem 0.5rem', borderRadius: '9px', border: 'none',
+              cursor: tradingConfig.ait_enabled ? 'pointer' : 'not-allowed',
               fontWeight: 700, fontSize: '0.8rem', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.35rem',
-              transition: 'all 0.2s',
+              transition: 'all 0.2s', opacity: tradingConfig.ait_enabled ? 1 : 0.4,
               background: tradeMode === 'ai' ? `linear-gradient(135deg, ${GOLD} 0%, ${GOLD_LIGHT} 100%)` : 'transparent',
               color: tradeMode === 'ai' ? '#111' : '#999',
               boxShadow: tradeMode === 'ai' ? '0 2px 8px rgba(201,162,39,0.3)' : 'none',
             }}
           >
             <Zap size={13} fill={tradeMode === 'ai' ? '#111' : 'none'} />
-            AI Trade
+            AI Trade {!tradingConfig.ait_enabled && '🔒'}
           </button>
           <button
             onClick={() => handleSetTradeMode('manual')}
+            disabled={!tradingConfig.mt_enabled}
+            title={!tradingConfig.mt_enabled ? 'MT disabled in config.py' : undefined}
             style={{
-              flex: 1, padding: '0.55rem 0.5rem', borderRadius: '9px', border: 'none', cursor: 'pointer',
+              flex: 1, padding: '0.55rem 0.5rem', borderRadius: '9px', border: 'none',
+              cursor: tradingConfig.mt_enabled ? 'pointer' : 'not-allowed',
               fontWeight: 700, fontSize: '0.8rem', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.35rem',
-              transition: 'all 0.2s',
+              transition: 'all 0.2s', opacity: tradingConfig.mt_enabled ? 1 : 0.4,
               background: tradeMode === 'manual' ? '#fff' : 'transparent',
               color: tradeMode === 'manual' ? '#111' : '#999',
               boxShadow: tradeMode === 'manual' ? '0 2px 8px rgba(0,0,0,0.1)' : 'none',
             }}
           >
             <User size={13} />
-            Manual Trade
+            Manual {!tradingConfig.mt_enabled && '🔒'}
           </button>
         </div>
 
@@ -1524,7 +1744,13 @@ export default function TradingView() {
                   { val: 'call', activeColor: '#16a34a', activeBg: 'rgba(22,163,74,0.1)',  activeBorder: 'rgba(22,163,74,0.3)'  },
                   { val: 'put',  activeColor: '#ef4444', activeBg: 'rgba(239,68,68,0.08)', activeBorder: 'rgba(239,68,68,0.25)' },
                 ].map(opt => (
-                  <button key={opt.val} onClick={() => setOptionType(opt.val)} disabled={!!manualPosition} style={{
+                  <button key={opt.val} onClick={() => {
+                    setOptionType(opt.val)
+                    if (!manualPosition) {
+                      suggestContractRef.current = null
+                      fetchSuggest(selected.symbol, opt.val)
+                    }
+                  }} disabled={!!manualPosition} style={{
                     flex: 1, padding: '0.45rem', borderRadius: '8px', border: 'none', cursor: manualPosition ? 'not-allowed' : 'pointer',
                     fontWeight: 800, fontSize: '0.8rem', textTransform: 'uppercase', letterSpacing: '0.05em',
                     background: optionType === opt.val ? opt.activeBg : '#f3f4f6',
@@ -1566,8 +1792,8 @@ export default function TradingView() {
               <span style={{ color: direction === 'uptrend' ? '#16a34a' : '#ef4444' }}>· {direction === 'uptrend' ? 'Up' : 'Down'}</span>
             </div>
 
-            {/* Buy / Sell Button — hidden in AI mode */}
-            {tradeMode !== 'ai' && <button
+            {/* Buy / Sell Button — hidden in AI mode, but always visible when a position is open */}
+            {(tradeMode !== 'ai' || manualPosition) && <button
               onClick={manualPosition ? handleSell : handleBuy}
               disabled={orderStatus === 'waiting' || orderStatus === 'selling' || (!manualPosition && (!strikePrice || !expiry))}
               style={{
@@ -1605,6 +1831,14 @@ export default function TradingView() {
               <div style={{ marginTop: '0.6rem', padding: '0.4rem 0.75rem', borderRadius: '8px', fontSize: '0.72rem', fontWeight: 700, textAlign: 'center',
                 background: 'rgba(239,68,68,0.08)', color: '#ef4444', border: '1px solid rgba(239,68,68,0.2)',
               }}>✗ Order Failed</div>
+            )}
+            {manualPosition?.backendMonitored && orderStatus === 'filled' && (
+              <div style={{ marginTop: '0.6rem', padding: '0.45rem 0.75rem', borderRadius: '8px', fontSize: '0.72rem', fontWeight: 700, textAlign: 'center', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.4rem',
+                background: 'rgba(22,163,74,0.07)', color: '#16a34a', border: '1px solid rgba(22,163,74,0.2)',
+              }}>
+                <span style={{ width: '6px', height: '6px', borderRadius: '50%', background: '#22c55e', display: 'inline-block', animation: 'livePulse 1.5s infinite' }} />
+                Bot monitoring exit strategy
+              </div>
             )}
           </div>
 
@@ -1670,6 +1904,109 @@ export default function TradingView() {
           </div>
             )
           })()}
+        </div>
+
+        {/* ── Backend Activity Panel ──────────────────────────────────────── */}
+        {/* Shows which symbols are running, what mode, and live position state */}
+        <div style={{
+          background: '#fff',
+          border: '1px solid rgba(201,162,39,0.15)',
+          borderRadius: '14px',
+          overflow: 'hidden',
+          boxShadow: '0 2px 12px rgba(0,0,0,0.04)',
+          flexShrink: 0,
+        }}>
+          <div style={{
+            padding: '0.75rem 1rem',
+            borderBottom: '1px solid rgba(201,162,39,0.1)',
+            background: 'rgba(201,162,39,0.03)',
+            display: 'flex', alignItems: 'center', gap: '0.5rem',
+          }}>
+            <Activity size={13} color={GOLD_DEEP} />
+            <span style={{ fontSize: '0.72rem', fontWeight: 800, color: '#111', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+              Backend Activity
+            </span>
+            {/* Global config flags */}
+            <div style={{ marginLeft: 'auto', display: 'flex', gap: '0.3rem' }}>
+              <span style={{
+                padding: '0.1rem 0.4rem', borderRadius: '4px', fontSize: '0.58rem', fontWeight: 800,
+                background: tradingConfig.ait_enabled ? 'rgba(201,162,39,0.15)' : 'rgba(239,68,68,0.1)',
+                color: tradingConfig.ait_enabled ? GOLD_DEEP : '#ef4444',
+              }}>AIT {tradingConfig.ait_enabled ? 'ON' : 'OFF'}</span>
+              <span style={{
+                padding: '0.1rem 0.4rem', borderRadius: '4px', fontSize: '0.58rem', fontWeight: 800,
+                background: tradingConfig.mt_enabled ? 'rgba(37,99,235,0.12)' : 'rgba(239,68,68,0.1)',
+                color: tradingConfig.mt_enabled ? '#2563eb' : '#ef4444',
+              }}>MT {tradingConfig.mt_enabled ? 'ON' : 'OFF'}</span>
+            </div>
+          </div>
+          <div style={{ padding: '0.5rem 0', maxHeight: '260px', overflowY: 'auto' }}>
+            {(tradingConfig.symbols || []).length === 0 ? (
+              <div style={{ padding: '1rem', textAlign: 'center', color: '#ccc', fontSize: '0.72rem' }}>
+                Loading…
+              </div>
+            ) : (tradingConfig.symbols || []).map(s => {
+              const modeColor = s.mode === 'auto' ? GOLD_DEEP : s.mode === 'manual' ? '#2563eb' : '#bbb'
+              const modeLabel = s.mode_label || s.mode.toUpperCase()
+              // Find any live position for this symbol in internal registry
+              const livePos = registryPositions.find(p =>
+                p.symbol === s.symbol ||
+                (typeof p.contract_symbol === 'string' && p.contract_symbol.startsWith(s.symbol))
+              )
+              const pnl = livePos ? Number(livePos.live?.pnl_pct ?? 0) : null
+              const monActive = livePos?.live?.monitoring_active
+              return (
+                <div key={s.symbol} style={{
+                  display: 'flex', alignItems: 'center', gap: '0.5rem',
+                  padding: '0.38rem 1rem',
+                  borderBottom: '1px solid rgba(0,0,0,0.03)',
+                  background: s.symbol === selected.symbol ? 'rgba(201,162,39,0.04)' : 'transparent',
+                }}>
+                  {/* Mode indicator dot */}
+                  <span style={{
+                    width: '7px', height: '7px', borderRadius: '50%', flexShrink: 0,
+                    background: s.mode === 'auto' && s.watchlist_ait_on ? GOLD
+                              : s.mode === 'manual' ? '#2563eb'
+                              : '#ddd',
+                    boxShadow: s.mode !== 'off' && (s.watchlist_ait_on || s.mode === 'manual')
+                      ? `0 0 5px ${modeColor}88` : 'none',
+                    animation: (s.mode !== 'off' && (livePos || s.watchlist_ait_on)) ? 'livePulse 2s infinite' : 'none',
+                  }} />
+                  {/* Symbol */}
+                  <span style={{ fontSize: '0.72rem', fontWeight: 800, color: s.symbol === selected.symbol ? '#111' : '#555', minWidth: '38px' }}>
+                    {s.symbol}
+                  </span>
+                  {/* Mode badge */}
+                  <span style={{
+                    padding: '0.08rem 0.35rem', borderRadius: '4px',
+                    fontSize: '0.6rem', fontWeight: 800,
+                    background: s.mode === 'auto' && s.watchlist_ait_on ? 'rgba(201,162,39,0.12)'
+                              : s.mode === 'manual' ? 'rgba(37,99,235,0.1)'
+                              : 'rgba(0,0,0,0.04)',
+                    color: modeColor,
+                  }}>{modeLabel}</span>
+                  {/* Watchlist AIT flag if auto */}
+                  {s.mode === 'auto' && !s.watchlist_ait_on && (
+                    <span style={{ fontSize: '0.58rem', color: '#f59e0b', fontWeight: 700 }} title="AIT enabled but watchlist flag is OFF in config">⚠ watchlist off</span>
+                  )}
+                  {/* Live position indicator */}
+                  {livePos && (
+                    <span style={{ marginLeft: 'auto', fontSize: '0.68rem', fontWeight: 800,
+                      color: pnl != null ? (pnl >= 0 ? '#16a34a' : '#ef4444') : '#888' }}>
+                      {monActive !== false ? (
+                        <>{pnl != null ? `${pnl >= 0 ? '+' : ''}${pnl.toFixed(1)}%` : 'LIVE'}</>
+                      ) : (
+                        <span style={{ color: '#94a3b8', fontSize: '0.6rem' }}>CLOSED</span>
+                      )}
+                    </span>
+                  )}
+                  {!livePos && s.mode !== 'off' && (
+                    <span style={{ marginLeft: 'auto', fontSize: '0.6rem', color: '#d1d5db', fontWeight: 600 }}>idle</span>
+                  )}
+                </div>
+              )
+            })}
+          </div>
         </div>
       </div>
 
