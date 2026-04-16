@@ -4,7 +4,7 @@ from collections import Counter, defaultdict
 from pymongo import MongoClient
 
 def main():
-    client = MongoClient("mongodb+srv://capeconnect:cape-1@capecluster.tosblor.mongodb.net")
+    client = MongoClient("mongodb://localhost:27017/", serverSelectionTimeoutMS=5000)
     db = client["cape"]
     col = db["options_log"]
     
