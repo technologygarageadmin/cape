@@ -1694,7 +1694,7 @@ def _ait_symbol_thread(symbol: str) -> None:
     sc  = StockHistoricalDataClient(API_KEY, SECRET_KEY)
     odc = OptionHistoricalDataClient(API_KEY, SECRET_KEY)
     tc  = TradingClient(API_KEY, SECRET_KEY, paper=PAPER_TRADING)
-    set_mode(symbol, "auto")
+    # Do NOT force-set mode here — respect whatever the user last saved in symbol_modes.json
 
     while True:
         try:
@@ -2779,17 +2779,21 @@ def suggest_options(
             signal_name   = "CALL"
             contract_type = ContractType.CALL
 
-    direction   = "uptrend"  if signal_name == "CALL" else "downtrend"
-    option_type = "call"     if signal_name == "CALL" else "put"
+    direction    = "uptrend"  if signal_name == "CALL" else "downtrend"
+    resolved_opt = "call"     if signal_name == "CALL" else "put"
 
     # ── 4b. Honour manual overrides from the UI ──────────────────────────────
-    if option_type is not None:
-        forced = option_type.strip().lower()
+    # NOTE: use the *original query param* (option_type), not the local variable
+    # (resolved_opt) that was just set from RSI — they share the same name so we
+    # must check the function parameter before it could be shadowed.
+    forced_from_ui = option_type  # this is still the Query() param here
+    if forced_from_ui is not None:
+        forced = forced_from_ui.strip().lower()
         if forced in ("call", "put"):
             signal_name   = forced.upper()
             contract_type = ContractType.CALL if forced == "call" else ContractType.PUT
             direction     = "uptrend" if forced == "call" else "downtrend"
-            option_type   = forced
+            resolved_opt  = forced
 
     # Anchor for contract selection: prefer user-supplied strike, fall back to live price
     price_anchor = float(strike_price) if strike_price else current_price
@@ -2837,15 +2841,36 @@ def suggest_options(
             ),
         )
 
+    # ── 7. Bid / Ask for the selected contract ────────────────────────────────
+    bid_price: float = 0.0
+    ask_price: float = 0.0
+    mid_price: float = 0.0
+    spread_pct: float = 0.0
+    try:
+        snapshots = option_data_client.get_option_snapshot(
+            build_option_snapshot_request([contract_name])
+        )
+        snap = extract_snapshot_for_symbol(snapshots, contract_name)
+        bid_price, ask_price = _extract_option_bid_ask(snap)
+        if bid_price > 0 and ask_price > 0:
+            mid_price  = round((bid_price + ask_price) / 2, 4)
+            spread_pct = round((ask_price - bid_price) / ask_price * 100, 2)
+    except Exception as ex:
+        warnings.append(f"Could not fetch bid/ask: {str(ex)[:80]}")
+
     return {
         "symbol":        ticker,
         "current_price": current_price,
         "strike_price":  found_strike,
         "direction":     direction,
-        "option_type":   option_type,
+        "option_type":   resolved_opt,
         "expiry":        str(expiry),
         "qty":           QTY,
         "contract_name": contract_name,
+        "bid":           bid_price,
+        "ask":           ask_price,
+        "mid":           mid_price,
+        "spread_pct":    spread_pct,
         "obr_high":      obr_high,
         "obr_low":       obr_low,
         "rsi":           rsi_value,
@@ -3298,8 +3323,8 @@ def get_options_log(
 ) -> dict[str, Any]:
     """Return options trade log entries from the options_log collection.
 
-    By default returns all trade types (AIT, STRADDLE, RECOVERY, MANUAL, MANUAL_LIQUIDATE).
-    Use ?type_filter=AIT to restrict to a single type.
+    By default returns AIT, STRADDLE, RECOVERY, MONITOR_EXIT types.
+    MANUAL/MANUAL_LIQUIDATE are excluded — use /api/manual-trades for those.
     """
     if _options_log_col is None:
         return {"count": 0, "trades": []}
@@ -3309,6 +3334,9 @@ def get_options_log(
         q["symbol"] = symbol.strip().upper()
     if result:
         q["result"] = result.strip().upper()
+    # Exclude MANUAL types — those are served exclusively by /api/manual-trades
+    # to avoid double-counting in frontend when both endpoints are combined.
+    q["trade_type"] = {"$nin": ["MANUAL", "MANUAL_LIQUIDATE"]}
 
     rows = list(_options_log_col.find(q).sort("created_at", -1).limit(limit))
     trades = []

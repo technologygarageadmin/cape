@@ -84,6 +84,7 @@ const isMarketOpen = () => {
 
 const fmt = (v) => v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
 const fmtVol = (v) => v >= 1_000_000 ? (v / 1_000_000).toFixed(2) + 'M' : v >= 1_000 ? (v / 1_000).toFixed(1) + 'K' : v
+const fmtPctSigned = (v) => `${v >= 0 ? '+' : ''}${Number(v || 0).toFixed(2)}%`
 
 export default function TradingView() {
   const [selected, setSelected]       = useState(() => STOCK_SYMBOLS.find(s => s.symbol === 'TSLA') ?? STOCK_SYMBOLS[0])
@@ -120,6 +121,7 @@ export default function TradingView() {
   const [orderStatus, setOrderStatus]       = useState(null)  // null | 'waiting' | 'filled' | 'error'
   const [tradeHistory, setTradeHistory]     = useState([])
   const [suggestLoading, setSuggestLoading] = useState(false)
+  const [contractQuote, setContractQuote]     = useState(null)  // { bid, ask, mid, spread_pct }
   const [mktCountdown, setMktCountdown]       = useState('')
   const [toasts, setToasts]                   = useState([])
   const toastIdRef = useRef(0)
@@ -802,7 +804,23 @@ export default function TradingView() {
             }
             if (combined.length > 0) setTradeHistory(combined)
           } catch (_) {}
-          const exitReason = myPos?.live?.exit_reason || 'BOT EXIT'
+          // Read exit reason from the most recent trade log for this contract,
+          // falling back to the live state (if position still briefly visible) or generic label.
+          let exitReason = myPos?.live?.exit_reason || null
+          if (!exitReason) {
+            try {
+              const r = await fetch(`${API}/api/manual-trades?limit=10`)
+              if (r.ok) {
+                const d = await r.json()
+                const match = (d.trades || []).find(t =>
+                  t.contractName === manualPosition.contractSymbol ||
+                  t.buyOrderId === orderId
+                )
+                if (match?.exitReason) exitReason = match.exitReason
+              }
+            } catch (_) {}
+          }
+          exitReason = exitReason || 'MONITOR EXIT'
           pushToast(`Bot exited · ${manualPosition.contractSymbol?.slice(0, 18)} · ${exitReason.replace(/_/g, ' ')}`, 'success')
           setManualPosition(null)
           setContractPrice(0)
@@ -1003,7 +1021,9 @@ export default function TradingView() {
   // keep ref in sync with state so interval closure always reads latest value
   useEffect(() => { optionTypeRef.current = optionType }, [optionType])
 
-  const fetchSuggest = async (sym, optType = null) => {
+  // updateType=true  → also update CALL/PUT selector (used on symbol change / first load)
+  // updateType=false → preserve user's current selection (used on 10s interval refresh)
+  const fetchSuggest = async (sym, optType = null, updateType = true) => {
     setSuggestLoading(true)
     try {
       const params = new URLSearchParams({ symbol: sym || selected.symbol })
@@ -1013,11 +1033,20 @@ export default function TradingView() {
         const data = await res.json()
         setStrikePrice(String(data.strike_price ?? ''))
         setDirection(data.direction ?? 'uptrend')
-        setOptionType(data.option_type ?? 'call')
+        if (updateType) setOptionType(data.option_type ?? 'call')
         setExpiry(data.expiry ?? '')
         setQty(String(data.qty ?? 1))
         // Store contract symbol so Buy button can place real option order
         suggestContractRef.current = data.contract_name ?? null
+        // Store bid/ask for display
+        if (data.bid != null || data.ask != null) {
+          setContractQuote({
+            bid: data.bid ?? 0,
+            ask: data.ask ?? 0,
+            mid: data.mid ?? 0,
+            spread_pct: data.spread_pct ?? 0,
+          })
+        }
       }
     } catch (_) {}
     setSuggestLoading(false)
@@ -1067,9 +1096,9 @@ export default function TradingView() {
   // Auto-fetch suggest on symbol/mode change, then refresh every 10 s while no open position
   useEffect(() => {
     if (manualPosition) return            // don't overwrite fields while a trade is open
-    fetchSuggest(selected.symbol, optionTypeRef.current)
+    fetchSuggest(selected.symbol, optionTypeRef.current, true)  // first load: let backend suggest type
     const id = setInterval(() => {
-      if (!manualPosition) fetchSuggest(selected.symbol, optionTypeRef.current)
+      if (!manualPosition) fetchSuggest(selected.symbol, optionTypeRef.current, false)  // refresh: keep user's type
     }, 10_000)
     return () => clearInterval(id)
   }, [tradeMode, selected.symbol]) // eslint-disable-line react-hooks/exhaustive-deps
@@ -1077,7 +1106,10 @@ export default function TradingView() {
   // When user manually changes option type or strike, invalidate the cached contract
   // so handleBuy will re-fetch a contract matching the new values.
   useEffect(() => {
-    if (!manualPosition) suggestContractRef.current = null
+    if (!manualPosition) {
+      suggestContractRef.current = null
+      setContractQuote(null)
+    }
   }, [optionType, strikePrice]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const totalVolume = candles.reduce((s, c) => s + (c.volume || 0), 0)
@@ -1402,9 +1434,38 @@ export default function TradingView() {
               </div>
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))', gap: '0.85rem', padding: '1rem 1.5rem' }}>
                 {symPositions.map((p, i) => {
-                  const uPl    = Number(p.unrealized_pl)    || 0
-                  const uPlPct = Number(p.unrealized_plpc)  || 0
-                  const isPos  = uPl >= 0
+                  const uPl = Number(p.unrealized_pl) || 0
+                  const uPlPct = Number(p.unrealized_plpc) || 0
+                  const curPct = uPlPct * 100
+                  const isPos = uPl >= 0
+                  const side = String(p.side || '').toLowerCase()
+
+                  const livePos = registryPositions.find(lp =>
+                    String(lp.contract_symbol || '') === String(p.symbol || '')
+                  )
+                  const live = livePos?.live || null
+                  const slPctRaw = Number(live?.sl_dynamic_pct ?? live?.sl_static_pct)
+                  const tpPctRaw = Number(live?.tp_pct)
+                  const qpPctRaw = Number(live?.qp_dynamic_pct ?? live?.qp_floor_pct)
+                  const peakPctRaw = Number(live?.max_pnl_pct ?? curPct)
+
+                  const hasSl = Number.isFinite(slPctRaw)
+                  const hasTp = Number.isFinite(tpPctRaw)
+                  const hasQp = Number.isFinite(qpPctRaw)
+                  const slPct = hasSl ? slPctRaw : null
+                  const tpPct = hasTp ? tpPctRaw : null
+                  const qpPct = hasQp ? qpPctRaw : null
+                  const peakPct = Number.isFinite(peakPctRaw) ? peakPctRaw : curPct
+
+                  const slHit = hasSl ? curPct <= slPct : false
+                  const tpHit = hasTp ? curPct >= tpPct : false
+                  const qpArmed = hasQp ? qpPct > 0 : false
+                  const qpHit = qpArmed ? curPct <= qpPct : false
+
+                  const slDelta = hasSl ? Math.max(0, curPct - slPct) : null
+                  const tpDelta = hasTp ? Math.max(0, tpPct - curPct) : null
+                  const qpDelta = qpArmed ? Math.max(0, curPct - qpPct) : null
+
                   return (
                     <div key={i} style={{
                       borderRadius: '10px', padding: '0.9rem 1rem',
@@ -1415,7 +1476,7 @@ export default function TradingView() {
                         {p.symbol}
                       </div>
                       {[
-                        { k: 'Side',         v: <span style={{ fontWeight: 800, color: p.side === 'long' ? '#16a34a' : '#ef4444', textTransform: 'uppercase' }}>{p.side}</span> },
+                        { k: 'Side',         v: <span style={{ fontWeight: 800, color: side === 'long' ? '#16a34a' : '#ef4444', textTransform: 'uppercase' }}>{side || '—'}</span> },
                         { k: 'Qty',          v: p.qty },
                         { k: 'Entry Time',   v: fmtEntryTime(p.entry_time) },
                         { k: 'Entry Price',  v: `$${fmt(p.avg_entry_price)}` },
@@ -1427,6 +1488,66 @@ export default function TradingView() {
                           <span style={{ color: '#111', fontWeight: 700 }}>{v}</span>
                         </div>
                       ))}
+
+                      <div style={{
+                        marginTop: '0.55rem',
+                        borderTop: '1px dashed rgba(201,162,39,0.22)',
+                        paddingTop: '0.5rem',
+                      }}>
+                        <div style={{
+                          fontSize: '0.62rem',
+                          color: '#b2a27d',
+                          fontWeight: 800,
+                          textTransform: 'uppercase',
+                          letterSpacing: '0.05em',
+                          marginBottom: '0.35rem',
+                        }}>
+                          Exit Watch
+                        </div>
+
+                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '0.3rem', marginBottom: '0.45rem' }}>
+                          {[
+                            { k: 'SL', v: slPct != null ? fmtPctSigned(slPct) : '—', c: '#ef4444', bg: 'rgba(239,68,68,0.07)' },
+                            { k: 'QP', v: qpPct != null ? fmtPctSigned(qpPct) : '—', c: '#d97706', bg: 'rgba(245,158,11,0.08)' },
+                            { k: 'TP', v: tpPct != null ? fmtPctSigned(tpPct) : '—', c: '#16a34a', bg: 'rgba(22,163,74,0.07)' },
+                          ].map(tile => (
+                            <div key={tile.k} style={{ textAlign: 'center', borderRadius: '6px', background: tile.bg, padding: '0.25rem 0.15rem' }}>
+                              <div style={{ fontSize: '0.56rem', fontWeight: 800, color: '#bbb', letterSpacing: '0.05em' }}>{tile.k}</div>
+                              <div style={{ fontSize: '0.72rem', fontWeight: 900, color: tile.c }}>{tile.v}</div>
+                            </div>
+                          ))}
+                        </div>
+
+                        <div style={{ display: 'grid', gap: '0.2rem' }}>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '0.67rem' }}>
+                            <span style={{ color: '#ef4444', fontWeight: 700 }}>{slHit ? 'Hit SL' : 'Will hit SL'}</span>
+                            <span style={{ color: '#777', fontWeight: 700 }}>
+                              {slPct == null ? '—' : slHit ? fmtPctSigned(slPct) : `${slDelta.toFixed(2)}% away`}
+                            </span>
+                          </div>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '0.67rem' }}>
+                            <span style={{ color: '#16a34a', fontWeight: 700 }}>{tpHit ? 'Hit TP' : 'Will hit TP'}</span>
+                            <span style={{ color: '#777', fontWeight: 700 }}>
+                              {tpPct == null ? '—' : tpHit ? fmtPctSigned(tpPct) : `${tpDelta.toFixed(2)}% away`}
+                            </span>
+                          </div>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '0.67rem' }}>
+                            <span style={{ color: '#d97706', fontWeight: 700 }}>
+                              {!qpArmed ? 'QP not armed' : qpHit ? 'Hit QP' : 'Will hit QP'}
+                            </span>
+                            <span style={{ color: '#777', fontWeight: 700 }}>
+                              {qpPct == null
+                                ? '—'
+                                : !qpArmed
+                                  ? `Peak ${fmtPctSigned(peakPct)}`
+                                  : qpHit
+                                    ? fmtPctSigned(qpPct)
+                                    : `${qpDelta.toFixed(2)}% above`}
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+
                       <div style={{ marginTop: '0.65rem', display: 'flex', justifyContent: 'flex-end' }}>
                         <button
                           onClick={() => handleLiquidatePosition(p.symbol)}
@@ -1454,7 +1575,20 @@ export default function TradingView() {
 
         {/* ── Symbol Trade History ── */}
         {(() => {
-          const symbolHistory = tradeHistory.filter(t => t.symbol === selected.symbol)
+          // Dedup by id first (same trade can arrive from both endpoints)
+          const seen = new Set()
+          const deduped = tradeHistory.filter(t => {
+            if (seen.has(t.id)) return false
+            seen.add(t.id)
+            return true
+          })
+          // Match by underlying symbol OR by contractName prefix
+          // (MONITOR_EXIT trades store the full contract as symbol, e.g. "TSLA260424C00387500")
+          const symbolHistory = deduped.filter(t => {
+            if (t.symbol === selected.symbol) return true
+            const cn = String(t.contractName || t.symbol || '')
+            return cn.startsWith(selected.symbol)
+          })
 
           // Time filter helper
           const histCutoff = () => {
@@ -1479,11 +1613,17 @@ export default function TradingView() {
                 return !isNaN(d) && d >= cutoff
               })
             : symbolHistory
-          const filteredHistory = histTypeFilter === 'All'
+          const typeFiltered = histTypeFilter === 'All'
             ? timeFiltered
             : histTypeFilter === 'MT'
               ? timeFiltered.filter(t => t.type === 'manual')
               : timeFiltered.filter(t => t.type === 'ai')
+          // Sort by entry time descending (most recent first)
+          const filteredHistory = [...typeFiltered].sort((a, b) => {
+            const ta = new Date(a._entryIso || a.entryTime || 0).getTime()
+            const tb = new Date(b._entryIso || b.entryTime || 0).getTime()
+            return tb - ta
+          })
 
           const hWins   = filteredHistory.filter(t => t.result === 'WIN').length
           const hLosses = filteredHistory.filter(t => t.result === 'LOSS').length
@@ -1571,65 +1711,112 @@ export default function TradingView() {
               No trades for {selected.symbol} in the selected period.
             </div>
           ) : (
-            <div style={{ overflowX: 'auto', overflowY: 'auto', maxHeight: '420px' }}>
-              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.76rem' }}>
-                <thead>
-                  <tr style={{ background: 'rgba(201,162,39,0.04)' }}>
-                    {['#', 'Source', 'Contract', 'Type', 'Strike', 'Buy Price', 'Sell Price', 'P&L', 'Result', 'Reason', 'Entry', 'Exit'].map(h => (
-                      <th key={h} style={{
-                        padding: '0.55rem 0.75rem', textAlign: 'left', fontWeight: 700, color: '#999',
-                        fontSize: '0.65rem', textTransform: 'uppercase', letterSpacing: '0.06em',
-                        borderBottom: '1px solid rgba(0,0,0,0.05)', whiteSpace: 'nowrap',
-                        position: 'sticky', top: 0, background: 'rgba(252,248,240,1)', zIndex: 1,
-                      }}>{h}</th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {filteredHistory.map((t, i) => (
-                    <tr key={t.id} style={{ borderBottom: '1px solid rgba(0,0,0,0.03)', background: i % 2 === 0 ? '#fff' : 'rgba(201,162,39,0.015)' }}>
-                      <td style={{ padding: '0.6rem 0.75rem', color: '#bbb', fontWeight: 600 }}>{filteredHistory.length - i}</td>
-                      <td style={{ padding: '0.6rem 0.75rem', whiteSpace: 'nowrap' }}>
-                        <span style={{
-                          padding: '0.15rem 0.45rem', borderRadius: '4px', fontWeight: 800, fontSize: '0.64rem',
-                          background: t.type === 'manual' ? 'rgba(37,99,235,0.12)' : 'rgba(201,162,39,0.12)',
-                          color: t.type === 'manual' ? '#2563eb' : GOLD_DEEP,
-                          letterSpacing: '0.03em',
-                        }}>{t.type === 'manual' ? 'MT' : 'AIT'}</span>
-                      </td>
-                      <td style={{ padding: '0.6rem 0.75rem', color: GOLD_DEEP, fontWeight: 700, whiteSpace: 'nowrap', maxWidth: '180px', overflow: 'hidden', textOverflow: 'ellipsis' }}
-                          title={t.contractName}>{t.contractName}</td>
-                      <td style={{ padding: '0.6rem 0.75rem', whiteSpace: 'nowrap' }}>
-                        <span style={{
-                          padding: '0.15rem 0.45rem', borderRadius: '20px', fontWeight: 700, fontSize: '0.65rem',
-                          background: t.optionType === 'call' ? 'rgba(22,163,74,0.1)' : t.optionType === 'put' ? 'rgba(239,68,68,0.08)' : 'rgba(201,162,39,0.08)',
-                          color: t.optionType === 'call' ? '#16a34a' : t.optionType === 'put' ? '#ef4444' : GOLD_DEEP,
-                        }}>{t.optionType !== '—' ? t.optionType.toUpperCase() : t.type.toUpperCase()}</span>
-                      </td>
-                      <td style={{ padding: '0.6rem 0.75rem', fontWeight: 700, color: '#111' }}>
-                        {t.strikePrice !== '—' ? `$${fmt(+t.strikePrice)}` : '—'}
-                      </td>
-                      <td style={{ padding: '0.6rem 0.75rem', fontWeight: 700, color: '#555' }}>${fmt(t.buyPrice)}</td>
-                      <td style={{ padding: '0.6rem 0.75rem', fontWeight: 700, color: '#555' }}>${fmt(t.sellPrice)}</td>
-                      <td style={{ padding: '0.6rem 0.75rem', fontWeight: 800, color: t.pnl >= 0 ? '#16a34a' : '#ef4444', whiteSpace: 'nowrap' }}>
-                        {t.pnl >= 0 ? '+' : ''}${fmt(t.pnl)}
-                      </td>
-                      <td style={{ padding: '0.6rem 0.75rem' }}>
-                        <span style={{
-                          padding: '0.2rem 0.55rem', borderRadius: '2px', fontWeight: 800, fontSize: '0.67rem',
-                          background: t.result === 'WIN' ? 'rgba(22,163,74,0.12)' : 'rgba(239,68,68,0.1)',
-                          color: t.result === 'WIN' ? '#16a34a' : '#ef4444',
-                        }}>{t.result === 'WIN' ? 'WIN' : 'LOSS'}</span>
-                      </td>
-                      <td style={{ padding: '0.6rem 0.75rem', color: '#777', fontWeight: 700, whiteSpace: 'nowrap' }}>
-                        {String(t.exitReason || t.exit_reason || '—').replace(/_/g, ' ')}
-                      </td>
-                      <td style={{ padding: '0.6rem 0.75rem', color: '#aaa', fontWeight: 500, whiteSpace: 'nowrap' }}>{t.entryTime}</td>
-                      <td style={{ padding: '0.6rem 0.75rem', color: '#aaa', fontWeight: 500, whiteSpace: 'nowrap' }}>{t.exitTime}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.72rem', padding: '0.9rem 1.15rem 1.25rem', maxHeight: '520px', overflowY: 'auto' }}>
+              {filteredHistory.map((t, i) => {
+                const pnlPct = t.buyPrice > 0 ? ((t.sellPrice - t.buyPrice) / t.buyPrice * 100) : 0
+                const underlying = t.symbol && t.symbol.length <= 6 ? t.symbol : selected.symbol
+                const isWin = t.result === 'WIN'
+                const isBreakeven = t.result === 'BREAKEVEN'
+                const accent = isBreakeven ? '#d97706' : isWin ? '#16a34a' : '#ef4444'
+                const accentBg = isBreakeven ? 'rgba(217,119,6,0.08)' : isWin ? 'rgba(22,163,74,0.06)' : 'rgba(239,68,68,0.06)'
+                const sourceBg = t.type === 'manual' ? 'rgba(37,99,235,0.12)' : 'rgba(201,162,39,0.12)'
+                const sourceColor = t.type === 'manual' ? '#2563eb' : GOLD_DEEP
+                const sideLabel = t.optionType !== '—' ? t.optionType.toUpperCase() : '—'
+                const exitReason = String(t.exitReason || t.exit_reason || '—').replace(/_/g, ' ')
+
+                return (
+                  <div
+                    key={t.id || i}
+                    style={{
+                      borderRadius: '11px',
+                      border: `1px solid ${accent}44`,
+                      borderLeft: `4px solid ${accent}`,
+                      background: '#fff',
+                      boxShadow: '0 1px 8px rgba(0,0,0,0.03)',
+                      padding: '0.72rem 0.9rem 0.8rem',
+                    }}
+                  >
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '0.7rem', flexWrap: 'wrap' }}>
+                      <div style={{ minWidth: 0 }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', flexWrap: 'wrap' }}>
+                          <span style={{ color: '#bbb', fontSize: '0.67rem', fontWeight: 700 }}>#{i + 1}</span>
+                          <span style={{ color: '#111', fontSize: '0.88rem', fontWeight: 900 }}>{underlying}</span>
+                          <span style={{
+                            padding: '0.13rem 0.42rem', borderRadius: '4px',
+                            fontWeight: 800, fontSize: '0.63rem', letterSpacing: '0.03em',
+                            background: sourceBg, color: sourceColor,
+                          }}>{t.type === 'manual' ? 'MT' : 'AIT'}</span>
+                          <span style={{
+                            padding: '0.13rem 0.42rem', borderRadius: '20px',
+                            fontWeight: 800, fontSize: '0.62rem',
+                            background: sideLabel === 'CALL' ? 'rgba(22,163,74,0.11)' : sideLabel === 'PUT' ? 'rgba(239,68,68,0.1)' : 'rgba(0,0,0,0.05)',
+                            color: sideLabel === 'CALL' ? '#16a34a' : sideLabel === 'PUT' ? '#ef4444' : '#777',
+                          }}>{sideLabel}</span>
+                        </div>
+                        <div style={{
+                          fontSize: '0.66rem', color: '#9ca3af', fontWeight: 600,
+                          marginTop: '0.16rem', maxWidth: '700px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+                        }} title={t.contractName}>{t.contractName}</div>
+                      </div>
+
+                      <div style={{ textAlign: 'right', flexShrink: 0 }}>
+                        <div style={{ fontSize: '1.02rem', fontWeight: 900, color: accent, lineHeight: 1 }}>
+                          {t.pnl >= 0 ? '+' : ''}${fmt(t.pnl)}
+                        </div>
+                        <div style={{ fontSize: '0.68rem', fontWeight: 800, color: accent, marginTop: '0.16rem' }}>
+                          {pnlPct >= 0 ? '+' : ''}{pnlPct.toFixed(2)}%
+                        </div>
+                      </div>
+                    </div>
+
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(135px, 1fr))', gap: '0.3rem', marginTop: '0.52rem' }}>
+                      {[
+                        { k: 'Strike', v: t.strikePrice !== '—' ? `$${fmt(+t.strikePrice)}` : '—' },
+                        { k: 'Entry $', v: `$${fmt(t.buyPrice)}` },
+                        { k: 'Exit $', v: `$${fmt(t.sellPrice)}` },
+                        { k: 'Entry Time', v: t.entryTime },
+                        { k: 'Exit Time', v: t.exitTime },
+                      ].map(row => (
+                        <div key={row.k} style={{ background: 'rgba(201,162,39,0.04)', borderRadius: '6px', padding: '0.32rem 0.42rem' }}>
+                          <div style={{ fontSize: '0.58rem', color: '#b2b2b2', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.04em' }}>{row.k}</div>
+                          <div style={{ fontSize: '0.72rem', color: '#333', fontWeight: 800, marginTop: '0.08rem', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }} title={String(row.v)}>{row.v || '—'}</div>
+                        </div>
+                      ))}
+                    </div>
+
+                    <div style={{
+                      marginTop: '0.52rem',
+                      borderRadius: '7px',
+                      background: accentBg,
+                      border: `1px solid ${accent}33`,
+                      padding: '0.36rem 0.5rem',
+                      display: 'flex',
+                      justifyContent: 'space-between',
+                      alignItems: 'center',
+                      gap: '0.5rem',
+                      flexWrap: 'wrap',
+                    }}>
+                      <span style={{
+                        padding: '0.14rem 0.5rem', borderRadius: '20px',
+                        background: isBreakeven ? 'rgba(217,119,6,0.18)' : isWin ? 'rgba(22,163,74,0.14)' : 'rgba(239,68,68,0.14)',
+                        color: accent,
+                        fontSize: '0.65rem',
+                        fontWeight: 900,
+                        letterSpacing: '0.03em',
+                      }}>{isBreakeven ? 'BREAKEVEN' : isWin ? 'WIN' : 'LOSS'}</span>
+                      <span style={{
+                        fontSize: '0.69rem',
+                        color: '#555',
+                        fontWeight: 700,
+                        maxWidth: '72%',
+                        whiteSpace: 'nowrap',
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis',
+                      }} title={exitReason}>{exitReason}</span>
+                    </div>
+                  </div>
+                )
+              })}
             </div>
           )}
         </div>
@@ -1758,7 +1945,8 @@ export default function TradingView() {
                     setOptionType(opt.val)
                     if (!manualPosition) {
                       suggestContractRef.current = null
-                      fetchSuggest(selected.symbol, opt.val)
+                      // pass false: user picked the type — don't let backend flip it back
+                      fetchSuggest(selected.symbol, opt.val, false)
                     }
                   }} disabled={!!manualPosition} style={{
                     flex: 1, padding: '0.45rem', borderRadius: '8px', border: 'none', cursor: manualPosition ? 'not-allowed' : 'pointer',
@@ -1801,6 +1989,37 @@ export default function TradingView() {
               <span style={{ color: GOLD_DEEP }}>×{qty || 1} lot{parseInt(qty) !== 1 ? 's' : ''}</span>
               <span style={{ color: direction === 'uptrend' ? '#16a34a' : '#ef4444' }}>· {direction === 'uptrend' ? 'Up' : 'Down'}</span>
             </div>
+
+            {/* Bid / Ask price row + spread warning */}
+            {!manualPosition && contractQuote && contractQuote.ask > 0 && (
+              <div style={{ marginBottom: '0.75rem' }}>
+                <div style={{ display: 'flex', gap: '0.4rem', marginBottom: '0.35rem' }}>
+                  <div style={{ flex: 1, padding: '0.42rem 0.6rem', borderRadius: '7px', background: 'rgba(22,163,74,0.07)', border: '1px solid rgba(22,163,74,0.2)', textAlign: 'center' }}>
+                    <div style={{ fontSize: '0.6rem', fontWeight: 700, color: '#16a34a', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Bid</div>
+                    <div style={{ fontSize: '0.82rem', fontWeight: 800, color: '#16a34a' }}>${contractQuote.bid.toFixed(2)}</div>
+                  </div>
+                  <div style={{ flex: 1, padding: '0.42rem 0.6rem', borderRadius: '7px', background: 'rgba(239,68,68,0.07)', border: '1px solid rgba(239,68,68,0.2)', textAlign: 'center' }}>
+                    <div style={{ fontSize: '0.6rem', fontWeight: 700, color: '#ef4444', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Ask</div>
+                    <div style={{ fontSize: '0.82rem', fontWeight: 800, color: '#ef4444' }}>${contractQuote.ask.toFixed(2)}</div>
+                  </div>
+                  <div style={{ flex: 1, padding: '0.42rem 0.6rem', borderRadius: '7px', background: 'rgba(100,100,100,0.06)', border: '1px solid rgba(100,100,100,0.13)', textAlign: 'center' }}>
+                    <div style={{ fontSize: '0.6rem', fontWeight: 700, color: '#888', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Mid</div>
+                    <div style={{ fontSize: '0.82rem', fontWeight: 800, color: '#555' }}>${contractQuote.mid.toFixed(2)}</div>
+                  </div>
+                </div>
+                {/* Spread warning: >10% spread = wide, you'll immediately be down */}
+                {contractQuote.spread_pct > 10 && (
+                  <div style={{ padding: '0.38rem 0.6rem', borderRadius: '7px', background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.25)', fontSize: '0.69rem', fontWeight: 700, color: '#dc2626', display: 'flex', alignItems: 'center', gap: '0.3rem' }}>
+                    ⚠️ Wide spread {contractQuote.spread_pct.toFixed(1)}% — you buy at ask ${contractQuote.ask.toFixed(2)}, instantly worth bid ${contractQuote.bid.toFixed(2)}. High risk of immediate loss.
+                  </div>
+                )}
+                {contractQuote.spread_pct > 0 && contractQuote.spread_pct <= 10 && (
+                  <div style={{ padding: '0.35rem 0.6rem', borderRadius: '7px', background: 'rgba(201,162,39,0.07)', border: '1px solid rgba(201,162,39,0.2)', fontSize: '0.68rem', fontWeight: 600, color: '#92710a', display: 'flex', alignItems: 'center', gap: '0.3rem' }}>
+                    Spread {contractQuote.spread_pct.toFixed(1)}% · entry at ask, exit near bid
+                  </div>
+                )}
+              </div>
+            )}
 
             {/* Buy / Sell Button — hidden in AI mode, but always visible when a position is open */}
             {(tradeMode !== 'ai' || manualPosition) && <button

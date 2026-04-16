@@ -286,6 +286,14 @@ def monitor_position_loop(tc: TradingClient, odc: OptionHistoricalDataClient, sy
     exit_reason = exit_reason or "FORCED_EXIT_NO_SIGNAL"
     exit_signal_time_iso = datetime.now(CST).isoformat(timespec="seconds")
 
+    # Before closing: check if the position is now registered in the bot registry
+    # (e.g. a manual trade that was registered after this generic monitor started).
+    # If so, defer to the dedicated monitor thread to avoid double-close and duplicate logs.
+    managed_now = {str(lot.get("contract_symbol") or "") for lot in get_open_positions()}
+    if symbol in managed_now:
+        info(f"[MONITOR] {symbol} is managed by bot registry — deferring exit to dedicated thread")
+        return
+
     # Retry sell up to 3 times before giving up
     ok = False
     fill_price = None
@@ -296,28 +304,34 @@ def monitor_position_loop(tc: TradingClient, odc: OptionHistoricalDataClient, sy
         info(f"[MONITOR] Sell attempt {_attempt + 1}/3 failed for {symbol}, retrying in 5s...")
         time.sleep(5)
 
-    final_price = fill_price if fill_price is not None else exit_price
     if not ok:
         info(f"[MONITOR] All sell attempts failed for {symbol} ({exit_reason}). Will retry on next cycle.")
         return
-    if ok:
-        pnl_pct = (final_price - entry_price) / entry_price * 100
-        _es = exit_state or {}
-        _log_monitor_exit(
-            symbol,
-            qty,
-            entry_price,
-            final_price,
-            exit_reason,
-            _es,
-            exit_signal_price=exit_price,
-            exit_signal_time=exit_signal_time_iso,
-        )
-        info(
-            f"[MONITOR] {symbol} EXIT={exit_reason} at {final_price:.4f} | pnl={pnl_pct:+.2f}% "
-            f"| peak={_es.get('max_pnl_pct', 0.0):+.2f}% "
-            f"sl={_es.get('sl_dynamic_pct', 0.0):+.2f}% "
-            f"qp={_es.get('qp_dynamic_pct', 0.0):+.2f}%"
+
+    # fill_price is None when the position was already closed externally (e.g. by the
+    # dedicated manual-trade monitor thread). Skip logging to prevent duplicate entries.
+    if fill_price is None:
+        info(f"[MONITOR] {symbol} already closed externally — skipping MONITOR_EXIT log")
+        return
+
+    final_price = fill_price
+    pnl_pct = (final_price - entry_price) / entry_price * 100
+    _es = exit_state or {}
+    _log_monitor_exit(
+        symbol,
+        qty,
+        entry_price,
+        final_price,
+        exit_reason,
+        _es,
+        exit_signal_price=exit_price,
+        exit_signal_time=exit_signal_time_iso,
+    )
+    info(
+        f"[MONITOR] {symbol} EXIT={exit_reason} at {final_price:.4f} | pnl={pnl_pct:+.2f}% "
+        f"| peak={_es.get('max_pnl_pct', 0.0):+.2f}% "
+        f"sl={_es.get('sl_dynamic_pct', 0.0):+.2f}% "
+        f"qp={_es.get('qp_dynamic_pct', 0.0):+.2f}%"
         )
 
 

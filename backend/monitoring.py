@@ -33,6 +33,7 @@ from config import (
     EXIT_STOP_LOSS_ENABLED,
     PRICE_POLL_SEC,
     QP_GAP_PCT,
+    QP_MIN_PEAK_PCT,
     RSI_EXIT_CHECK_SEC,
     SECRET_KEY,
     SYMBOL,
@@ -101,10 +102,11 @@ def _update_dynamic_thresholds(exit_state: dict, pnl_pct: float) -> None:
         candidate_sl = max_pnl_pct + trail_pct
         exit_state["sl_dynamic_pct"] = max(float(exit_state.get("sl_dynamic_pct", sl_static_pct)), candidate_sl)
 
-    # Ratchet quick-profit lock upward from first tick positive — never reduced.
+    # Ratchet quick-profit lock upward — never reduced.
     # qp_dynamic = peak - gap, so if peak = 2.35% and gap = 0.25%, QP = 2.10%.
-    # Only arms once the trade is in positive territory (don't lock in a loss).
-    if max_pnl_pct > 0.0:
+    # Only arms once peak reaches QP_MIN_PEAK_PCT to avoid firing on tiny noise blips
+    # that lock in a negative level and cause an immediate loss exit.
+    if max_pnl_pct >= QP_MIN_PEAK_PCT:
         candidate_qp = max_pnl_pct - qp_gap_pct
         # Only ratchet up, never down. Ignore negative candidates (too early).
         if candidate_qp > float(exit_state.get("qp_dynamic_pct", 0.0)):
@@ -133,13 +135,11 @@ def _evaluate_priority_exit(
         return None
 
     # Priority 2: quick-profit protection (one-way ratchet, no downward reset).
-    # QP starts at 0% and builds as the trade peaks. Only fires when:
-    #   - trade was in profit (max_pnl > 0)
-    #   - qp_dynamic was set (> 0) meaning we've locked a level
-    #   - current pnl pulled back below the locked level
+    # QP only arms once peak >= QP_MIN_PEAK_PCT — prevents locking in a negative
+    # level from a tiny positive blip and immediately exiting at a loss.
     if (
         EXIT_QUICK_PROFIT_ENABLED
-        and max_pnl_pct > 0.0
+        and max_pnl_pct >= QP_MIN_PEAK_PCT
         and qp_dynamic_pct > 0.0
         and pnl_pct < max_pnl_pct
         and pnl_pct <= qp_dynamic_pct

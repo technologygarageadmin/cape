@@ -9,6 +9,18 @@ Full-stack options scalping platform with an automated RSI-based entry engine, d
 
 > **Risk Notice** - This software can place real orders. Use paper trading until you fully validate behavior. You are solely responsible for all trading risk and API usage.
 
+## Recent Updates (Apr 2026)
+
+- **Trading View: Open Positions now includes Exit Watch**
+   - Per-open-position live tiles for `SL`, `QP`, `TP`
+   - Human-readable status lines: **Hit SL / Will hit SL**, **Hit TP / Will hit TP**, **Hit QP / Will hit QP**
+   - QP arming visibility when peak is not high enough yet
+- **Trading View: Symbol History restyled to match Overall Summary history**
+   - Card-style rows with source badge (`MT`/`AIT`), side (`CALL`/`PUT`), strike, entry/exit price, PnL $, PnL %, result, and exit reason
+   - Deduplication and robust symbol matching for contract-format symbols (e.g. `TSLA260424C00387500`)
+- **Exit engine safety tweak**
+   - Quick Profit (QP) is now armed only after peak PnL reaches a minimum threshold (`QP_MIN_PEAK_PCT`), preventing QP exits at small/negative pullback levels
+
 ---
 
 ## Repository Layout
@@ -91,14 +103,14 @@ Dynamic exits -- evaluated every price tick (WebSocket-first, polling fallback).
 |----------|------|---------|
 | 1 | Take Profit | PnL >= +8.0% |
 | 2 | Stop Loss | PnL <= -3.5% |
-| 3 | **Dynamic QP** | PnL pulls back below `peak - 0.25%` (one-way ratchet from 0%) |
+| 3 | **Dynamic QP** | Arms only after peak >= `QP_MIN_PEAK_PCT`; then exits on pullback below `peak - 0.25%` |
 | 4 | Trailing Stop | Arms when peak >= 2.0%; trail ratio tightens as profit grows |
 | 5 | Breakeven Stop | Once peak >= 1.5%, SL floor moves to 0% |
 | 6 | Bad Entry | PnL < -1.5% AND peak never exceeded 0.3% within 45s |
 | 7 | Momentum Stall | RSI delta flips against trade after >= 2 min AND PnL < 0.5% |
 | 8 | Max Hold | Still open after 7 min AND PnL < 0.5% |
 
-**Dynamic QP:** Starts at 0%, tracks the running peak, locks in `peak - 0.25%`. A trade peaking at 2.35% exits at ~2.10% on pullback.
+**Dynamic QP:** Once peak PnL reaches `QP_MIN_PEAK_PCT` (default 1.0%), QP ratchet tracks running peak and locks at `peak - QP_GAP_PCT`.
 
 ---
 
@@ -142,6 +154,7 @@ EMA_THIRD_PERIOD = 55
 TAKE_PROFIT_PCT            = 0.08   # 8%
 STOP_LOSS_PCT              = 0.035  # 3.5%
 QP_GAP_PCT                 = 0.25   # dynamic QP: lock in peak - 0.25%
+QP_MIN_PEAK_PCT            = 1.0    # arm QP only after peak reaches +1.0%
 TRAILING_MIN_PEAK_PCT      = 2.0
 EXIT_BREAKEVEN_TRIGGER_PCT = 1.5
 EXIT_BAD_ENTRY_WINDOW_SEC  = 45
@@ -236,7 +249,7 @@ start.bat
 | **Dashboard** | Account overview and market summary |
 | **Live Positions** | Open option positions with live PnL |
 | **Overall Summary** | Trade history with exit snapshot analysis, win/loss/time filters |
-| **Trading View** | Candle chart with RSI overlay |
+| **Trading View** | Candle chart + per-position Exit Watch (SL/TP/QP hit/will-hit) + symbol history cards |
 | **ATR View** | ATR-based volatility view |
 
 ---
