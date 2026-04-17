@@ -289,6 +289,34 @@ const styles = {
   },
   priceLabel: { fontSize: '0.65rem', color: '#888', textTransform: 'uppercase', letterSpacing: '0.05em', fontWeight: 600 },
   priceValue: { fontSize: '0.95rem', fontWeight: 700, color: '#111' },
+  bracketGrid: {
+    display: 'grid',
+    gridTemplateColumns: 'repeat(3, 1fr)',
+    gap: '0.75rem',
+    marginTop: '0.75rem',
+  },
+  bracketItem: {
+    background: 'rgba(201,162,39,0.05)',
+    border: '1px solid rgba(201,162,39,0.12)',
+    borderRadius: '10px',
+    padding: '0.75rem',
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '0.25rem',
+  },
+  bracketLabel: {
+    fontSize: '0.65rem',
+    textTransform: 'uppercase',
+    letterSpacing: '0.08em',
+    fontWeight: 700,
+    color: '#8a6a10',
+  },
+  bracketValue: {
+    fontSize: '0.75rem',
+    fontWeight: 700,
+    color: '#333',
+    wordBreak: 'break-word',
+  },
   // Empty state
   empty: {
     textAlign: 'center',
@@ -547,6 +575,11 @@ function PositionCard({ pos }) {
 
   const exitReasonLabel = (live.exit_reason || '').replace(/_/g, ' ').replace(/EXIT$/i, '').trim()
   const pnlDollar = parseFloat(live.pnl_dollar || 0)
+  const bracketParentOrderId = pos.bracket_parent_order_id || live.bracket_parent_order_id
+  const qpPlaceholderOrderId = pos.qp_placeholder_order_id || live.qp_placeholder_order_id
+  const tpOrderIds = Array.isArray(pos.tp_order_ids) ? pos.tp_order_ids : (Array.isArray(live.tp_order_ids) ? live.tp_order_ids : [])
+  const slOrderIds = Array.isArray(pos.sl_order_ids) ? pos.sl_order_ids : (Array.isArray(live.sl_order_ids) ? live.sl_order_ids : [])
+  const useBracketQp = !!(pos.use_bracket_qp || live.use_bracket_qp)
 
   return (
     <div style={{
@@ -679,6 +712,34 @@ function PositionCard({ pos }) {
                 </span>
               </div>
             </div>
+            {(useBracketQp || bracketParentOrderId || qpPlaceholderOrderId || tpOrderIds.length > 0 || slOrderIds.length > 0) && (
+              <div style={styles.bracketGrid}>
+                <div style={styles.bracketItem}>
+                  <span style={styles.bracketLabel}>Bracket Mode</span>
+                  <span style={styles.bracketValue}>{useBracketQp ? 'Enabled' : 'Disabled'}</span>
+                </div>
+                <div style={styles.bracketItem}>
+                  <span style={styles.bracketLabel}>Bracket Parent</span>
+                  <span style={styles.bracketValue}>{bracketParentOrderId || '—'}</span>
+                </div>
+                <div style={styles.bracketItem}>
+                  <span style={styles.bracketLabel}>QP Placeholder SL</span>
+                  <span style={styles.bracketValue}>{qpPlaceholderOrderId || '—'}</span>
+                </div>
+                <div style={styles.bracketItem}>
+                  <span style={styles.bracketLabel}>TP Child IDs</span>
+                  <span style={styles.bracketValue}>{tpOrderIds.length > 0 ? tpOrderIds.join(', ') : '—'}</span>
+                </div>
+                <div style={styles.bracketItem}>
+                  <span style={styles.bracketLabel}>SL Child IDs</span>
+                  <span style={styles.bracketValue}>{slOrderIds.length > 0 ? slOrderIds.join(', ') : '—'}</span>
+                </div>
+                <div style={styles.bracketItem}>
+                  <span style={styles.bracketLabel}>Child Count</span>
+                  <span style={styles.bracketValue}>{tpOrderIds.length + slOrderIds.length}</span>
+                </div>
+              </div>
+            )}
           </div>
 
           {/* Why Position Opened */}

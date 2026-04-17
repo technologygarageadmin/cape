@@ -11,6 +11,12 @@ Full-stack options scalping platform with an automated RSI-based entry engine, d
 
 ## Recent Updates (Apr 2026)
 
+- **Exit path hardening**
+   - Safety SL is now placed immediately at entry and then replaced as the dynamic stop ratchets up
+   - Alpaca stop orders are updated in place instead of stacking new orders, which avoids held-qty failures
+   - Manual trades reserve symbol ownership during handoff so the generic orphan monitor does not double-log the same exit
+- **Broker fallback for options**
+   - Alpaca options complex/bracket orders can be rejected, so entry now falls back cleanly to a plain market order when needed
 - **Trading View: Open Positions now includes Exit Watch**
    - Per-open-position live tiles for `SL`, `QP`, `TP`
    - Human-readable status lines: **Hit SL / Will hit SL**, **Hit TP / Will hit TP**, **Hit QP / Will hit QP**
@@ -98,6 +104,8 @@ PUT filters are the exact mirror of the above.
 ## Exit Strategy
 
 Dynamic exits -- evaluated every price tick (WebSocket-first, polling fallback).
+
+At entry, the system also places a broker-side safety SL so there is always a hard stop in place while the monitor manages the real exit logic.
 
 | Priority | Exit | Trigger |
 |----------|------|---------|
@@ -237,6 +245,7 @@ start.bat
 - WebSocket-first option quote feed
 - Polling fallback (`PRICE_POLL_SEC = 3s`) when WS unavailable
 - Dynamic thresholds updated on every tick
+- Broker safety SL is created at entry and replaced as the trailing stop moves
 - Sellable bid-side price used for exit evaluation (not optimistic mid)
 
 ---
@@ -258,7 +267,8 @@ start.bat
 
 - `config.py` is git-ignored -- credentials never committed
 - Symbol mode gate: `auto` / `manual` / `off` per symbol (persisted in `logs/symbol_modes.json`)
-- Registry-based deduplication prevents double-exits
+- Registry-based ownership prevents double-exits and duplicate monitor attachments
+- Manual-trade logging writes one Mongo record per completed trade
 - WebSocket -> polling fallback for robustness
 - Orphan position monitor handles positions opened outside the AIT thread
 - `PAPER_TRADING = True` by default -- set `False` only when ready for live

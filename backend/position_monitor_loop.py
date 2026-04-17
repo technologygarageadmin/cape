@@ -26,13 +26,17 @@ from config import (
 )
 from logger import debug, info
 from monitoring import (
+    _append_sell_tick,
+    _append_timeline_tick,
     _evaluate_priority_exit,
     _init_exit_state,
+    _iso_now_utc,
     _update_dynamic_thresholds,
     monitor_with_polling,
     monitor_with_websocket,
 )
 from order_execution import get_open_positions, place_market_order, wait_for_fill
+from order_execution import get_externally_managed_symbols
 
 
 _OPTION_RE = re.compile(r"^([A-Z]+)(\d{6})([CP])(\d{8})$")
@@ -118,6 +122,7 @@ def _log_monitor_exit(
             "exit_sl_pct": round(float(exit_state.get("sl_dynamic_pct", 0.0)), 4),
             "exit_qp_pct": round(float(exit_state.get("qp_dynamic_pct", 0.0)), 4),
             "exit_tp_pct": round(float(exit_state.get("tp_pct", 0.0)), 4),
+            "timeline": exit_state.get("timeline") or [],
             "log_source": "position_monitor_loop",
         })
     except Exception as ex:
@@ -221,6 +226,10 @@ def close_position(
 
 def monitor_position_loop(tc: TradingClient, odc: OptionHistoricalDataClient, symbol: str, entry_price: float, qty: int) -> None:
     """Monitor one existing open position and exit using configured criteria."""
+    if symbol in get_externally_managed_symbols():
+        info(f"[MONITOR] {symbol} reserved by dedicated monitor — skipping generic monitor thread")
+        return
+
     tp_price = entry_price * (1 + TAKE_PROFIT_PCT)
     sl_price = entry_price * (1 - STOP_LOSS_PCT)
     info(f"[MONITOR] {symbol} tracking started | entry={entry_price:.4f} tp={tp_price:.4f} sl={sl_price:.4f}")
@@ -229,6 +238,7 @@ def monitor_position_loop(tc: TradingClient, odc: OptionHistoricalDataClient, sy
 
     exit_reason = None
     exit_price = entry_price
+    exit_state: dict = {}
 
     if underlying and signal:
         # Option contract path: full monitor stack (TP/SL, dynamic QP, trailing SL, RSI opposite cross).
@@ -240,8 +250,13 @@ def monitor_position_loop(tc: TradingClient, odc: OptionHistoricalDataClient, sy
             context_label=f"OPENPOS {underlying} {signal}",
             signal=signal,
             underlying_symbol=underlying,
+            tc=tc,
+            qty=qty,
         )
         if exit_reason is None:
+            # Pass whatever exit_state WS built (may have partial ticks) as initial state
+            # so polling continues on the same timeline rather than starting fresh.
+            ws_partial_state = exit_state if isinstance(exit_state, dict) and exit_state else None
             exit_reason, exit_price, exit_state = monitor_with_polling(
                 odc,
                 symbol,
@@ -251,10 +266,18 @@ def monitor_position_loop(tc: TradingClient, odc: OptionHistoricalDataClient, sy
                 context_label=f"OPENPOS {underlying} {signal}",
                 signal=signal,
                 underlying_symbol=underlying,
+                tc=tc,
+                qty=qty,
+                initial_exit_state=ws_partial_state,
             )
     else:
         # Non-option fallback: price-based criteria (TP/SL, dynamic QP, trailing SL).
         exit_state = _init_exit_state(entry_price, tp_price, sl_price)
+        _append_timeline_tick(
+            exit_state, source="entry", tick_ts=_iso_now_utc(),
+            fill_price=entry_price, mid_price=entry_price,
+            bid_price=None, sellable_price=entry_price, pnl_pct=0.0,
+        )
         while True:
             try:
                 current = None
@@ -273,10 +296,16 @@ def monitor_position_loop(tc: TradingClient, odc: OptionHistoricalDataClient, sy
 
                 pnl_pct = (price - entry_price) / entry_price * 100
                 _update_dynamic_thresholds(exit_state, pnl_pct)
+                _append_timeline_tick(
+                    exit_state, source="poll", tick_ts=_iso_now_utc(),
+                    fill_price=entry_price, mid_price=price,
+                    bid_price=None, sellable_price=price, pnl_pct=pnl_pct,
+                )
                 maybe_exit = _evaluate_priority_exit(pnl_pct, exit_state)
                 if maybe_exit:
                     exit_reason = maybe_exit
                     exit_price = price
+                    _append_sell_tick(exit_state, exit_reason, price, entry_price)
                     break
                 time.sleep(PRICE_POLL_SEC)
             except Exception as ex:
@@ -317,6 +346,7 @@ def monitor_position_loop(tc: TradingClient, odc: OptionHistoricalDataClient, sy
     final_price = fill_price
     pnl_pct = (final_price - entry_price) / entry_price * 100
     _es = exit_state or {}
+    info(f"[MONITOR] Saving to MongoDB — timeline ticks: {len(_es.get('timeline') or [])}")
     _log_monitor_exit(
         symbol,
         qty,
@@ -355,6 +385,7 @@ def run_monitor_all_positions() -> None:
                 for lot in get_open_positions()
                 if lot.get("status") != "CLOSED"
             }
+            managed_symbols |= get_externally_managed_symbols()
 
             for pos in positions:
                 symbol = str(getattr(pos, "symbol", "") or "")

@@ -136,7 +136,7 @@ from alpaca.data.requests import StockBarsRequest, StockLatestQuoteRequest, Stoc
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 from alpaca.trading.client import TradingClient
 from alpaca.trading.enums import ContractType, OrderSide, OrderStatus, QueryOrderStatus, TimeInForce
-from alpaca.trading.requests import GetOrdersRequest, MarketOrderRequest
+from alpaca.trading.requests import GetOrdersRequest, MarketOrderRequest, StopLimitOrderRequest
 
 from alpaca_helpers import (
     build_option_snapshot_request,
@@ -148,7 +148,9 @@ from pymongo import MongoClient
 
 from config import (
     API_KEY, CHECK_INTERVAL_SEC, FILL_WAIT_SEC, MONGO_DB_NAME, MONGO_ENABLED, MONGO_URI,
+    BRACKET_QP_PLACEHOLDER_PCT,
     EXIT_ALLOW_POSITIVE_PNL_IN_ENTRY_CANDLE,
+    EXIT_BRACKET_QP_ENABLED,
     EXIT_AFTER_NEXT_CANDLE_ENABLED,
     EXIT_SAME_CANDLE_MIN_PNL_PCT,
     EXIT_SAME_CANDLE_USE_BID_PRICE,
@@ -156,6 +158,7 @@ from config import (
     QTY, QP_GAP_PCT, RSI_MA_PERIOD, RSI_PERIOD, SECRET_KEY,
     STOCK_DATA_FEED, STOP_LOSS_PCT, STRADDLE_ENABLED, STRADDLE_OPEN_WINDOW_MIN,
     SYMBOL, TAKE_PROFIT_PCT, WATCHLIST_SYMBOLS,
+    SL_STOP_LIMIT_BUFFER_PCT,
     EXIT_TAKE_PROFIT_ENABLED, EXIT_STOP_LOSS_ENABLED, PRICE_POLL_SEC,
     AIT_ENABLED, MT_ENABLED,
     AIT_ENTRY_ENABLED, AIT_EXIT_ENABLED,
@@ -1148,7 +1151,28 @@ def _ait_run_straddle(
         try:
             contract = select_best_contract(tc, odc, symbol, expiry, contract_type, current_price)
             print(f"[AIT:{symbol}] Straddle {leg_name}: buying {contract.symbol}")
-            buy_order = place_market_order(tc, contract.symbol, QTY, OrderSide.BUY)
+            entry_option_price = None
+            try:
+                entry_option_price = float(get_option_price(odc, contract.symbol))
+            except Exception:
+                entry_option_price = None
+            buy_order = place_market_order(
+                tc,
+                contract.symbol,
+                QTY,
+                OrderSide.BUY,
+                reference_price=entry_option_price,
+                allow_limit=False,
+                use_bracket=EXIT_BRACKET_QP_ENABLED,
+                take_profit_price=(
+                    max(0.01, round(entry_option_price * (1 + TAKE_PROFIT_PCT), 4))
+                    if entry_option_price and entry_option_price > 0 else None
+                ),
+                stop_loss_price=(
+                    max(0.01, round(entry_option_price * (1 + BRACKET_QP_PLACEHOLDER_PCT / 100.0), 4))
+                    if entry_option_price and entry_option_price > 0 else None
+                ),
+            )
             filled_buy = wait_for_fill(tc, str(buy_order.id), FILL_WAIT_SEC)
             if filled_buy.status != OrderStatus.FILLED:
                 print(f"[AIT:{symbol}] Straddle {leg_name} BUY failed: {filled_buy.status}")
@@ -1223,6 +1247,7 @@ def _ait_run_straddle(
                     underlying_symbol=symbol,
                     use_extended_exit_criteria=True,
                     buy_order_id=buy_order_id,
+                    buy_entry_order_id=buy_order_id,
                     tc=tc, qty=QTY,
                 )
             exit_signal_time_iso = datetime.now(CDT).isoformat(timespec="seconds")
@@ -1426,19 +1451,29 @@ def _ait_trade_loop(
                 f"(strike: {contract_strike:.4f})"
             )
 
-            buy_order = place_market_order(
-                tc,
-                contract_symbol,
-                QTY,
-                order_side,
-                allow_limit=False,
-            )
-
             entry_signal_price: float | None = None
             try:
                 entry_signal_price = float(get_option_price(odc, contract_symbol))
             except Exception as ex:
                 print(f"[AIT:{symbol}] Signal price unavailable for {contract_symbol}: {ex}")
+
+            buy_order = place_market_order(
+                tc,
+                contract_symbol,
+                QTY,
+                order_side,
+                reference_price=entry_signal_price,
+                allow_limit=False,
+                use_bracket=EXIT_BRACKET_QP_ENABLED,
+                take_profit_price=(
+                    max(0.01, round(entry_signal_price * (1 + TAKE_PROFIT_PCT), 4))
+                    if entry_signal_price and entry_signal_price > 0 else None
+                ),
+                stop_loss_price=(
+                    max(0.01, round(entry_signal_price * (1 + BRACKET_QP_PLACEHOLDER_PCT / 100.0), 4))
+                    if entry_signal_price and entry_signal_price > 0 else None
+                ),
+            )
 
             filled_buy = wait_for_fill(tc, str(buy_order.id), FILL_WAIT_SEC)
             if filled_buy.status != OrderStatus.FILLED:
@@ -1511,6 +1546,7 @@ def _ait_trade_loop(
                     underlying_symbol=symbol,
                     min_exit_epoch_ts=min_exit_epoch_ts,
                     buy_order_id=rsi_buy_order_id,
+                    buy_entry_order_id=rsi_buy_order_id,
                     tc=tc, qty=QTY,
                 )
                 if exit_reason is None:
@@ -1520,6 +1556,7 @@ def _ait_trade_loop(
                         underlying_symbol=symbol,
                         min_exit_epoch_ts=min_exit_epoch_ts,
                         buy_order_id=rsi_buy_order_id,
+                        buy_entry_order_id=rsi_buy_order_id,
                         initial_exit_state=exit_state if exit_state else None,
                         tc=tc, qty=QTY,
                     )
@@ -1860,6 +1897,7 @@ def _recovery_monitor_thread(
             signal=signal,
             underlying_symbol=underlying,
             buy_order_id=buy_order_id,
+            buy_entry_order_id=buy_order_id,
             tc=tc, qty=qty,
         )
     if exit_reason is None:
@@ -1869,6 +1907,7 @@ def _recovery_monitor_thread(
             signal=signal,
             underlying_symbol=underlying,
             buy_order_id=buy_order_id,
+            buy_entry_order_id=buy_order_id,
             initial_exit_state=exit_state if exit_state else None,
             tc=tc, qty=qty,
         )
@@ -2145,6 +2184,7 @@ def _recover_open_positions() -> None:
                                 "sell_order_id": close_order_id,
                                 "created_at": datetime.now(CDT),
                                 "log_source": "startup_recovery_immediate",
+                                "timeline": [],
                             })
                     else:
                         print(f"[RECOVERY] close_position returned no order for {contract_symbol}")
@@ -2601,6 +2641,7 @@ def close_position_endpoint(symbol: str) -> dict[str, Any]:
                 "exit_time": now_iso,
                 "created_at": datetime.now(CDT),
                 "trade_duration_sec": _m_dur,
+                "timeline": [],
                 **_snap,
             }
             ins = _options_log_col.insert_one(_ml_doc)
@@ -2703,9 +2744,21 @@ def get_live_positions_api() -> dict[str, Any]:
 
     for pos in positions:
         live = pos.get("live", {})
+        pos["bracket_parent_order_id"] = live.get("bracket_parent_order_id")
+        pos["qp_placeholder_order_id"] = live.get("qp_placeholder_order_id")
+        pos["tp_order_ids"] = live.get("tp_order_ids") or []
+        pos["sl_order_ids"] = live.get("sl_order_ids") or []
+        pos["use_bracket_qp"] = bool(live.get("use_bracket_qp", False))
         exit_reason = live.get("exit_reason")
         if exit_reason:
             live["exit_description"] = EXIT_REASON_DESCRIPTIONS.get(exit_reason, exit_reason)
+
+        if pos["use_bracket_qp"]:
+            live["threshold_notes"] = live.get("threshold_notes", []) + [
+                f"Bracket parent: {pos['bracket_parent_order_id'] or 'N/A'}",
+                f"TP child ids: {', '.join(pos['tp_order_ids']) if pos['tp_order_ids'] else 'none'}",
+                f"QP placeholder SL id: {pos['qp_placeholder_order_id'] or 'none'}",
+            ]
 
         # Compute dollar PnL from fill_price, current_price, qty (options: qty * 100)
         fill_price = float(pos.get("fill_price", 0) or 0)
@@ -2987,14 +3040,28 @@ def manual_option_buy(body: ManualOptionBuyBody) -> dict[str, Any]:
     Returns order id, status, and fill price (if already filled).
     """
     contract = body.contract_symbol.strip().upper()
+    entry_price = None
     try:
-        order = trading_client.submit_order(
-            MarketOrderRequest(
-                symbol=contract,
-                qty=body.qty,
-                side=OrderSide.BUY,
-                time_in_force=TimeInForce.DAY,
-            )
+        entry_price = float(get_option_price(option_data_client, contract))
+    except Exception:
+        entry_price = None
+    try:
+        order = place_market_order(
+            trading_client,
+            contract,
+            body.qty,
+            OrderSide.BUY,
+            reference_price=entry_price,
+            allow_limit=False,
+            use_bracket=EXIT_BRACKET_QP_ENABLED,
+            take_profit_price=(
+                max(0.01, round(entry_price * (1 + TAKE_PROFIT_PCT), 4))
+                if entry_price and entry_price > 0 else None
+            ),
+            stop_loss_price=(
+                max(0.01, round(entry_price * (1 + BRACKET_QP_PLACEHOLDER_PCT / 100.0), 4))
+                if entry_price and entry_price > 0 else None
+            ),
         )
     except Exception as ex:
         raise HTTPException(status_code=502, detail=f"Failed to place option order: {str(ex)}") from ex
@@ -3006,12 +3073,34 @@ def manual_option_buy(body: ManualOptionBuyBody) -> dict[str, Any]:
     except (TypeError, ValueError):
         fill_price = None
 
+    safety_stop_order = None
+    if fill_price and fill_price > 0:
+        try:
+            safety_stop_price = max(0.01, round(fill_price * (1 - STOP_LOSS_PCT), 4))
+            safety_stop_limit_price = max(
+                0.01,
+                round(safety_stop_price * (1 - SL_STOP_LIMIT_BUFFER_PCT / 100.0), 4),
+            )
+            safety_stop_order = trading_client.submit_order(
+                StopLimitOrderRequest(
+                    symbol=contract,
+                    qty=body.qty,
+                    side=OrderSide.SELL,
+                    time_in_force=TimeInForce.DAY,
+                    stop_price=safety_stop_price,
+                    limit_price=safety_stop_limit_price,
+                )
+            )
+        except Exception as ex:
+            print(f"[MANUAL BUY] Safety stop placement failed for {contract}: {ex}")
+
     return {
         "order_id":    serialized.get("id"),
         "status":      serialized.get("status", "pending_new"),
         "fill_price":  fill_price,
         "contract":    contract,
         "qty":         body.qty,
+        "safety_stop_order_id": str(getattr(safety_stop_order, "id", "") or "") or None,
     }
 
 
@@ -3140,6 +3229,7 @@ def _manual_trade_monitor_thread(
         signal=signal,
         underlying_symbol=underlying,
         buy_order_id=buy_order_id,
+        buy_entry_order_id=buy_order_id,
         tc=tc, qty=qty,
     )
     if exit_reason is None:
@@ -3149,6 +3239,7 @@ def _manual_trade_monitor_thread(
             signal=signal,
             underlying_symbol=underlying,
             buy_order_id=buy_order_id,
+            buy_entry_order_id=buy_order_id,
             initial_exit_state=exit_state if exit_state else None,
             tc=tc, qty=qty,
         )
@@ -3296,8 +3387,29 @@ def manual_trade_buy(body: ManualTradeBuyBody) -> dict[str, Any]:
     qty = body.qty
 
     # 1. Place market buy
+    entry_price = None
     try:
-        buy_order = place_market_order(trading_client, contract, qty, OrderSide.BUY)
+        entry_price = float(get_option_price(option_data_client, contract))
+    except Exception:
+        entry_price = None
+    try:
+        buy_order = place_market_order(
+            trading_client,
+            contract,
+            qty,
+            OrderSide.BUY,
+            reference_price=entry_price,
+            allow_limit=False,
+            use_bracket=EXIT_BRACKET_QP_ENABLED,
+            take_profit_price=(
+                max(0.01, round(entry_price * (1 + TAKE_PROFIT_PCT), 4))
+                if entry_price and entry_price > 0 else None
+            ),
+            stop_loss_price=(
+                max(0.01, round(entry_price * (1 + BRACKET_QP_PLACEHOLDER_PCT / 100.0), 4))
+                if entry_price and entry_price > 0 else None
+            ),
+        )
     except Exception as ex:
         raise HTTPException(status_code=502, detail=f"Failed to place buy order: {str(ex)}") from ex
 

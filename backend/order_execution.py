@@ -1,13 +1,15 @@
 import time
 import threading
 from datetime import datetime, timezone
-from alpaca.trading.enums import OrderStatus, TimeInForce
-from alpaca.trading.requests import LimitOrderRequest, MarketOrderRequest
+from alpaca.trading.enums import OrderClass, OrderSide, OrderStatus, TimeInForce
+from alpaca.trading.requests import LimitOrderRequest, MarketOrderRequest, ReplaceOrderRequest, StopLimitOrderRequest, StopLossRequest, TakeProfitRequest
 from config import (
     ENTRY_LIMIT_OFFSET_PCT,
     ENTRY_ORDER_TYPE,
     ENTRY_TIME_IN_FORCE,
     FILL_CHECK_INTERVAL_SEC,
+    SL_STOP_LIMIT_BUFFER_PCT,
+    SL_STOP_ORDERS_ENABLED,
 )
 from logger import debug, info
 
@@ -79,6 +81,11 @@ def register_position(
             "last_updated": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "exit_reason": None,
             "monitoring_active": True,
+            "is_closing": False,
+            "broker_safety_sl_order_id": None,
+            "broker_safety_sl_stop_price": None,
+            "broker_safety_sl_limit_price": None,
+            "broker_safety_sl_last_placed_pct": None,
         }
     info(f"[REGISTRY] Registered {buy_order_id} → {contract_symbol} qty={qty} status=OPEN")
 
@@ -90,6 +97,10 @@ def mark_selling(buy_order_id: str, sell_order_id: str) -> None:
         if pos:
             pos["status"] = "SELLING"
             pos["sell_order_id"] = sell_order_id
+    with _live_exit_lock:
+        live = _live_exit_states.get(buy_order_id)
+        if live:
+            live["is_closing"] = True
     info(f"[REGISTRY] {buy_order_id} → SELLING (sell_order_id={sell_order_id})")
 
 
@@ -103,6 +114,7 @@ def close_position(buy_order_id: str) -> dict | None:
         live = _live_exit_states.get(buy_order_id)
         if live:
             live["monitoring_active"] = False
+            live["is_closing"] = False
     info(f"[REGISTRY] {buy_order_id} → CLOSED")
     return pos
 
@@ -128,6 +140,24 @@ def update_live_exit_state(buy_order_id: str, exit_state: dict, pnl_pct: float, 
         live["qp_floor_pct"] = round(float(exit_state.get("qp_floor_pct", 0)), 4)
         live["qp_dynamic_pct"] = round(float(exit_state.get("qp_dynamic_pct", 0)), 4)
         live["max_pnl_pct"] = round(float(exit_state.get("max_pnl_pct", 0)), 4)
+        live["use_bracket_qp"] = bool(exit_state.get("use_bracket_qp", False))
+        live["bracket_parent_order_id"] = exit_state.get("bracket_parent_order_id")
+        live["qp_placeholder_order_id"] = exit_state.get("qp_placeholder_order_id")
+        live["qp_last_replaced_pct"] = exit_state.get("qp_last_replaced_pct")
+        live["tp_order_ids"] = list(exit_state.get("tp_order_ids") or [])
+        live["tp_order_filled"] = bool(exit_state.get("tp_order_filled", False))
+        live["tp_order_id_filled"] = exit_state.get("tp_order_id_filled")
+        live["tp_order_fill_price"] = exit_state.get("tp_order_fill_price")
+        live["sl_order_ids"] = list(exit_state.get("sl_order_ids") or [])
+        live["sl_order_filled"] = bool(exit_state.get("sl_order_filled", False))
+        live["sl_order_id_filled"] = exit_state.get("sl_order_id_filled")
+        live["sl_order_fill_price"] = exit_state.get("sl_order_fill_price")
+        live["sl_order_exit_reason"] = exit_state.get("sl_order_exit_reason")
+        live["broker_safety_sl_order_id"] = exit_state.get("broker_safety_sl_order_id")
+        live["broker_safety_sl_stop_price"] = exit_state.get("broker_safety_sl_stop_price")
+        live["broker_safety_sl_limit_price"] = exit_state.get("broker_safety_sl_limit_price")
+        live["broker_safety_sl_last_placed_pct"] = exit_state.get("broker_safety_sl_last_placed_pct")
+        live["is_closing"] = bool(exit_state.get("is_closing", False))
         live["last_updated"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
         live["monitoring_active"] = True
 
@@ -139,6 +169,103 @@ def set_live_exit_reason(buy_order_id: str, exit_reason: str) -> None:
         if live:
             live["exit_reason"] = exit_reason
             live["monitoring_active"] = False
+            live["is_closing"] = True
+
+
+def begin_trade_closing(buy_order_id: str) -> None:
+    """Mark a trade as closing so no further broker-side stop updates are applied."""
+    with _live_exit_lock:
+        live = _live_exit_states.get(buy_order_id)
+        if live:
+            live["is_closing"] = True
+
+
+def cancel_broker_safety_sl(trading_client, buy_order_id: str) -> None:
+    """Cancel the broker safety stop-loss order if one is live."""
+    if trading_client is None:
+        return
+    with _live_exit_lock:
+        live = _live_exit_states.get(buy_order_id) or {}
+        order_id = str(live.get("broker_safety_sl_order_id") or "")
+    if not order_id:
+        return
+    try:
+        trading_client.cancel_order_by_id(order_id)
+        info(f"[REGISTRY] Cancelled safety SL {order_id} for {buy_order_id}")
+    except Exception:
+        pass
+    with _live_exit_lock:
+        live = _live_exit_states.get(buy_order_id)
+        if live:
+            live["broker_safety_sl_order_id"] = None
+            live["broker_safety_sl_stop_price"] = None
+            live["broker_safety_sl_limit_price"] = None
+            live["broker_safety_sl_last_placed_pct"] = None
+
+
+def upsert_broker_safety_sl(
+    trading_client,
+    buy_order_id: str,
+    contract_symbol: str,
+    qty: int,
+    fill_price: float,
+    sl_dynamic_pct: float,
+) -> str | None:
+    """Create or replace the broker-side stop-limit safety order for an open option trade."""
+    if trading_client is None or not contract_symbol or fill_price <= 0:
+        return None
+
+    stop_price = round(float(fill_price) * (1.0 + float(sl_dynamic_pct) / 100.0), 4)
+    limit_price = round(stop_price * (1.0 - SL_STOP_LIMIT_BUFFER_PCT / 100.0), 4)
+
+    with _live_exit_lock:
+        live = _live_exit_states.get(buy_order_id)
+        if live is None:
+            live = {}
+            _live_exit_states[buy_order_id] = live
+        if live.get("is_closing"):
+            return str(live.get("broker_safety_sl_order_id") or "") or None
+        existing_order_id = str(live.get("broker_safety_sl_order_id") or "")
+        last_placed_pct = live.get("broker_safety_sl_last_placed_pct")
+
+    if existing_order_id and last_placed_pct is not None and float(sl_dynamic_pct) <= float(last_placed_pct):
+        return existing_order_id
+
+    if existing_order_id:
+        try:
+            order = trading_client.replace_order_by_id(
+                existing_order_id,
+                ReplaceOrderRequest(stop_price=stop_price, limit_price=limit_price),
+            )
+            new_order_id = str(getattr(order, "id", existing_order_id) or existing_order_id)
+        except Exception as ex:
+            info(f"[REGISTRY] Safety SL replace failed for {buy_order_id}: {ex}")
+            return existing_order_id
+    else:
+        try:
+            order = trading_client.submit_order(
+                StopLimitOrderRequest(
+                    symbol=contract_symbol,
+                    qty=qty,
+                    side=OrderSide.SELL,
+                    time_in_force=TimeInForce.DAY,
+                    stop_price=stop_price,
+                    limit_price=limit_price,
+                )
+            )
+            new_order_id = str(getattr(order, "id", "") or "")
+        except Exception as ex:
+            info(f"[REGISTRY] Safety SL submit failed for {buy_order_id}: {ex}")
+            return None
+
+    with _live_exit_lock:
+        live = _live_exit_states.get(buy_order_id)
+        if live:
+            live["broker_safety_sl_order_id"] = new_order_id
+            live["broker_safety_sl_stop_price"] = stop_price
+            live["broker_safety_sl_limit_price"] = limit_price
+            live["broker_safety_sl_last_placed_pct"] = float(sl_dynamic_pct)
+    return new_order_id or None
 
 
 def get_live_positions() -> list[dict]:
@@ -170,8 +297,48 @@ def place_market_order(
     allow_limit: bool = True,
     force_limit: bool = False,
     force_limit_offset_pct: float = 0.0,
+    use_bracket: bool = False,
+    take_profit_price: float | None = None,
+    stop_loss_price: float | None = None,
 ):
     tif = _resolve_time_in_force()
+    use_bracket = bool(
+        use_bracket
+        and str(side).upper().endswith("BUY")
+        and take_profit_price is not None
+        and stop_loss_price is not None
+        and take_profit_price > 0
+        and stop_loss_price > 0
+    )
+
+    def _supports_complex_orders_error(ex: Exception) -> bool:
+        message = str(ex).lower()
+        return (
+            "complex orders not supported for options trading" in message
+            or "42210000" in message
+            or ("bracket" in message and "options" in message)
+        )
+
+    def _submit(request):
+        try:
+            return trading_client.submit_order(request)
+        except Exception as ex:
+            if use_bracket and _supports_complex_orders_error(ex):
+                info("Bracket order rejected for options; retrying without complex legs")
+                plain_kwargs = dict(request.__dict__)
+                plain_kwargs.pop("order_class", None)
+                plain_kwargs.pop("take_profit", None)
+                plain_kwargs.pop("stop_loss", None)
+                return trading_client.submit_order(type(request)(**plain_kwargs))
+            raise
+
+    bracket_kwargs: dict = {}
+    if use_bracket:
+        bracket_kwargs = {
+            "order_class": OrderClass.BRACKET,
+            "take_profit": TakeProfitRequest(limit_price=round(float(take_profit_price), 4)),
+            "stop_loss": StopLossRequest(stop_price=round(float(stop_loss_price), 4)),
+        }
 
     if force_limit:
         if reference_price and reference_price > 0:
@@ -181,13 +348,14 @@ def place_market_order(
             else:
                 limit_price = round(reference_price * (1 - offset), 4)
 
-            return trading_client.submit_order(
+            return _submit(
                 LimitOrderRequest(
                     symbol=contract_symbol,
                     qty=qty,
                     side=side,
                     time_in_force=tif,
                     limit_price=limit_price,
+                    **bracket_kwargs,
                 )
             )
 
@@ -202,13 +370,14 @@ def place_market_order(
         else:
             limit_price = round(reference_price * (1 - ENTRY_LIMIT_OFFSET_PCT), 4)
 
-        return trading_client.submit_order(
+        return _submit(
             LimitOrderRequest(
                 symbol=contract_symbol,
                 qty=qty,
                 side=side,
                 time_in_force=tif,
                 limit_price=limit_price,
+                **bracket_kwargs,
             )
         )
 
@@ -218,12 +387,13 @@ def place_market_order(
             "falling back to market order"
         )
 
-    return trading_client.submit_order(
+    return _submit(
         MarketOrderRequest(
             symbol=contract_symbol,
             qty=qty,
             side=side,
             time_in_force=tif,
+            **bracket_kwargs,
         )
     )
 

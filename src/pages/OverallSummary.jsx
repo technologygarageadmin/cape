@@ -243,25 +243,28 @@ function TradeTimeline({ timeline, fillPrice, qpArmed, qpArmTime, qpArmPrice, qp
 
   const ticks = timeline
 
+  // price ticks only (exclude order_placed rows which have no sellable_price)
+  const priceTicks = ticks.filter(t => t.source !== 'order_placed' && t.sellable_price != null)
+
   // price domain for mini sparkline
-  const prices = ticks.map(t => t.sellable_price).filter(Boolean)
+  const prices = priceTicks.map(t => t.sellable_price).filter(Boolean)
   const minP = Math.min(...prices)
   const maxP = Math.max(...prices)
   const range = maxP - minP || 0.01
   const W = 260, H = 50
 
-  const pts = ticks.map((t, idx) => {
-    const x = (idx / Math.max(ticks.length - 1, 1)) * W
+  const pts = priceTicks.map((t, idx) => {
+    const x = (idx / Math.max(priceTicks.length - 1, 1)) * W
     const y = H - ((t.sellable_price - minP) / range) * (H - 4) - 2
     return `${x.toFixed(1)},${y.toFixed(1)}`
   }).join(' ')
 
-  // find QP arm index in timeline
+  // find QP arm index in price ticks only
   const qpArmIdx = qpArmTime
-    ? ticks.findIndex(t => t.ts >= qpArmTime)
+    ? priceTicks.findIndex(t => t.ts >= qpArmTime)
     : -1
 
-  const peakIdx = ticks.reduce((best, t, idx) => t.pnl_pct > (ticks[best]?.pnl_pct ?? -Infinity) ? idx : best, 0)
+  const peakIdx = priceTicks.reduce((best, t, idx) => t.pnl_pct > (priceTicks[best]?.pnl_pct ?? -Infinity) ? idx : best, 0)
 
   return (
     <div style={{ marginTop: '8px', borderTop: '1px solid rgba(201,162,39,0.12)' }}>
@@ -276,7 +279,7 @@ function TradeTimeline({ timeline, fillPrice, qpArmed, qpArmTime, qpArmPrice, qp
         <span style={{ fontSize: '9px', textTransform: 'uppercase', letterSpacing: '0.5px', fontWeight: 800 }}>
           {open ? '▲' : '▼'} Tick Timeline
         </span>
-        <span style={{ color: '#ccc', fontWeight: 500 }}>({ticks.length} ticks)</span>
+        <span style={{ color: '#ccc', fontWeight: 500 }}>({priceTicks.length} ticks{ticks.length > priceTicks.length ? ` · ${ticks.length - priceTicks.length} orders` : ''})</span>
         {qpArmed && (
           <span style={{
             padding: '1px 6px', borderRadius: '4px',
@@ -311,13 +314,13 @@ function TradeTimeline({ timeline, fillPrice, qpArmed, qpArmTime, qpArmPrice, qp
               <polyline
                 points={pts}
                 fill="none"
-                stroke={ticks[ticks.length - 1]?.pnl_pct >= 0 ? '#16a34a' : '#ef4444'}
+                stroke={priceTicks[priceTicks.length - 1]?.pnl_pct >= 0 ? '#16a34a' : '#ef4444'}
                 strokeWidth="1.5"
               />
               {/* QP arm dot */}
               {qpArmIdx >= 0 && (() => {
-                const t = ticks[qpArmIdx]
-                const x = (qpArmIdx / Math.max(ticks.length - 1, 1)) * W
+                const t = priceTicks[qpArmIdx]
+                const x = (qpArmIdx / Math.max(priceTicks.length - 1, 1)) * W
                 const y = H - ((t.sellable_price - minP) / range) * (H - 4) - 2
                 return (
                   <g>
@@ -328,8 +331,8 @@ function TradeTimeline({ timeline, fillPrice, qpArmed, qpArmTime, qpArmPrice, qp
               })()}
               {/* Peak dot */}
               {(() => {
-                const t = ticks[peakIdx]
-                const x = (peakIdx / Math.max(ticks.length - 1, 1)) * W
+                const t = priceTicks[peakIdx]
+                const x = (peakIdx / Math.max(priceTicks.length - 1, 1)) * W
                 const y = H - ((t.sellable_price - minP) / range) * (H - 4) - 2
                 return (
                   <g>
@@ -370,7 +373,7 @@ function TradeTimeline({ timeline, fillPrice, qpArmed, qpArmTime, qpArmPrice, qp
             <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '10.5px', minWidth: '480px' }}>
               <thead>
                 <tr style={{ background: '#fdfaf4', position: 'sticky', top: 0, zIndex: 1 }}>
-                  {['Time', 'Src', 'Sellable', 'Bid', 'Mid', 'PnL%', 'QP Lmt', 'QP Dyn%', 'Trailing SL Dyn', 'Peak', 'Armed'].map(h => (
+                  {['Time', 'Src', 'Sellable', 'Bid', 'Mid', 'PnL%', 'QP Lmt', 'QP Dyn%', 'Trailing SL Dyn', 'Peak', 'Armed', 'Orders'].map(h => (
                     <th key={h} style={{ padding: '3px 6px', textAlign: 'left', fontWeight: 800, color: '#bbb', borderBottom: '1px solid #eee', whiteSpace: 'nowrap', fontSize: '9px', textTransform: 'uppercase', letterSpacing: '0.4px' }}>{h}</th>
                   ))}
                 </tr>
@@ -381,6 +384,47 @@ function TradeTimeline({ timeline, fillPrice, qpArmed, qpArmTime, qpArmPrice, qp
                   const isPeak = peakIdx === idx
                   const isEntry = tick.source === 'entry'
                   const isSell = tick.source === 'sell'
+                  const isOrder = tick.source === 'order_placed' || tick.source === 'order_replaced'
+
+                  if (isOrder) {
+                    const isQP = tick.order_type === 'QP_LIMIT'
+                    const isSL = tick.order_type === 'SL_STOP'
+                    const isTrail = tick.order_type === 'TRAIL_SL_STOP'
+                    const isReplace = tick.source === 'order_replaced'
+                    const status = tick.status || 'live'
+                    const isError = status === 'error'
+                    const statusColor = status === 'filled' ? '#16a34a' : status === 'cancelled' ? '#aaa' : isError ? '#dc2626' : '#d97706'
+                    const statusIcon = status === 'filled' ? '✓ FILLED' : status === 'cancelled' ? '✕ CANCELLED' : isError ? '✕ FAILED' : '⏳ LIVE'
+                    const rowBg = status === 'filled' ? 'rgba(22,163,74,0.08)' : status === 'cancelled' ? 'rgba(0,0,0,0.03)' : isError ? 'rgba(220,38,38,0.08)' : isQP ? 'rgba(217,119,6,0.05)' : 'rgba(239,68,68,0.05)'
+                    const typeLabel = isReplace ? 'ORDER_REPLACED' : (isQP ? 'QP LIMIT' : isTrail ? 'TRAIL SL STOP' : 'SL STOP')
+                    const typeColor = isQP ? '#d97706' : '#ef4444'
+                    const orderCountText = tick.order_count != null ? `#${tick.order_count}` : '#—'
+                    return (
+                      <tr key={idx} style={{ background: rowBg, borderLeft: `3px solid ${isError ? '#dc2626' : typeColor}` }}>
+                        <td style={{ padding: '2px 6px', fontFamily: 'monospace', color: '#555', whiteSpace: 'nowrap' }}>{fmtTickTime(tick.ts)}</td>
+                        <td style={{ padding: '2px 6px', color: isError ? '#dc2626' : typeColor, fontSize: '9px', fontWeight: 800, textTransform: 'uppercase' }}>{typeLabel}</td>
+                        <td style={{ padding: '2px 6px', fontFamily: 'monospace', color: typeColor, fontWeight: 700 }}>
+                          {tick.fill_price != null ? `$${fmt2(tick.fill_price)}` : (tick.limit_price != null ? `$${fmt2(tick.limit_price)}` : '—')}
+                        </td>
+                        <td style={{ padding: '2px 6px', fontFamily: 'monospace', color: '#777' }}>
+                          {tick.stop_price != null ? `stop $${fmt2(tick.stop_price)}` : '—'}
+                        </td>
+                        <td style={{ padding: '2px 6px', fontFamily: 'monospace', color: '#777' }}>
+                          {tick.limit_price != null ? `lmt $${fmt2(tick.limit_price)}` : '—'}
+                        </td>
+                        <td style={{ padding: '2px 6px', fontFamily: 'monospace', color: typeColor }}>{fmtPctSigned(tick.pct)}</td>
+                        <td colSpan={4} style={{ padding: '2px 6px', fontFamily: 'monospace', fontSize: '9px', color: statusColor, fontWeight: 700 }}>
+                          {isError
+                            ? `✕ FAILED · ${tick.error || 'unknown error'}`
+                            : `${statusIcon} · ${orderCountText} · id ${(tick.order_id || '').slice(0, 8)}…`
+                          }
+                        </td>
+                        <td />
+                        <td />
+                      </tr>
+                    )
+                  }
+
                   const rowBg = isSell ? 'rgba(239,68,68,0.10)' : isArm ? 'rgba(217,119,6,0.08)' : isPeak ? 'rgba(99,102,241,0.06)' : isEntry ? 'rgba(22,163,74,0.05)' : idx % 2 === 0 ? '#fff' : '#fafafa'
                   const pnlColor = tick.pnl_pct > 0 ? '#16a34a' : tick.pnl_pct < 0 ? '#ef4444' : '#888'
                   const srcLabel = isSell ? (tick.exit_reason || 'SELL') : tick.source
@@ -400,12 +444,18 @@ function TradeTimeline({ timeline, fillPrice, qpArmed, qpArmTime, qpArmPrice, qp
                       <td style={{ padding: '2px 6px', textAlign: 'center' }}>
                         {isSell ? <span style={{ color: '#ef4444', fontSize: '10px' }}>✕</span> : tick.qp_armed ? <span style={{ color: '#d97706', fontSize: '10px' }}>✓</span> : <span style={{ color: '#ddd' }}>—</span>}
                       </td>
+                      <td style={{ padding: '2px 6px', whiteSpace: 'nowrap' }}>
+                        {tick.live_qp && <span style={{ display: 'inline-block', marginRight: '2px', padding: '0px 4px', borderRadius: '3px', fontSize: '8px', fontWeight: 800, background: 'rgba(217,119,6,0.15)', color: '#d97706', border: '1px solid rgba(217,119,6,0.35)', letterSpacing: '0.3px' }}>QP</span>}
+                        {tick.live_sl && <span style={{ display: 'inline-block', marginRight: '2px', padding: '0px 4px', borderRadius: '3px', fontSize: '8px', fontWeight: 800, background: 'rgba(239,68,68,0.12)', color: '#ef4444', border: '1px solid rgba(239,68,68,0.35)', letterSpacing: '0.3px' }}>SL</span>}
+                        {tick.live_tsl && <span style={{ display: 'inline-block', padding: '0px 4px', borderRadius: '3px', fontSize: '8px', fontWeight: 800, background: 'rgba(99,102,241,0.12)', color: '#6366f1', border: '1px solid rgba(99,102,241,0.35)', letterSpacing: '0.3px' }}>TSL</span>}
+                        {!tick.live_qp && !tick.live_sl && !tick.live_tsl && <span style={{ color: '#ddd' }}>—</span>}
+                      </td>
                     </tr>
                   )
                 })}
                 {ticks.length > 200 && (
                   <tr>
-                    <td colSpan={11} style={{ padding: '4px 6px', textAlign: 'center', color: '#bbb', fontSize: '10px', fontStyle: 'italic' }}>
+                    <td colSpan={12} style={{ padding: '4px 6px', textAlign: 'center', color: '#bbb', fontSize: '10px', fontStyle: 'italic' }}>
                       +{ticks.length - 200} more ticks not shown
                     </td>
                   </tr>

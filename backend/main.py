@@ -72,8 +72,10 @@ from alpaca.trading.enums import ContractType, OrderSide, OrderStatus
 
 from config import (
     API_KEY,
+    BRACKET_QP_PLACEHOLDER_PCT,
     CHECK_INTERVAL_SEC,
     CSV_FILE,
+    EXIT_BRACKET_QP_ENABLED,
     FILL_WAIT_SEC,
     PAPER_TRADING,
     POST_TRADE_COOLDOWN_BARS,
@@ -385,7 +387,17 @@ def execute_startup_straddle(
             )
 
             info(f" Startup {leg_name}: buying {contract.symbol}")
-            buy_order = place_market_order(trading_client, contract.symbol, QTY, OrderSide.BUY)
+            buy_order = place_market_order(
+                trading_client,
+                contract.symbol,
+                QTY,
+                OrderSide.BUY,
+                reference_price=current_price,
+                allow_limit=False,
+                use_bracket=EXIT_BRACKET_QP_ENABLED,
+                take_profit_price=max(0.01, round(current_price * (1 + TAKE_PROFIT_PCT), 4)),
+                stop_loss_price=max(0.01, round(current_price * (1 + BRACKET_QP_PLACEHOLDER_PCT / 100.0), 4)),
+            )
             filled_buy = wait_for_fill(trading_client, str(buy_order.id), FILL_WAIT_SEC)
 
             if filled_buy.status != OrderStatus.FILLED:
@@ -445,6 +457,7 @@ def execute_startup_straddle(
                     "fill_price": fill_price,
                     "tp_price": tp_price,
                     "sl_price": sl_price,
+                    "buy_order_id": str(buy_order.id),
                 }
             )
 
@@ -471,6 +484,7 @@ def execute_startup_straddle(
         fill_price = leg["fill_price"]
         tp_price = leg["tp_price"]
         sl_price = leg["sl_price"]
+        buy_order_id = leg.get("buy_order_id")
 
         try:
             info(f" Startup {leg_name}: monitoring {contract.symbol} for RSI marker SELL")
@@ -484,6 +498,9 @@ def execute_startup_straddle(
                     signal=leg_name,
                     underlying_symbol=SYMBOL,
                     use_extended_exit_criteria=False,
+                    buy_entry_order_id=buy_order_id,
+                    tc=trading_client,
+                    qty=QTY,
                 )
                 if exit_reason is None:
                     info(f" Startup {leg_name}: websocket unavailable, switching to polling")
@@ -497,6 +514,9 @@ def execute_startup_straddle(
                         signal=leg_name,
                         underlying_symbol=SYMBOL,
                         use_extended_exit_criteria=False,
+                        buy_entry_order_id=buy_order_id,
+                        tc=trading_client,
+                        qty=QTY,
                     )
             else:
                 info(f" Startup {leg_name}: polling-only monitor")
@@ -510,6 +530,9 @@ def execute_startup_straddle(
                     signal=leg_name,
                     underlying_symbol=SYMBOL,
                     use_extended_exit_criteria=False,
+                    buy_entry_order_id=buy_order_id,
+                    tc=trading_client,
+                    qty=QTY,
                 )
 
             startup_exit_signal_time = datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -814,7 +837,17 @@ def main() -> None:
             )
 
             info(" Placing BUY order...")
-            buy_order = place_market_order(trading_client, best_contract.symbol, QTY, order_side)
+            buy_order = place_market_order(
+                trading_client,
+                best_contract.symbol,
+                QTY,
+                order_side,
+                reference_price=current_price,
+                allow_limit=False,
+                use_bracket=EXIT_BRACKET_QP_ENABLED,
+                take_profit_price=max(0.01, round(current_price * (1 + TAKE_PROFIT_PCT), 4)),
+                stop_loss_price=max(0.01, round(current_price * (1 + BRACKET_QP_PLACEHOLDER_PCT / 100.0), 4)),
+            )
             write_log(
                 {
                     "action": "BUY",
@@ -901,6 +934,9 @@ def main() -> None:
                 context_label=f"REGULAR {signal}",
                 signal=signal,
                 underlying_symbol=SYMBOL,
+                buy_entry_order_id=str(buy_order.id),
+                tc=trading_client,
+                qty=QTY,
             )
             if exit_reason is None:
                 exit_reason, current_option_price, _exit_state = monitor_with_polling(
@@ -912,6 +948,9 @@ def main() -> None:
                     context_label=f"REGULAR {signal}",
                     signal=signal,
                     underlying_symbol=SYMBOL,
+                    buy_entry_order_id=str(buy_order.id),
+                    tc=trading_client,
+                    qty=QTY,
                 )
 
             exit_signal_time_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
