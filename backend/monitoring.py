@@ -4,6 +4,8 @@ import logging
 from datetime import datetime, timezone
 
 from alpaca.data.historical import OptionHistoricalDataClient
+from alpaca.trading.requests import LimitOrderRequest, StopLimitOrderRequest
+from alpaca.trading.enums import OrderSide, TimeInForce, OrderStatus
 
 from alpaca_helpers import (
     build_option_snapshot_request,
@@ -34,12 +36,16 @@ from config import (
     EXIT_STOP_LOSS_ENABLED,
     PRICE_POLL_SEC,
     QP_GAP_PCT,
+    QP_LIMIT_ORDERS_ENABLED,
     QP_MIN_EXIT_PCT,
     QP_MIN_PEAK_PCT,
     RSI_EXIT_CHECK_SEC,
     SECRET_KEY,
+    SL_STOP_LIMIT_BUFFER_PCT,
+    SL_STOP_ORDERS_ENABLED,
     SYMBOL,
     TRAILING_MIN_PEAK_PCT,
+    TRAILING_SL_STOP_ORDERS_ENABLED,
     WS_MAX_WAIT_SEC,
 )
 from logger import debug, info
@@ -78,6 +84,16 @@ def _init_exit_state(fill_price: float, tp_price: float, sl_price: float) -> dic
         "qp_arm_peak_pct": None,
         "qp_min_peak_pct": QP_MIN_PEAK_PCT,
         "qp_min_exit_pct": QP_MIN_EXIT_PCT,
+        "qp_order_ids": [],          # all live QP limit orders (accumulate, never cancel until one fills)
+        "qp_order_filled": False,
+        "qp_order_id_filled": None,
+        "qp_order_fill_price": None,
+        "sl_order_ids": [],          # all live SL stop-limit orders (accumulate, never cancel until one fills)
+        "sl_order_filled": False,
+        "sl_order_id_filled": None,
+        "sl_order_fill_price": None,
+        "sl_order_exit_reason": None,  # STOP_LOSS_EXIT or TRAILING_STOP_EXIT depending on which fired
+        "sl_last_placed_pct": None,    # sl_dynamic_pct value at which the last SL order was placed
         "timeline": [],
     }
 
@@ -128,11 +144,231 @@ def _append_timeline_tick(
     timeline.append(tick)
 
 
+def _append_sell_tick(
+    exit_state: dict,
+    exit_reason: str,
+    sell_price: float,
+    fill_price: float,
+    *,
+    bid_price: float | None = None,
+    mid_price: float | None = None,
+) -> None:
+    """Append a 'sell' source tick marking the actual exit event on the timeline."""
+    pnl_pct = (sell_price - fill_price) / fill_price * 100 if fill_price > 0 else 0.0
+    _append_timeline_tick(
+        exit_state,
+        source="sell",
+        tick_ts=_iso_now_utc(),
+        fill_price=fill_price,
+        mid_price=mid_price,
+        bid_price=bid_price,
+        sellable_price=sell_price,
+        pnl_pct=pnl_pct,
+    )
+    # Tag the exit reason onto the last (just-appended) tick
+    timeline = exit_state.get("timeline")
+    if timeline:
+        timeline[-1]["exit_reason"] = exit_reason
+
+
+# ── Exit Order Helpers (QP limit + SL stop-limit) ────────────────────────────
+# For each exit level, accumulate real Alpaca orders — never cancel early.
+# All orders at that level stay live; first fill wins, rest cancelled immediately.
+
+def _place_qp_limit_order(tc, exit_state: dict, contract_symbol: str | None, qty: int) -> None:
+    """Place a new QP limit sell at the current QP price. Previous orders stay live."""
+    if not QP_LIMIT_ORDERS_ENABLED or tc is None or not contract_symbol:
+        return
+    fill_price = float(exit_state.get("fill_price", 0))
+    qp_dynamic_pct = float(exit_state.get("qp_dynamic_pct", 0))
+    if fill_price <= 0 or qp_dynamic_pct <= 0:
+        return
+    qp_limit_price = round(fill_price * (1.0 + qp_dynamic_pct / 100.0), 4)
+    try:
+        req = LimitOrderRequest(
+            symbol=contract_symbol,
+            qty=qty,
+            side=OrderSide.SELL,
+            time_in_force=TimeInForce.DAY,
+            limit_price=qp_limit_price,
+        )
+        order = tc.submit_order(req)
+        order_ids = exit_state.setdefault("qp_order_ids", [])
+        order_ids.append(str(order.id))
+        info(
+            f"[QP LIMIT] {contract_symbol} new limit sell at {qp_limit_price:.4f} "
+            f"(qp={qp_dynamic_pct:+.2f}%) id={order.id} "
+            f"| total live QP orders: {len(order_ids)}"
+        )
+    except Exception as ex:
+        info(f"[QP LIMIT] Failed to place for {contract_symbol}: {ex}")
+
+
+def _cancel_qp_order(tc, exit_state: dict) -> None:
+    """Cancel ALL outstanding QP limit orders."""
+    if tc is None:
+        return
+    order_ids = exit_state.get("qp_order_ids") or []
+    for oid in order_ids:
+        try:
+            tc.cancel_order_by_id(oid)
+            info(f"[QP LIMIT] Cancelled {oid}")
+        except Exception:
+            pass
+    exit_state["qp_order_ids"] = []
+
+
+def _check_qp_order_filled(tc, exit_state: dict) -> bool:
+    """Check if any QP limit order filled. On fill: cancel remaining QP + all SL orders."""
+    if tc is None:
+        return False
+    order_ids = list(exit_state.get("qp_order_ids") or [])
+    if not order_ids:
+        return False
+    filled_id = None
+    filled_price = None
+    for oid in order_ids:
+        try:
+            order = tc.get_order_by_id(oid)
+            status = str(getattr(order, "status", "")).lower()
+            if "filled" in status:
+                filled_id = oid
+                fp = float(getattr(order, "filled_avg_price", 0) or 0)
+                filled_price = fp if fp > 0 else None
+                break
+        except Exception:
+            pass
+    if filled_id:
+        for oid in order_ids:
+            if oid != filled_id:
+                try:
+                    tc.cancel_order_by_id(oid)
+                    info(f"[QP LIMIT] Cancelled remaining QP order {oid} after fill")
+                except Exception:
+                    pass
+        exit_state["qp_order_ids"] = []
+        exit_state["qp_order_filled"] = True
+        exit_state["qp_order_id_filled"] = filled_id
+        exit_state["qp_order_fill_price"] = filled_price
+        info(f"[QP LIMIT] Order {filled_id} filled at {filled_price:.4f} — {len(order_ids)-1} other QP orders cancelled")
+        # Also cancel any SL protection orders since position is now closed
+        _cancel_sl_orders(tc, exit_state)
+        return True
+    return False
+
+
+def _place_sl_stop_order(tc, exit_state: dict, contract_symbol: str | None, qty: int) -> None:
+    """Place a new SL stop-limit sell at the current sl_dynamic_pct level. Previous orders stay live."""
+    sl_dynamic_pct = float(exit_state.get("sl_dynamic_pct", 0))
+    is_trailing = sl_dynamic_pct > float(exit_state.get("sl_static_pct", 0))
+    if is_trailing and not TRAILING_SL_STOP_ORDERS_ENABLED:
+        return
+    if not is_trailing and not SL_STOP_ORDERS_ENABLED:
+        return
+    if tc is None or not contract_symbol:
+        return
+    fill_price = float(exit_state.get("fill_price", 0))
+    if fill_price <= 0:
+        return
+    stop_price = round(fill_price * (1.0 + sl_dynamic_pct / 100.0), 4)
+    limit_price = round(stop_price * (1.0 - SL_STOP_LIMIT_BUFFER_PCT / 100.0), 4)
+    label = "TRAIL SL" if is_trailing else "SL"
+    try:
+        req = StopLimitOrderRequest(
+            symbol=contract_symbol,
+            qty=qty,
+            side=OrderSide.SELL,
+            time_in_force=TimeInForce.DAY,
+            stop_price=stop_price,
+            limit_price=limit_price,
+        )
+        order = tc.submit_order(req)
+        order_ids = exit_state.setdefault("sl_order_ids", [])
+        order_ids.append(str(order.id))
+        exit_state["sl_last_placed_pct"] = sl_dynamic_pct
+        info(
+            f"[{label} STOP] {contract_symbol} stop={stop_price:.4f} limit={limit_price:.4f} "
+            f"(sl={sl_dynamic_pct:+.2f}%) id={order.id} "
+            f"| total live SL orders: {len(order_ids)}"
+        )
+    except Exception as ex:
+        info(f"[{label} STOP] Failed to place for {contract_symbol}: {ex}")
+
+
+def _cancel_sl_orders(tc, exit_state: dict) -> None:
+    """Cancel ALL outstanding SL stop-limit orders."""
+    if tc is None:
+        return
+    order_ids = exit_state.get("sl_order_ids") or []
+    for oid in order_ids:
+        try:
+            tc.cancel_order_by_id(oid)
+            info(f"[SL STOP] Cancelled {oid}")
+        except Exception:
+            pass
+    exit_state["sl_order_ids"] = []
+
+
+def _check_sl_order_filled(tc, exit_state: dict) -> bool:
+    """Check if any SL stop-limit order filled. On fill: cancel remaining SL + all QP orders."""
+    if tc is None:
+        return False
+    order_ids = list(exit_state.get("sl_order_ids") or [])
+    if not order_ids:
+        return False
+    filled_id = None
+    filled_price = None
+    for oid in order_ids:
+        try:
+            order = tc.get_order_by_id(oid)
+            status = str(getattr(order, "status", "")).lower()
+            if "filled" in status:
+                filled_id = oid
+                fp = float(getattr(order, "filled_avg_price", 0) or 0)
+                filled_price = fp if fp > 0 else None
+                break
+        except Exception:
+            pass
+    if filled_id:
+        for oid in order_ids:
+            if oid != filled_id:
+                try:
+                    tc.cancel_order_by_id(oid)
+                    info(f"[SL STOP] Cancelled remaining SL order {oid} after fill")
+                except Exception:
+                    pass
+        exit_state["sl_order_ids"] = []
+        exit_state["sl_order_filled"] = True
+        exit_state["sl_order_id_filled"] = filled_id
+        exit_state["sl_order_fill_price"] = filled_price
+        # Determine exit reason: trailing if sl_dynamic_pct > sl_static_pct
+        sl_dyn = float(exit_state.get("sl_dynamic_pct", 0))
+        sl_static = float(exit_state.get("sl_static_pct", 0))
+        exit_state["sl_order_exit_reason"] = "TRAILING_STOP_EXIT" if sl_dyn > sl_static else "STOP_LOSS_EXIT"
+        info(
+            f"[SL STOP] Order {filled_id} filled at {filled_price:.4f} — "
+            f"{len(order_ids)-1} other SL orders cancelled → {exit_state['sl_order_exit_reason']}"
+        )
+        # Also cancel any QP protection orders since position is now closed
+        _cancel_qp_order(tc, exit_state)
+        return True
+    return False
+
+
+def _cancel_exit_orders(tc, exit_state: dict) -> None:
+    """Cancel ALL outstanding exit protection orders (QP limit + SL stop-limit)."""
+    _cancel_qp_order(tc, exit_state)
+    _cancel_sl_orders(tc, exit_state)
+
+
 def _update_dynamic_thresholds(
     exit_state: dict,
     pnl_pct: float,
     current_price: float | None = None,
     tick_ts: str | None = None,
+    tc=None,
+    contract_symbol: str | None = None,
+    qty: int = 1,
 ) -> None:
     if pnl_pct > float(exit_state.get("max_pnl_pct", 0.0)):
         exit_state["max_pnl_pct"] = pnl_pct
@@ -164,6 +400,12 @@ def _update_dynamic_thresholds(
         candidate_sl = max_pnl_pct + trail_pct
         exit_state["sl_dynamic_pct"] = max(float(exit_state.get("sl_dynamic_pct", sl_static_pct)), candidate_sl)
 
+    # ── SL stop-limit orders: place/accumulate whenever sl_dynamic_pct ratchets up ──
+    current_sl_pct = float(exit_state.get("sl_dynamic_pct", sl_static_pct))
+    sl_last_placed = exit_state.get("sl_last_placed_pct")
+    if sl_last_placed is None or current_sl_pct > float(sl_last_placed):
+        _place_sl_stop_order(tc, exit_state, contract_symbol, qty)
+
     # Ratchet quick-profit lock upward — never reduced.
     # qp_dynamic = peak - gap, so if peak = 2.35% and gap = 0.25%, QP = 2.10%.
     # Only arms once peak reaches QP_MIN_PEAK_PCT to avoid firing on tiny noise blips
@@ -173,6 +415,7 @@ def _update_dynamic_thresholds(
         # Only ratchet up, never down. Ignore negative candidates (too early).
         if candidate_qp > float(exit_state.get("qp_dynamic_pct", 0.0)):
             exit_state["qp_dynamic_pct"] = candidate_qp
+            _place_qp_limit_order(tc, exit_state, contract_symbol, qty)
 
         # Capture first arm event with the actual arm price and pnl.
         if candidate_qp > 0.0 and not bool(exit_state.get("qp_armed", False)):
@@ -294,6 +537,8 @@ def monitor_with_polling(
     min_exit_epoch_ts: float | None = None,
     buy_order_id: str | None = None,
     initial_exit_state: dict | None = None,
+    tc=None,
+    qty: int = 1,
 ):
     label = f"[{context_label}] " if context_label else ""
     info(f"{label}Fallback polling every {PRICE_POLL_SEC}s for {contract_symbol}")
@@ -337,7 +582,24 @@ def monitor_with_polling(
         same_candle_price = sellable_price if EXIT_SAME_CANDLE_USE_BID_PRICE else price
         same_candle_pnl_pct = (same_candle_price - fill_price) / fill_price * 100
         tick_ts = _iso_now_utc()
-        _update_dynamic_thresholds(exit_state, pnl_pct, current_price=sellable_price, tick_ts=tick_ts)
+        _update_dynamic_thresholds(exit_state, pnl_pct, current_price=sellable_price, tick_ts=tick_ts,
+                                    tc=tc, contract_symbol=contract_symbol, qty=qty)
+        # Check if any exit protection order was already filled by Alpaca (auto-close)
+        if _check_qp_order_filled(tc, exit_state):
+            qp_fill = exit_state.get("qp_order_fill_price") or sellable_price
+            if buy_order_id:
+                set_live_exit_reason(buy_order_id, "QUICK_PROFIT_EXIT")
+            info(f"{label}QUICK_PROFIT_EXIT - QP limit order filled by Alpaca at {qp_fill:.4f}")
+            _append_sell_tick(exit_state, "QUICK_PROFIT_EXIT", qp_fill, fill_price)
+            return "QUICK_PROFIT_EXIT", qp_fill, exit_state
+        if _check_sl_order_filled(tc, exit_state):
+            sl_fill = exit_state.get("sl_order_fill_price") or sellable_price
+            sl_exit = exit_state.get("sl_order_exit_reason", "STOP_LOSS_EXIT")
+            if buy_order_id:
+                set_live_exit_reason(buy_order_id, sl_exit)
+            info(f"{label}{sl_exit} - SL stop-limit order filled by Alpaca at {sl_fill:.4f}")
+            _append_sell_tick(exit_state, sl_exit, sl_fill, fill_price)
+            return sl_exit, sl_fill, exit_state
         _append_timeline_tick(
             exit_state,
             source="poll",
@@ -365,6 +627,8 @@ def monitor_with_polling(
                     f"position at {same_candle_price:.4f} "
                     f"(pnl={same_candle_pnl_pct:+.2f}% threshold={EXIT_SAME_CANDLE_MIN_PNL_PCT:+.2f}%)"
                 )
+                _cancel_exit_orders(tc, exit_state)
+                _append_sell_tick(exit_state, "SAME_CANDLE_POSITIVE_EXIT", same_candle_price, fill_price, bid_price=bid_price if bid_price > 0 else None, mid_price=price)
                 return "SAME_CANDLE_POSITIVE_EXIT", same_candle_price, exit_state
 
             if not hold_notice_emitted:
@@ -397,6 +661,8 @@ def monitor_with_polling(
                     f"{label}{reason} - peak {max_pnl:+.2f}% < {EXIT_BAD_ENTRY_MAX_PEAK_PCT}% after "
                     f"{EXIT_BAD_ENTRY_WINDOW_SEC}s, pnl={pnl_pct:+.2f}% - cutting early at {sellable_price:.4f}"
                 )
+                _cancel_exit_orders(tc, exit_state)
+                _append_sell_tick(exit_state, reason, sellable_price, fill_price, bid_price=bid_price if bid_price > 0 else None, mid_price=price)
                 return reason, sellable_price, exit_state
 
         # ── Max hold time: scalps should not linger — exit stale trades ──
@@ -418,6 +684,8 @@ def monitor_with_polling(
                 f"pnl={pnl_pct:+.2f}% < {EXIT_MAX_HOLD_PNL_THRESHOLD_PCT}% - "
                 f"freeing capital at {sellable_price:.4f}"
             )
+            _cancel_exit_orders(tc, exit_state)
+            _append_sell_tick(exit_state, reason, sellable_price, fill_price, bid_price=bid_price if bid_price > 0 else None, mid_price=price)
             return reason, sellable_price, exit_state
 
         if use_extended_exit_criteria:
@@ -440,6 +708,8 @@ def monitor_with_polling(
             if buy_order_id:
                 set_live_exit_reason(buy_order_id, exit_reason)
             info(f"{label}{exit_reason} - exiting {signal} position at {sellable_price:.4f}")
+            _cancel_exit_orders(tc, exit_state)
+            _append_sell_tick(exit_state, exit_reason, sellable_price, fill_price, bid_price=bid_price if bid_price > 0 else None, mid_price=price)
             return exit_reason, sellable_price, exit_state
 
         if use_extended_exit_criteria:
@@ -479,6 +749,8 @@ def monitor_with_polling(
                 if buy_order_id:
                     set_live_exit_reason(buy_order_id, exit_reason)
                 info(f"{label}{exit_reason} - exiting {signal} position at {sellable_price:.4f}")
+                _cancel_exit_orders(tc, exit_state)
+                _append_sell_tick(exit_state, exit_reason, sellable_price, fill_price, bid_price=bid_price if bid_price > 0 else None, mid_price=price)
                 return exit_reason, sellable_price, exit_state
 
 
@@ -493,6 +765,8 @@ def monitor_with_websocket(
     use_extended_exit_criteria: bool = True,
     min_exit_epoch_ts: float | None = None,
     buy_order_id: str | None = None,
+    tc=None,
+    qty: int = 1,
 ):
     global _ws_cooldown_until
     label = f"[{context_label}] " if context_label else ""
@@ -522,6 +796,7 @@ def monitor_with_websocket(
             "last_price": fill_price,
             "last_print_ts": 0.0,
             "last_rsi_ts": 0.0,
+            "last_qp_check_ts": 0.0,
             "rsi_state": {},
             "exit_state": _init_exit_state(fill_price, tp_price, sl_price),
             "hold_notice_emitted": False,
@@ -583,7 +858,36 @@ def monitor_with_websocket(
                 pnl_pct,
                 current_price=sellable_price,
                 tick_ts=tick_ts,
+                tc=tc,
+                contract_symbol=contract_symbol,
+                qty=qty,
             )
+            # Throttled check: poll Alpaca every PRICE_POLL_SEC to see if any exit order filled
+            if now - state["last_qp_check_ts"] >= PRICE_POLL_SEC:
+                state["last_qp_check_ts"] = now
+                if _check_qp_order_filled(tc, state["exit_state"]):
+                    qp_fill = state["exit_state"].get("qp_order_fill_price") or sellable_price
+                    if buy_order_id:
+                        set_live_exit_reason(buy_order_id, "QUICK_PROFIT_EXIT")
+                    info(f"{label}QUICK_PROFIT_EXIT - QP limit order filled by Alpaca at {qp_fill:.4f}")
+                    state["last_price"] = qp_fill
+                    state["exit_reason"] = "QUICK_PROFIT_EXIT"
+                    _append_sell_tick(state["exit_state"], "QUICK_PROFIT_EXIT", qp_fill, fill_price)
+                    done.set()
+                    stop_stream(stream)
+                    return
+                if _check_sl_order_filled(tc, state["exit_state"]):
+                    sl_fill = state["exit_state"].get("sl_order_fill_price") or sellable_price
+                    sl_exit = state["exit_state"].get("sl_order_exit_reason", "STOP_LOSS_EXIT")
+                    if buy_order_id:
+                        set_live_exit_reason(buy_order_id, sl_exit)
+                    info(f"{label}{sl_exit} - SL stop-limit order filled by Alpaca at {sl_fill:.4f}")
+                    state["last_price"] = sl_fill
+                    state["exit_reason"] = sl_exit
+                    _append_sell_tick(state["exit_state"], sl_exit, sl_fill, fill_price)
+                    done.set()
+                    stop_stream(stream)
+                    return
             _append_timeline_tick(
                 state["exit_state"],
                 source="ws",
@@ -626,8 +930,10 @@ def monitor_with_websocket(
                         f"position at {same_candle_price:.4f} "
                         f"(pnl={same_candle_pnl_pct:+.2f}% threshold={EXIT_SAME_CANDLE_MIN_PNL_PCT:+.2f}%)"
                     )
+                    _cancel_exit_orders(tc, state["exit_state"])
                     state["last_price"] = same_candle_price
                     state["exit_reason"] = "SAME_CANDLE_POSITIVE_EXIT"
+                    _append_sell_tick(state["exit_state"], "SAME_CANDLE_POSITIVE_EXIT", same_candle_price, fill_price, bid_price=bid if bid > 0 else None, mid_price=price)
                     done.set()
                     stop_stream(stream)
                     return
@@ -662,8 +968,10 @@ def monitor_with_websocket(
                         f"{label}{reason} - peak {max_pnl:+.2f}% < {EXIT_BAD_ENTRY_MAX_PEAK_PCT}% after "
                         f"{EXIT_BAD_ENTRY_WINDOW_SEC}s, pnl={pnl_pct:+.2f}% - cutting early at {sellable_price:.4f}"
                     )
+                    _cancel_exit_orders(tc, state["exit_state"])
                     state["last_price"] = sellable_price
                     state["exit_reason"] = reason
+                    _append_sell_tick(state["exit_state"], reason, sellable_price, fill_price, bid_price=bid if bid > 0 else None, mid_price=price)
                     done.set()
                     stop_stream(stream)
                     return
@@ -677,8 +985,10 @@ def monitor_with_websocket(
                 if buy_order_id:
                     set_live_exit_reason(buy_order_id, exit_reason)
                 info(f"{label}{exit_reason} - exiting {signal} position at {sellable_price:.4f}")
+                _cancel_exit_orders(tc, state["exit_state"])
                 state["last_price"] = sellable_price
                 state["exit_reason"] = exit_reason
+                _append_sell_tick(state["exit_state"], exit_reason, sellable_price, fill_price, bid_price=bid if bid > 0 else None, mid_price=price)
                 done.set()
                 stop_stream(stream)
                 return
@@ -693,8 +1003,10 @@ def monitor_with_websocket(
                 if exit_reason:
                     if buy_order_id:
                         set_live_exit_reason(buy_order_id, exit_reason)
+                    _cancel_exit_orders(tc, state["exit_state"])
                     state["last_price"] = sellable_price
                     state["exit_reason"] = exit_reason
+                    _append_sell_tick(state["exit_state"], exit_reason, sellable_price, fill_price, bid_price=bid if bid > 0 else None, mid_price=price)
                     done.set()
                     stop_stream(stream)
                     return
@@ -721,7 +1033,7 @@ def monitor_with_websocket(
                     "switching to polling fallback"
                 )
                 stop_stream(stream)
-                return None, state["last_price"], state["exit_state"]
+                return None, state["last_price"], state["exit_state"]  # QP order stays (polling will manage it)
 
             if done.wait(timeout=1):
                 break
@@ -729,12 +1041,12 @@ def monitor_with_websocket(
             if not thread.is_alive():
                 _ws_cooldown_until = time.time() + _WS_COOLDOWN_AFTER_FAIL_SEC
                 stop_stream(stream)
-                return None, state["last_price"], state["exit_state"]
+                return None, state["last_price"], state["exit_state"]  # QP order stays (polling will manage it)
 
         if state["exit_reason"] is None:
             _ws_cooldown_until = time.time() + _WS_COOLDOWN_AFTER_FAIL_SEC
             stop_stream(stream)
-            return None, state["last_price"], state["exit_state"]
+            return None, state["last_price"], state["exit_state"]  # QP order stays (polling will manage it)
 
         thread.join(timeout=3)
         return state["exit_reason"], state["last_price"], state["exit_state"]

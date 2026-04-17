@@ -370,7 +370,7 @@ function TradeTimeline({ timeline, fillPrice, qpArmed, qpArmTime, qpArmPrice, qp
             <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '10.5px', minWidth: '480px' }}>
               <thead>
                 <tr style={{ background: '#fdfaf4', position: 'sticky', top: 0, zIndex: 1 }}>
-                  {['Time', 'Src', 'Sellable', 'Bid', 'Mid', 'PnL%', 'QP Lmt', 'SL dyn', 'Peak', 'Armed'].map(h => (
+                  {['Time', 'Src', 'Sellable', 'Bid', 'Mid', 'PnL%', 'QP Lmt', 'QP Dyn%', 'Trailing SL Dyn', 'Peak', 'Armed'].map(h => (
                     <th key={h} style={{ padding: '3px 6px', textAlign: 'left', fontWeight: 800, color: '#bbb', borderBottom: '1px solid #eee', whiteSpace: 'nowrap', fontSize: '9px', textTransform: 'uppercase', letterSpacing: '0.4px' }}>{h}</th>
                   ))}
                 </tr>
@@ -380,28 +380,32 @@ function TradeTimeline({ timeline, fillPrice, qpArmed, qpArmTime, qpArmPrice, qp
                   const isArm = qpArmIdx === idx
                   const isPeak = peakIdx === idx
                   const isEntry = tick.source === 'entry'
-                  const rowBg = isArm ? 'rgba(217,119,6,0.08)' : isPeak ? 'rgba(99,102,241,0.06)' : isEntry ? 'rgba(22,163,74,0.05)' : idx % 2 === 0 ? '#fff' : '#fafafa'
+                  const isSell = tick.source === 'sell'
+                  const rowBg = isSell ? 'rgba(239,68,68,0.10)' : isArm ? 'rgba(217,119,6,0.08)' : isPeak ? 'rgba(99,102,241,0.06)' : isEntry ? 'rgba(22,163,74,0.05)' : idx % 2 === 0 ? '#fff' : '#fafafa'
                   const pnlColor = tick.pnl_pct > 0 ? '#16a34a' : tick.pnl_pct < 0 ? '#ef4444' : '#888'
+                  const srcLabel = isSell ? (tick.exit_reason || 'SELL') : tick.source
+                  const srcColor = isSell ? '#ef4444' : '#aaa'
                   return (
-                    <tr key={idx} style={{ background: rowBg }}>
+                    <tr key={idx} style={{ background: rowBg, fontWeight: isSell ? 700 : undefined }}>
                       <td style={{ padding: '2px 6px', fontFamily: 'monospace', color: '#555', whiteSpace: 'nowrap' }}>{fmtTickTime(tick.ts)}</td>
-                      <td style={{ padding: '2px 6px', color: '#aaa', textTransform: 'uppercase', fontSize: '9px', fontWeight: 700 }}>{tick.source}</td>
-                      <td style={{ padding: '2px 6px', fontFamily: 'monospace', fontWeight: 700, color: '#111' }}>${fmt2(tick.sellable_price)}</td>
+                      <td style={{ padding: '2px 6px', color: srcColor, textTransform: 'uppercase', fontSize: '9px', fontWeight: 700 }}>{srcLabel}</td>
+                      <td style={{ padding: '2px 6px', fontFamily: 'monospace', fontWeight: 700, color: isSell ? '#ef4444' : '#111' }}>${fmt2(tick.sellable_price)}</td>
                       <td style={{ padding: '2px 6px', fontFamily: 'monospace', color: '#777' }}>{tick.bid_price != null ? `$${fmt2(tick.bid_price)}` : '—'}</td>
                       <td style={{ padding: '2px 6px', fontFamily: 'monospace', color: '#777' }}>{tick.mid_price != null ? `$${fmt2(tick.mid_price)}` : '—'}</td>
                       <td style={{ padding: '2px 6px', fontFamily: 'monospace', fontWeight: 800, color: pnlColor }}>{fmtPctSigned(tick.pnl_pct)}</td>
                       <td style={{ padding: '2px 6px', fontFamily: 'monospace', color: '#d97706' }}>{tick.qp_limit_price != null ? `$${fmt2(tick.qp_limit_price)}` : '—'}</td>
+                      <td style={{ padding: '2px 6px', fontFamily: 'monospace', color: '#d97706' }}>{tick.qp_dynamic_pct > 0 ? fmtPctSigned(tick.qp_dynamic_pct) : '—'}</td>
                       <td style={{ padding: '2px 6px', fontFamily: 'monospace', color: '#ef4444' }}>{fmtPctSigned(tick.sl_dynamic_pct)}</td>
                       <td style={{ padding: '2px 6px', fontFamily: 'monospace', color: '#6366f1' }}>{fmtPctSigned(tick.max_pnl_pct)}</td>
                       <td style={{ padding: '2px 6px', textAlign: 'center' }}>
-                        {tick.qp_armed ? <span style={{ color: '#d97706', fontSize: '10px' }}>✓</span> : <span style={{ color: '#ddd' }}>—</span>}
+                        {isSell ? <span style={{ color: '#ef4444', fontSize: '10px' }}>✕</span> : tick.qp_armed ? <span style={{ color: '#d97706', fontSize: '10px' }}>✓</span> : <span style={{ color: '#ddd' }}>—</span>}
                       </td>
                     </tr>
                   )
                 })}
                 {ticks.length > 200 && (
                   <tr>
-                    <td colSpan={10} style={{ padding: '4px 6px', textAlign: 'center', color: '#bbb', fontSize: '10px', fontStyle: 'italic' }}>
+                    <td colSpan={11} style={{ padding: '4px 6px', textAlign: 'center', color: '#bbb', fontSize: '10px', fontStyle: 'italic' }}>
                       +{ticks.length - 200} more ticks not shown
                     </td>
                   </tr>
@@ -637,7 +641,7 @@ export default function OverallSummary() {
   const [symbolFilter, setSymbolFilter] = useState('ALL')
   const [sortCol,      setSortCol]      = useState('createdAt')
   const [sortDir,      setSortDir]      = useState('desc')
-  const [hideStraddle, setHideStraddle]  = useState(true)
+  const [hideStraddle, setHideStraddle]  = useState(false)
   const [sellingSymbol, setSellingSymbol] = useState(null)
   const alertedPositionKeysRef = useRef(new Set())
   const lastDingAtRef = useRef(0)
