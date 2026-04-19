@@ -374,7 +374,7 @@ function TradeTimeline({ timeline, fillPrice, qpArmed, qpArmTime, qpArmPrice, qp
             <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '10.5px', minWidth: '480px' }}>
               <thead>
                 <tr style={{ background: '#fdfaf4', position: 'sticky', top: 0, zIndex: 1 }}>
-                  {['Time', 'Src', 'Sellable', 'Bid', 'Mid', 'PnL%', 'QP Lmt', 'QP Dyn%', 'Trailing SL Dyn', 'Peak', 'Armed', 'Orders'].map(h => (
+                  {['Time', 'Src', 'Sellable', 'Bid', 'Mid', 'PnL%', 'QP Lmt', 'QP Dyn%', 'Trailing SL Dyn', 'Peak', 'TP', 'SL Action', 'SL Update', 'Armed', 'Orders'].map(h => (
                     <th key={h} style={{ padding: '3px 6px', textAlign: 'left', fontWeight: 800, color: '#bbb', borderBottom: '1px solid #eee', whiteSpace: 'nowrap', fontSize: '9px', textTransform: 'uppercase', letterSpacing: '0.4px' }}>{h}</th>
                   ))}
                 </tr>
@@ -414,7 +414,7 @@ function TradeTimeline({ timeline, fillPrice, qpArmed, qpArmTime, qpArmPrice, qp
                           {tick.limit_price != null ? `lmt $${fmt2(tick.limit_price)}` : '—'}
                         </td>
                         <td style={{ padding: '2px 6px', fontFamily: 'monospace', color: typeColor }}>{fmtPctSigned(tick.pct)}</td>
-                        <td colSpan={4} style={{ padding: '2px 6px', fontFamily: 'monospace', fontSize: '9px', color: statusColor, fontWeight: 700 }}>
+                        <td colSpan={7} style={{ padding: '2px 6px', fontFamily: 'monospace', fontSize: '9px', color: statusColor, fontWeight: 700 }}>
                           {isError
                             ? `✕ FAILED · ${tick.error || 'unknown error'}`
                             : `${statusIcon} · ${orderCountText} · id ${(tick.order_id || '').slice(0, 8)}…`
@@ -442,6 +442,13 @@ function TradeTimeline({ timeline, fillPrice, qpArmed, qpArmTime, qpArmPrice, qp
                       <td style={{ padding: '2px 6px', fontFamily: 'monospace', color: '#d97706' }}>{tick.qp_dynamic_pct > 0 ? fmtPctSigned(tick.qp_dynamic_pct) : '—'}</td>
                       <td style={{ padding: '2px 6px', fontFamily: 'monospace', color: '#ef4444' }}>{fmtPctSigned(tick.sl_dynamic_pct)}</td>
                       <td style={{ padding: '2px 6px', fontFamily: 'monospace', color: '#6366f1' }}>{fmtPctSigned(tick.max_pnl_pct)}</td>
+                      <td style={{ padding: '2px 6px', fontFamily: 'monospace', color: '#777', fontWeight: 700 }}>{tick.tp_action || 'NO_CHANGE'}</td>
+                      <td style={{ padding: '2px 6px', fontFamily: 'monospace', color: tick.sl_action === 'UPDATED' ? '#ef4444' : '#777', fontWeight: 700 }}>{tick.sl_action || 'NO_CHANGE'}</td>
+                      <td style={{ padding: '2px 6px', fontFamily: 'monospace', color: '#555', whiteSpace: 'nowrap' }}>
+                        {tick.sl_action === 'UPDATED'
+                          ? `${tick.sl_order_action || 'UPDATED'} · ${tick.sl_prev_price != null ? `$${fmt2(tick.sl_prev_price)}` : '—'} -> ${tick.sl_new_price != null ? `$${fmt2(tick.sl_new_price)}` : '—'}`
+                          : 'No change'}
+                      </td>
                       <td style={{ padding: '2px 6px', textAlign: 'center' }}>
                         {isSell ? <span style={{ color: '#ef4444', fontSize: '10px' }}>✕</span> : tick.qp_armed ? <span style={{ color: '#d97706', fontSize: '10px' }}>✓</span> : <span style={{ color: '#ddd' }}>—</span>}
                       </td>
@@ -456,7 +463,7 @@ function TradeTimeline({ timeline, fillPrice, qpArmed, qpArmTime, qpArmPrice, qp
                 })}
                 {ticks.length > 200 && (
                   <tr>
-                    <td colSpan={12} style={{ padding: '4px 6px', textAlign: 'center', color: '#bbb', fontSize: '10px', fontStyle: 'italic' }}>
+                    <td colSpan={15} style={{ padding: '4px 6px', textAlign: 'center', color: '#bbb', fontSize: '10px', fontStyle: 'italic' }}>
                       +{ticks.length - 200} more ticks not shown
                     </td>
                   </tr>

@@ -2753,21 +2753,11 @@ def get_live_positions_api() -> dict[str, Any]:
 
     for pos in positions:
         live = pos.get("live", {})
-        pos["bracket_parent_order_id"] = live.get("bracket_parent_order_id")
-        pos["qp_placeholder_order_id"] = live.get("qp_placeholder_order_id")
         pos["tp_order_ids"] = live.get("tp_order_ids") or []
         pos["sl_order_ids"] = live.get("sl_order_ids") or []
-        pos["use_bracket_qp"] = bool(live.get("use_bracket_qp", False))
         exit_reason = live.get("exit_reason")
         if exit_reason:
             live["exit_description"] = EXIT_REASON_DESCRIPTIONS.get(exit_reason, exit_reason)
-
-        if pos["use_bracket_qp"]:
-            live["threshold_notes"] = live.get("threshold_notes", []) + [
-                f"Bracket parent: {pos['bracket_parent_order_id'] or 'N/A'}",
-                f"TP child ids: {', '.join(pos['tp_order_ids']) if pos['tp_order_ids'] else 'none'}",
-                f"QP placeholder SL id: {pos['qp_placeholder_order_id'] or 'none'}",
-            ]
 
         # Compute dollar PnL from fill_price, current_price, qty (options: qty * 100)
         fill_price = float(pos.get("fill_price", 0) or 0)

@@ -148,10 +148,6 @@ def update_live_exit_state(buy_order_id: str, exit_state: dict, pnl_pct: float, 
         live["qp_floor_pct"] = round(float(exit_state.get("qp_floor_pct", 0)), 4)
         live["qp_dynamic_pct"] = round(float(exit_state.get("qp_dynamic_pct", 0)), 4)
         live["max_pnl_pct"] = round(float(exit_state.get("max_pnl_pct", 0)), 4)
-        live["use_bracket_qp"] = bool(exit_state.get("use_bracket_qp", False))
-        live["bracket_parent_order_id"] = exit_state.get("bracket_parent_order_id")
-        live["qp_placeholder_order_id"] = exit_state.get("qp_placeholder_order_id")
-        live["qp_last_replaced_pct"] = exit_state.get("qp_last_replaced_pct")
         live["tp_order_ids"] = list(exit_state.get("tp_order_ids") or [])
         live["tp_order_filled"] = bool(exit_state.get("tp_order_filled", False))
         live["tp_order_id_filled"] = exit_state.get("tp_order_id_filled")
@@ -161,6 +157,7 @@ def update_live_exit_state(buy_order_id: str, exit_state: dict, pnl_pct: float, 
         live["sl_order_id_filled"] = exit_state.get("sl_order_id_filled")
         live["sl_order_fill_price"] = exit_state.get("sl_order_fill_price")
         live["sl_order_exit_reason"] = exit_state.get("sl_order_exit_reason")
+        live["timeline"] = list(exit_state.get("timeline") or [])[-300:]
         live["broker_safety_sl_order_id"] = exit_state.get("broker_safety_sl_order_id")
         live["broker_safety_sl_stop_price"] = exit_state.get("broker_safety_sl_stop_price")
         live["broker_safety_sl_limit_price"] = exit_state.get("broker_safety_sl_limit_price")

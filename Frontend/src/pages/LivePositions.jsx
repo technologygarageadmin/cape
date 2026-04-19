@@ -18,6 +18,27 @@ const QUALITY_CONFIG = {
   BAD:       { color: '#ef4444', bg: 'rgba(239,68,68,0.1)',  icon: XCircle, label: 'Bad Entry' },
 }
 
+function fmtNum4(v) {
+  const n = parseFloat(v)
+  return Number.isFinite(n) ? n.toFixed(4) : '—'
+}
+
+function fmtSignedPct(v) {
+  const n = parseFloat(v)
+  if (!Number.isFinite(n)) return '—'
+  return `${n >= 0 ? '+' : ''}${n.toFixed(2)}%`
+}
+
+function fmtTickTime(ts) {
+  if (!ts) return '—'
+  try {
+    const d = new Date(ts)
+    return Number.isNaN(d.getTime()) ? String(ts) : d.toLocaleTimeString()
+  } catch {
+    return String(ts)
+  }
+}
+
 const styles = {
   page: { width: '100%' },
   topBanner: {
@@ -575,11 +596,9 @@ function PositionCard({ pos }) {
 
   const exitReasonLabel = (live.exit_reason || '').replace(/_/g, ' ').replace(/EXIT$/i, '').trim()
   const pnlDollar = parseFloat(live.pnl_dollar || 0)
-  const bracketParentOrderId = pos.bracket_parent_order_id || live.bracket_parent_order_id
-  const qpPlaceholderOrderId = pos.qp_placeholder_order_id || live.qp_placeholder_order_id
   const tpOrderIds = Array.isArray(pos.tp_order_ids) ? pos.tp_order_ids : (Array.isArray(live.tp_order_ids) ? live.tp_order_ids : [])
   const slOrderIds = Array.isArray(pos.sl_order_ids) ? pos.sl_order_ids : (Array.isArray(live.sl_order_ids) ? live.sl_order_ids : [])
-  const useBracketQp = !!(pos.use_bracket_qp || live.use_bracket_qp)
+  const timeline = Array.isArray(live.timeline) ? live.timeline : []
 
   return (
     <div style={{
@@ -712,20 +731,8 @@ function PositionCard({ pos }) {
                 </span>
               </div>
             </div>
-            {(useBracketQp || bracketParentOrderId || qpPlaceholderOrderId || tpOrderIds.length > 0 || slOrderIds.length > 0) && (
+            {(tpOrderIds.length > 0 || slOrderIds.length > 0) && (
               <div style={styles.bracketGrid}>
-                <div style={styles.bracketItem}>
-                  <span style={styles.bracketLabel}>Bracket Mode</span>
-                  <span style={styles.bracketValue}>{useBracketQp ? 'Enabled' : 'Disabled'}</span>
-                </div>
-                <div style={styles.bracketItem}>
-                  <span style={styles.bracketLabel}>Bracket Parent</span>
-                  <span style={styles.bracketValue}>{bracketParentOrderId || '—'}</span>
-                </div>
-                <div style={styles.bracketItem}>
-                  <span style={styles.bracketLabel}>QP Placeholder SL</span>
-                  <span style={styles.bracketValue}>{qpPlaceholderOrderId || '—'}</span>
-                </div>
                 <div style={styles.bracketItem}>
                   <span style={styles.bracketLabel}>TP Child IDs</span>
                   <span style={styles.bracketValue}>{tpOrderIds.length > 0 ? tpOrderIds.join(', ') : '—'}</span>
@@ -737,6 +744,60 @@ function PositionCard({ pos }) {
                 <div style={styles.bracketItem}>
                   <span style={styles.bracketLabel}>Child Count</span>
                   <span style={styles.bracketValue}>{tpOrderIds.length + slOrderIds.length}</span>
+                </div>
+              </div>
+            )}
+
+            {timeline.length > 0 && (
+              <div style={{ marginTop: '0.8rem', borderTop: '1px solid rgba(0,0,0,0.06)', paddingTop: '0.8rem' }}>
+                <div style={{
+                  fontSize: '0.7rem',
+                  fontWeight: 700,
+                  textTransform: 'uppercase',
+                  letterSpacing: '0.08em',
+                  color: '#888',
+                  marginBottom: '0.45rem',
+                }}>
+                  Tick Details (TP/SL change log)
+                </div>
+                <div style={{ overflowX: 'auto', maxHeight: '230px', overflowY: 'auto', border: '1px solid rgba(201,162,39,0.15)', borderRadius: '8px' }}>
+                  <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.68rem', minWidth: '980px' }}>
+                    <thead>
+                      <tr style={{ background: '#fdfaf4', position: 'sticky', top: 0, zIndex: 1 }}>
+                        {['Time', 'Source', 'Price', 'PnL%', 'Peak%', 'TP', 'SL', 'SL Update', 'SL Order'].map((h) => (
+                          <th key={h} style={{ padding: '0.32rem 0.45rem', textAlign: 'left', color: '#777', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.04em', borderBottom: '1px solid rgba(0,0,0,0.08)' }}>{h}</th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {timeline.slice(0, 250).map((tick, idx) => {
+                        const isOrder = tick.source === 'order_placed' || tick.source === 'order_replaced'
+                        return (
+                          <tr key={idx} style={{ borderBottom: '1px solid rgba(0,0,0,0.04)', background: idx % 2 === 0 ? '#fff' : '#fcfcfc' }}>
+                            <td style={{ padding: '0.3rem 0.45rem', fontFamily: 'monospace', color: '#555' }}>{fmtTickTime(tick.ts)}</td>
+                            <td style={{ padding: '0.3rem 0.45rem', color: '#666', textTransform: 'uppercase', fontWeight: 700 }}>{tick.source || 'tick'}</td>
+                            <td style={{ padding: '0.3rem 0.45rem', fontFamily: 'monospace' }}>{tick.sellable_price != null ? `$${fmtNum4(tick.sellable_price)}` : '—'}</td>
+                            <td style={{ padding: '0.3rem 0.45rem', fontFamily: 'monospace', color: parseFloat(tick.pnl_pct || 0) >= 0 ? '#16a34a' : '#dc2626' }}>{fmtSignedPct(tick.pnl_pct)}</td>
+                            <td style={{ padding: '0.3rem 0.45rem', fontFamily: 'monospace', color: '#555' }}>{fmtSignedPct(tick.max_pnl_pct)}</td>
+                            <td style={{ padding: '0.3rem 0.45rem', fontFamily: 'monospace', color: '#555' }}>{tick.tp_action || 'NO_CHANGE'}</td>
+                            <td style={{ padding: '0.3rem 0.45rem', fontFamily: 'monospace', color: tick.sl_action === 'UPDATED' ? '#dc2626' : '#555', fontWeight: tick.sl_action === 'UPDATED' ? 700 : 500 }}>{tick.sl_action || 'NO_CHANGE'}</td>
+                            <td style={{ padding: '0.3rem 0.45rem', fontFamily: 'monospace', color: '#444', whiteSpace: 'nowrap' }}>
+                              {isOrder
+                                ? (tick.order_type || 'ORDER_EVENT')
+                                : (tick.sl_action === 'UPDATED'
+                                  ? `${tick.sl_prev_price != null ? `$${fmtNum4(tick.sl_prev_price)}` : '—'} -> ${tick.sl_new_price != null ? `$${fmtNum4(tick.sl_new_price)}` : '—'}`
+                                  : 'No change')}
+                            </td>
+                            <td style={{ padding: '0.3rem 0.45rem', fontFamily: 'monospace', color: '#444', whiteSpace: 'nowrap' }}>
+                              {tick.sl_order_action || (isOrder ? 'ORDER_EVENT' : 'NO_CHANGE')}
+                              {tick.sl_order_prev_id ? ` | old:${String(tick.sl_order_prev_id).slice(0, 8)}` : ''}
+                              {tick.sl_order_new_id ? ` | new:${String(tick.sl_order_new_id).slice(0, 8)}` : ''}
+                            </td>
+                          </tr>
+                        )
+                      })}
+                    </tbody>
+                  </table>
                 </div>
               </div>
             )}

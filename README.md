@@ -112,26 +112,85 @@ Key preconditions and filters (config-driven):
 
 If any mandatory filter fails, no entry is placed.
 
-## Exit Engine (Priority-Driven)
+## Clear Exit Model (After Buy Fill)
 
-After entry fill, monitoring uses websocket first and polling fallback.
+Use this as the single exit model reference.
 
-Typical priority order:
+Config terms:
 
-1. Take Profit (TP)
-2. Stop Loss (SL)
-3. Quick Profit (QP) lock
-4. Trailing stop management
-5. Breakeven protection
-6. Bad entry fail-fast rule
-7. Momentum stall rule
-8. Max-hold timeout rule
+1. EP = entry price
+2. TP_OFFSET
+3. SL_OFFSET
+4. TRAILING_SL_OFFSET
+5. QP_OFFSET (fast trailing)
+6. Optional TP trailing after confirmation ticks
 
-Important behaviors:
+State:
 
-- Safety SL is placed early and replaced upward as dynamic thresholds improve.
-- QP arms only after minimum peak PnL threshold.
-- Exit checks use sellable pricing logic (not optimistic mid-only assumptions).
+1. One active TP order: SELL LIMIT
+2. One active SL order: SELL SL LIMIT
+3. QP is internal
+4. Cape_SL is internal trailing
+5. existing SL = current live SL order price
+
+### 1) Entry
+
+1. Place BUY LIMIT at EP.
+2. On fill:
+- Place SELL LIMIT TP at EP + TP_OFFSET.
+- Place SELL SL LIMIT at EP - SL_OFFSET.
+3. Initialize:
+- QP = EP
+- Cape_SL = EP - SL_OFFSET
+
+### 2) On every tick
+
+If price > EP (profit mode):
+
+1. QP = price - QP_OFFSET
+2. Cape_SL = price - TRAILING_SL_OFFSET
+3. new_SL = max(existing SL, Cape_SL, QP)
+4. If new_SL > existing SL:
+- Cancel old SELL SL LIMIT at existing SL
+- Place new SELL SL LIMIT at new_SL
+- existing SL = new_SL
+5. Optional TP trailing:
+- If price > current TP and confirmation ticks pass, modify TP down to trailing TP formula.
+
+If price <= EP (loss mode):
+
+1. QP = None
+2. drawdown = EP - price
+3. tighten = min(drawdown, MAX_TIGHTEN)
+4. Cape_SL = EP - (SL_OFFSET - tighten)
+5. new_SL = max(existing SL, Cape_SL)
+6. If new_SL > existing SL:
+- Cancel old SELL SL LIMIT
+- Place new SELL SL LIMIT
+- existing SL = new_SL
+
+### 3) Execution rules
+
+1. If price >= TP:
+- TP fills
+- Cancel remaining SL
+- Position closed
+2. If price <= SL:
+- SL fills
+- Cancel remaining TP
+- Position closed
+3. If SL miss/gap:
+- Cancel all open exits
+- Place market sell
+- Position closed
+
+### 4) Rules
+
+1. Only one TP and one SL live at any time
+2. SL only moves up, never down
+3. Always cancel old SL before placing new SL
+4. QP is internal and can push final SL
+5. Live orders represent only final TP and final SL
 
 ## API Guide
 
@@ -199,58 +258,59 @@ Assume current defaults:
 
 1. TP = +8.0%
 2. SL = -3.5%
-3. QP gap = 0.25%
-4. QP min peak = 0%
-5. QP min exit pnl = +0.20%
+3. QP gap = 0.0%
+4. QP min peak = 0.0%
+5. QP min exit pnl = 0.0%
 
 ### Tick Timeline (what UI should show)
 
 1. Tick 0: 8.00
 - PnL = 0.00%
 - Peak = 0.00%
-- LivePositions Exit Watch:
-  - SL: Will hit SL
-  - TP: Will hit TP
-  - QP: Not armed yet / base state
+- TP: NO_CHANGE (still initial TP)
+- SL: NO_CHANGE (still initial SL)
+- Order action: no cancel/replace
 
 2. Tick 1: 8.05
 - PnL = +0.625%
 - Peak = +0.625%
-- QP dynamic becomes about +0.375% (peak - 0.25)
-- LivePositions Exit Watch:
-  - QP: Will hit QP (armed and tracking)
+- QP dynamic becomes +0.625% (zero gap)
+- TP: NO_CHANGE
+- SL: UPDATED upward by QP/Cape_SL push
+- Order action: cancel old SL limit order and place new SL limit order
 
 3. Tick 2: 8.12
 - PnL = +1.50%
 - Peak = +1.50%
-- QP dynamic updates to about +1.25%
-- Breakeven logic is now active (peak >= 1.5%)
-- LivePositions Exit Watch:
-  - QP: Will hit QP at pullback threshold
-  - SL: tighter than initial static SL
+- QP dynamic updates to +1.50% (zero gap)
+- TP: NO_CHANGE
+- SL: UPDATED upward again
+- Order action: cancel old SL limit order and place new SL limit order
 
 4. Tick 3: 8.09
 - PnL = +1.125%
 - Peak remains +1.50%
-- QP condition is satisfied (current pnl <= qp_dynamic)
-- Exit fires here as QUICK_PROFIT_EXIT
+- TP: NO_CHANGE
+- SL: NO_CHANGE (SL already tightened from previous tick)
+- Since price falls below active SL, SL order fills
+- Exit reason: STOP_LOSS_EXIT (dynamic SL capture)
 
 5. Tick 4+: 7.95 -> 7.90 -> 8.00 -> 8.05 -> 8.11
 - Trade is already closed at Tick 3
-- UI should show closed state and exit reason QUICK_PROFIT_EXIT
+- UI should show closed state and exit reason STOP_LOSS_EXIT
 - These later ticks are not part of the same open position lifecycle
 
 ### Result Summary
 
 1. Exit tick: 8.09
-2. Exit reason: QUICK_PROFIT_EXIT
-3. Approx realized pnl: around +1.1% to +1.25% zone (fill dependent)
+2. Exit reason: STOP_LOSS_EXIT (triggered by tightened dynamic SL)
+3. Approx realized pnl: around +1.1% zone (fill dependent)
 
 ### Where this appears in UI
 
 1. TradingView
 - Open position card shows Exit Watch changes tick-by-tick until close
-- After close, symbol history row shows QUICK_PROFIT_EXIT
+- After close, symbol history row shows STOP_LOSS_EXIT
 
 2. LivePositions
 - Position moves from active to exited
@@ -259,75 +319,38 @@ Assume current defaults:
 3. OverallSummary
 - Trade appears in history with lifecycle fields and exit reason
 
-## When Limit Orders Change
+### Price Change -> SL Limit Change (explicit)
 
-This section explains exactly when the system creates or updates limit-related orders.
+Example with EP = 8.00, TP_OFFSET = 0.64 (TP = 8.64), SL_OFFSET = 0.28 (SL = 7.72), QP_OFFSET = 0.00, TRAILING_SL_OFFSET = 0.03.
 
-### 1) Entry order limit changes
+1. Fill at 8.00
+- Place TP LIMIT at 8.64
+- Place SL STOP-LIMIT at 7.72 (existing SL = 7.72)
 
-1. Default behavior is market entry.
-2. Entry uses limit only when entry order mode is set to limit or a forced limit path is used.
-3. If limit mode is enabled but no valid reference price is available, backend falls back to market.
+2. Tick 8.05
+- QP = 8.05
+- Cape_SL = 8.02
+- new_SL = max(7.72, 8.02, 8.05) = 8.05
+- Cancel SL at 7.72
+- Place SL at 8.05
+- existing SL = 8.05
+- TP remains unchanged at 8.64
 
-### 2) Quick Profit limit order changes
+3. Tick 8.12
+- QP = 8.12
+- Cape_SL = 8.09
+- new_SL = max(8.05, 8.09, 8.12) = 8.12
+- Cancel SL at 8.05
+- Place SL at 8.12
+- existing SL = 8.12
+- TP remains unchanged at 8.64
 
-1. QP level is dynamic and follows peak pnl using peak minus QP gap.
-2. When QP dynamic percent ratchets upward, a new QP limit sell can be placed at the new QP level.
-3. If bracket QP mode is enabled, backend may replace the existing bracket stop child instead of placing independent QP limits.
-4. Once one QP order fills, remaining QP and related protection orders are cancelled.
+4. Tick 8.09
+- Price <= existing SL (8.12)
+- SL executes, cancel TP, close position
 
-### 3) Stop Loss stop-limit changes
-
-1. A safety SL stop-limit is placed after fill.
-2. As dynamic SL ratchets upward, backend updates this protection using order replace.
-3. Trailing states continue replacing SL stop-limit to lock gains.
-
-### 4) What you see in UI
-
-1. TradingView and LivePositions show dynamic threshold movement per tick.
-2. History shows final exit reason such as QUICK_PROFIT_EXIT, STOP_LOSS_EXIT, or TRAILING_STOP_EXIT.
-3. If an order was replaced, backend timeline records reflect order update events.
-
-### 5) Concrete example: price change -> limit/stop change
-
-Using the same MT sample path:
-
-8.00 -> 8.05 -> 8.12 -> 8.09 -> 7.95 -> 7.90 -> 8.00 -> 8.05 -> 8.11
-
-With current defaults:
-
-1. QP_GAP_PCT = 0.25
-2. QP_MIN_EXIT_PCT = 0.20
-3. EXIT_BRACKET_QP_ENABLED = True
-4. SL_STOP_LIMIT_BUFFER_PCT = 5.0
-
-Tick-by-tick order behavior:
-
-1. Entry at 8.00
-- Initial safety SL stop-limit is placed around stop 7.72 (limit uses stop-limit buffer).
-
-2. Price 8.05
-- Peak pnl rises to about +0.625%.
-- QP dynamic becomes about +0.375%.
-- Because bracket QP mode is enabled, backend replaces the bracket SL child upward (instead of adding a separate independent QP limit ladder).
-
-3. Price 8.12
-- Peak pnl rises to about +1.50%.
-- QP dynamic moves to about +1.25%.
-- Backend replaces the same bracket SL child again to the new higher protection level.
-
-4. Price 8.09
-- Current pnl falls to about +1.125%.
-- QP exit condition is met, so position exits as QUICK_PROFIT_EXIT.
-- Remaining protection orders are cancelled after fill.
-
-5. Later prices 7.95 -> 7.90 -> 8.00 -> 8.05 -> 8.11
-- No further order updates for that trade because the position is already closed at 8.09.
-
-Notes:
-
-1. If bracket QP is disabled, backend can place separate QP SELL limit orders when QP ratchets up.
-2. In bracket QP mode, you mainly see replace events on the bracket stop child as price improves.
+5. Later ticks 7.95, 7.90, 8.00, 8.05, 8.11
+- Ignored for this trade because position is already closed
 
 ## Configuration
 
