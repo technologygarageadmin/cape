@@ -9,7 +9,7 @@ import {
 const GOLD = '#C9A227'
 const GOLD_LIGHT = '#F5C518'
 const GOLD_DEEP = '#A07C10'
-const API = 'http://localhost:8000'
+const API_DISPLAY = 'http://localhost:8002'
 
 const MODE_CONFIG = {
   AIT:  { color: '#22c55e', bg: 'rgba(34,197,94,0.1)',  border: 'rgba(34,197,94,0.2)',  icon: Zap,     label: 'AIT — Auto Trading' },
@@ -546,7 +546,7 @@ export default function SignalRadar() {
 
   const fetchData = async () => {
     try {
-      const res = await fetch(`${API}/api/signal-readiness`)
+      const res = await fetch(`${API_DISPLAY}/api/signal-readiness`)
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
       const data = await res.json()
       setSymbols(data.symbols || [])
@@ -561,7 +561,7 @@ export default function SignalRadar() {
 
   const handleModeChange = async (symbol, mode) => {
     try {
-      const res = await fetch(`${API}/api/symbol/mode`, {
+      const res = await fetch(`${API_DISPLAY}/api/symbol/mode`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ symbol, mode }),

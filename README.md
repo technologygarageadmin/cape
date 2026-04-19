@@ -1,274 +1,317 @@
 # Cape Trading Platform
 
-Full-stack options scalping platform with an automated RSI-based entry engine, dynamic exit management, and a real-time React dashboard.
+Full-stack options trading platform with:
+- Automated Intelligence Trading (AIT)
+- Manual Trading (MT)
+- Real-time signal/risk dashboards
+- Dynamic, multi-layer exit engine
 
-- **Frontend** - React 19 + Vite 8: Signal Radar, Live Positions, Trade History, ATR View, Dashboard
-- **Backend** - FastAPI (Python 3.11+): market data, order execution, AIT engine, REST + WebSocket APIs
-- **Broker** - Alpaca (paper + live): stock/option data, order placement, position management
-- **Database** - MongoDB Atlas: full trade lifecycle logging, straddle history, manual trade log
+This repository is designed for active intraday options workflows with Alpaca as broker/data provider and MongoDB for lifecycle logging.
 
-> **Risk Notice** - This software can place real orders. Use paper trading until you fully validate behavior. You are solely responsible for all trading risk and API usage.
+Risk Notice: This software can place real orders. Keep PAPER_TRADING enabled until you validate every behavior in your own environment.
 
-## Recent Updates (Apr 2026)
+## What This Project Does
 
-- **Exit path hardening**
-   - Safety SL is now placed immediately at entry and then replaced as the dynamic stop ratchets up
-   - Alpaca stop orders are updated in place instead of stacking new orders, which avoids held-qty failures
-   - Manual trades reserve symbol ownership during handoff so the generic orphan monitor does not double-log the same exit
-- **Broker fallback for options**
-   - Alpaca options complex/bracket orders can be rejected, so entry now falls back cleanly to a plain market order when needed
-- **Trading View: Open Positions now includes Exit Watch**
-   - Per-open-position live tiles for `SL`, `QP`, `TP`
-   - Human-readable status lines: **Hit SL / Will hit SL**, **Hit TP / Will hit TP**, **Hit QP / Will hit QP**
-   - QP arming visibility when peak is not high enough yet
-- **Trading View: Symbol History restyled to match Overall Summary history**
-   - Card-style rows with source badge (`MT`/`AIT`), side (`CALL`/`PUT`), strike, entry/exit price, PnL $, PnL %, result, and exit reason
-   - Deduplication and robust symbol matching for contract-format symbols (e.g. `TSLA260424C00387500`)
-- **Exit engine safety tweak**
-   - Quick Profit (QP) is now armed only after peak PnL reaches a minimum threshold (`QP_MIN_PEAK_PCT`), preventing QP exits at small/negative pullback levels
+1. Scans watchlist symbols for RSI/EMA/VWAP-based entry setups.
+2. Executes option orders (AIT or MT).
+3. Starts continuous live monitoring after fill.
+4. Applies prioritized exits (TP, SL, QP, trailing, time/risk rules).
+5. Logs full trade lifecycle to MongoDB.
+6. Serves a React UI for radar, positions, history, and diagnostics.
 
----
+## Architecture (Current)
 
-## Repository Layout
+The backend is split into two API lanes:
+
+1. Trading API (port 8001)
+- File: backend/api_server_trading.py
+- Runs the full trading app from backend/api_server.py
+- Handles order-critical operations and engine internals
+
+2. Display API (port 8002)
+- File: backend/api_server_display.py
+- Proxy layer for UI/read-heavy traffic
+- Preserves request/response contracts while isolating display load
+
+3. Frontend (port 5173)
+- React + Vite app in Frontend/
+
+4. Launcher
+- app.py starts only backend services (8001 and 8002)
+- Frontend is started manually by user
+
+## Project Layout
 
 ```
 .
+|-- app.py
 |-- backend/
-|   |-- api_server.py            # FastAPI app + startup background services
-|   |-- config.py                # All trading settings (git-ignored)
-|   |-- strategy_helpers.py      # determine_signal() -- 13-filter entry engine
-|   |-- monitoring.py            # Dynamic exit engine (WS + polling fallback)
-|   |-- rsi_analyer.py           # analyze_rsi() -- RSI, EMA, VWAP, streaks, patterns
-|   |-- market_data.py           # OBR / current price / contract selection
-|   |-- order_execution.py       # Order helpers + in-memory position registry
-|   |-- position_monitor_loop.py # Orphan position monitor
-|   |-- symbol_mode.py           # Per-symbol mode persistence
-|   |-- alpaca_helpers.py        # Snapshot + quote helpers
-|   |-- main.py                  # Standalone bot runner (separate from api_server)
+|   |-- api_server.py
+|   |-- api_server_trading.py
+|   |-- api_server_display.py
+|   |-- config.py
+|   |-- strategy_helpers.py
+|   |-- rsi_analyer.py
+|   |-- monitoring.py
+|   |-- market_data.py
+|   |-- order_execution.py
+|   |-- position_monitor_loop.py
+|   |-- symbol_mode.py
+|   |-- alpaca_helpers.py
+|   |-- main.py
 |   |-- requirements.txt
 |   `-- logs/
-|       `-- symbol_modes.json
-|-- src/
-|   |-- pages/
-|   |   |-- SignalRadar.jsx      # Live per-symbol signal + filter checklist
-|   |   |-- Dashboard.jsx
-|   |   |-- LivePositions.jsx
-|   |   |-- OverallSummary.jsx   # Trade history + exit snapshot analysis
-|   |   |-- TradingView.jsx
-|   |   `-- ATRView.jsx
-|   |-- components/
-|   `-- App.jsx
-|-- package.json
-|-- vite.config.js
-`-- firebase.json
+`-- Frontend/
+    |-- src/pages/
+    |-- src/components/
+    |-- package.json
+    `-- vite.config.js
 ```
 
----
+## Core Modes: AIT vs MT
 
-## Entry Strategy
+### AIT (Automated Intelligence Trading)
 
-Signal trigger: **RSI(14) crosses above/below its 9-period MA** on a 1-minute bar.
+- Symbol mode: auto
+- Engine scans bars/signals and auto-enters when all filters pass
+- Exit engine runs immediately after fill
+- Straddle workflow can be enabled at market open
 
-Every filter below must pass for a trade to fire.
+### MT (Manual Trading)
 
-### Pre-filters (kill signal immediately)
+- Symbol mode: manual
+- User selects/suggests contract and places buy from UI
+- Backend still manages live monitoring and exits after fill
+- Full trade recorded to Mongo with exit reason and PnL
 
-| Filter | Requirement |
-|--------|-------------|
-| Time window *(optional)* | 9:45-10:45 AM or 1:15-2:15 PM ET -- toggle with `ENTRY_TIME_WINDOW_ENABLED` |
-| RSI-MA gap | `|RSI - RSI_MA| >= 3.0 pts` -- rejects weak/noisy touches |
+### OFF mode
 
-### CALL filters (all must pass)
+- Symbol mode: off
+- No automated entries for that symbol
 
-| # | Filter | Threshold |
-|---|--------|-----------|
-| 1 | EMA regime | EMA9 > EMA21 |
-| 2 | Pullback to EMA9 | Price within 0.35% of EMA9 |
-| 3 | RSI minimum | RSI >= 55 |
-| 4 | Candle breakout | *(disabled)* |
-| 5 | Strong candle | Body >= 60% of bar range AND bullish candle |
-| 6 | RSI momentum | RSI delta >= +4.0 (actively rising) |
-| 7 | Volume | Volume >= 2.0x recent average *(skipped if feed unavailable)* |
-| 8 | Not overbought | RSI <= 58 |
-| 9 | RSI streak | Up-streak = **exactly 2** bars (streak 3+ = exhaustion, rejected) |
-| 10 | VWAP | Price above VWAP |
-| 11 | Price structure | Bullish candle pattern (hammer, engulfing, pin bar, etc.) |
-| 12 | EMA triple stack | EMA9 > EMA21 > EMA55 (fully fanned bullish) |
+## Entry Engine
 
-PUT filters are the exact mirror of the above.
+Primary trigger:
+- RSI(14) crossover against RSI MA(9) on 1-minute context.
 
-**Post-trade cooldown:** 5 bars blocked after any completed trade.
+Key preconditions and filters (config-driven):
 
----
+1. Trade window (optional)
+2. Minimum RSI-MA gap
+3. EMA regime alignment
+4. Pullback tolerance to EMA fast
+5. RSI directional threshold bands
+6. Candle quality/body ratio
+7. RSI momentum delta
+8. Volume confirmation ratio
+9. Extreme RSI avoidance
+10. Streak logic (fresh momentum only)
+11. VWAP side confirmation
+12. Price structure confirmation
+13. EMA triple stack confirmation
 
-## Exit Strategy
+If any mandatory filter fails, no entry is placed.
 
-Dynamic exits -- evaluated every price tick (WebSocket-first, polling fallback).
+## Exit Engine (Priority-Driven)
 
-At entry, the system also places a broker-side safety SL so there is always a hard stop in place while the monitor manages the real exit logic.
+After entry fill, monitoring uses websocket first and polling fallback.
 
-| Priority | Exit | Trigger |
-|----------|------|---------|
-| 1 | Take Profit | PnL >= +8.0% |
-| 2 | Stop Loss | PnL <= -3.5% |
-| 3 | **Dynamic QP** | Arms only after peak >= `QP_MIN_PEAK_PCT`; then exits on pullback below `peak - 0.25%` |
-| 4 | Trailing Stop | Arms when peak >= 2.0%; trail ratio tightens as profit grows |
-| 5 | Breakeven Stop | Once peak >= 1.5%, SL floor moves to 0% |
-| 6 | Bad Entry | PnL < -1.5% AND peak never exceeded 0.3% within 45s |
-| 7 | Momentum Stall | RSI delta flips against trade after >= 2 min AND PnL < 0.5% |
-| 8 | Max Hold | Still open after 7 min AND PnL < 0.5% |
+Typical priority order:
 
-**Dynamic QP:** Once peak PnL reaches `QP_MIN_PEAK_PCT` (default 1.0%), QP ratchet tracks running peak and locks at `peak - QP_GAP_PCT`.
+1. Take Profit (TP)
+2. Stop Loss (SL)
+3. Quick Profit (QP) lock
+4. Trailing stop management
+5. Breakeven protection
+6. Bad entry fail-fast rule
+7. Momentum stall rule
+8. Max-hold timeout rule
 
----
+Important behaviors:
 
-## Configuration (`backend/config.py`)
+- Safety SL is placed early and replaced upward as dynamic thresholds improve.
+- QP arms only after minimum peak PnL threshold.
+- Exit checks use sellable pricing logic (not optimistic mid-only assumptions).
 
-This file is **git-ignored** -- keep all credentials and thresholds here.
+## API Guide
 
-### Required
+Base URLs:
 
-```python
-API_KEY    = "..."
-SECRET_KEY = "..."
-MONGO_URI  = "mongodb+srv://..."
-```
+- Trading lane: http://localhost:8001
+- Display lane: http://localhost:8002
 
-### Key trading knobs
+### Trading-priority endpoints (examples)
 
-```python
-# Symbols
-WATCHLIST_SYMBOLS = { "SPY": True, "TSLA": True, ... }  # True = AIT enabled
+1. POST /api/orders
+2. DELETE /api/orders/{order_id}
+3. POST /api/positions/{symbol}/close
+4. POST /api/options/buy
+5. POST /api/manual-trade/buy
+6. POST /api/ai-trade/stop
+7. GET /api/options/suggest
 
-# Entry thresholds
-MIN_RSI_MA_GAP              = 3.0
-ENTRY_RSI_CALL_MIN          = 55
-ENTRY_RSI_CALL_MAX          = 58     # valid CALL band: 55-58
-ENTRY_RSI_PUT_MIN           = 42
-ENTRY_RSI_PUT_MAX           = 45
-ENTRY_RSI_MIN_DELTA         = 4.0
-ENTRY_VOLUME_MIN_RATIO      = 2.0
-ENTRY_MIN_BODY_RANGE_RATIO  = 0.60
-ENTRY_RSI_MIN_STREAK        = 2
-ENTRY_RSI_MAX_STREAK        = 2      # streak must be exactly 2
-ENTRY_PULLBACK_EMA_TOLERANCE_PCT = 0.35
+### Display/read endpoints (examples)
 
-# EMA
-EMA_FAST_PERIOD  = 9
-EMA_SLOW_PERIOD  = 21
-EMA_THIRD_PERIOD = 55
+1. GET /health
+2. GET /api/bars
+3. GET /api/quotes
+4. GET /api/account
+5. GET /api/positions
+6. GET /api/live-positions
+7. GET /api/orders/history
+8. GET /api/orders/{order_id}/status
+9. GET /api/options-log
+10. GET /api/manual-trades
+11. GET /api/config
+12. GET /api/config/trading-modes
+13. GET/POST /api/symbol/mode
+14. GET /api/signal-readiness
 
-# Exits
-TAKE_PROFIT_PCT            = 0.08   # 8%
-STOP_LOSS_PCT              = 0.035  # 3.5%
-QP_GAP_PCT                 = 0.25   # dynamic QP: lock in peak - 0.25%
-QP_MIN_PEAK_PCT            = 1.0    # arm QP only after peak reaches +1.0%
-TRAILING_MIN_PEAK_PCT      = 2.0
-EXIT_BREAKEVEN_TRIGGER_PCT = 1.5
-EXIT_BAD_ENTRY_WINDOW_SEC  = 45
-EXIT_MAX_HOLD_SEC          = 420    # 7 min
+For full schemas and live testing, open docs from a running service.
 
-# Feature toggles
-STRADDLE_ENABLED               = True
-ENTRY_TIME_WINDOW_ENABLED      = False  # True to restrict to AM/PM windows
-ENTRY_EMA_TRIPLE_STACK_ENABLED = True
-ENTRY_VWAP_FILTER_ENABLED      = True
-ENTRY_PRICE_STRUCTURE_ENABLED  = True
-```
+## Frontend Pages
 
-### Environment variable overrides
+1. TradingView
+- Live chart, order actions, exit watch, symbol trade history
 
-| Variable | Default |
-|----------|---------|
-| `PAPER_TRADING` | `true` |
-| `STOCK_DATA_FEED` | `iex` |
-| `MONGO_ENABLED` | `true` |
-| `MONGO_REQUIRED` | `true` |
-| `ENTRY_ORDER_TYPE` | `market` |
-| `ENTRY_TIME_IN_FORCE` | `day` |
+2. SignalRadar
+- Per-symbol readiness, filter pass/fail view, mode controls
 
----
+3. LivePositions
+- Open/closed position diagnostics, threshold status, live PnL
 
-## Local Development
+4. OverallSummary
+- Unified MT + AIT trade history, sorting, stats, lifecycle detail
 
-### 1. Frontend
+5. Dashboard
+- High-level system/account view
 
-```bash
-npm install
-npm run dev
-# http://localhost:5173
-```
+6. ATRView
+- Volatility-oriented view
 
-### 2. Backend
+## End-to-End Sample Trade
+
+Example: AIT CALL on TSLA
+
+1. Radar phase
+- TSLA in auto mode.
+- RSI cross-up appears with required RSI-MA gap.
+- EMA, VWAP, momentum, volume, candle, structure filters pass.
+
+2. Entry phase
+- Backend selects contract (for example TSLA260424C00387500).
+- Buy order submitted and filled.
+- Position is registered with entry metadata.
+
+3. Monitor phase
+- Live ticks update current PnL, max PnL, dynamic SL/QP/TP state.
+- Safety SL remains active and is replaced as needed.
+
+4. Exit phase
+- Suppose peak reaches +2.4%, QP arms and tracks at peak-gap.
+- Price pulls back below QP dynamic threshold.
+- Exit executes; reason logged as QUICK_PROFIT style reason.
+
+5. Logging phase
+- Trade stored in Mongo options_log/manual-trades with:
+  - symbol, contract, qty
+  - buy/sell prices
+  - pnl and pnlPct
+  - entry/exit timestamps
+  - exit reason and thresholds snapshot
+
+6. UI phase
+- Trade appears in TradingView history and OverallSummary.
+- LivePositions reflects closure and exit rationale.
+
+## Configuration
+
+Primary control file:
+- backend/config.py
+
+Key categories:
+
+1. API and broker credentials
+2. Paper/live mode
+3. Symbol watchlist and per-symbol behavior
+4. Entry filters and thresholds
+5. Exit thresholds and toggles
+6. Polling/check intervals
+7. Mongo logging controls
+
+Commonly tuned knobs:
+
+- TAKE_PROFIT_PCT
+- STOP_LOSS_PCT
+- QP_GAP_PCT
+- QP_MIN_PEAK_PCT
+- MIN_RSI_MA_GAP
+- ENTRY_RSI_MIN_DELTA
+- ENTRY_VOLUME_MIN_RATIO
+
+## How To Run
+
+### 1. Backend dependencies
 
 ```bash
 cd backend
 python -m venv .venv
-.venv\Scripts\activate          # Windows
-# source .venv/bin/activate     # macOS/Linux
+.venv\Scripts\activate
 pip install -r requirements.txt
-uvicorn api_server:app --host 0.0.0.0 --port 8000 --reload
-# FastAPI docs: http://localhost:8000/docs
 ```
 
-### 3. Quick start (Windows)
+### 2. Start backend lanes
+
+From repository root:
 
 ```bash
-start.bat
+python app.py
 ```
 
----
+This starts:
+- Trading API on 8001
+- Display API on 8002
 
-## System Flow
+### 3. Start frontend manually
 
-### Backend startup
+```bash
+cd Frontend
+npm install
+npm run dev
+```
 
-1. MongoDB collections initialized
-2. Straddle runner loop started
-3. Straddle monitor loop started
-4. AIT threads started per enabled symbol
-5. Orphan position monitor started
+Open:
+- http://localhost:5173
 
-### Per-symbol AIT thread
+## Operational Notes
 
-1. Wait for market open (Alpaca clock)
-2. Run startup straddle once (CALL + PUT legs)
-3. Pre-select daily CALL/PUT contracts and cache
-4. Enter RSI scan loop until market close:
-   - Every 5s: `analyze_rsi()` -> `determine_signal()` -> 13 filters
-   - On signal: place BUY -> wait for fill -> start exit monitor
-   - On exit condition: place SELL -> log lifecycle to MongoDB
-   - 5-bar cooldown before next scan
+1. app.py currently starts backend only by design.
+2. Frontend should be started manually.
+3. Keep config.py values aligned with your broker/data plan.
+4. Prefer paper mode before any live rollout.
 
-### Exit monitor
+## Safety and Reliability Controls
 
-- WebSocket-first option quote feed
-- Polling fallback (`PRICE_POLL_SEC = 3s`) when WS unavailable
-- Dynamic thresholds updated on every tick
-- Broker safety SL is created at entry and replaced as the trailing stop moves
-- Sellable bid-side price used for exit evaluation (not optimistic mid)
+1. Per-symbol mode gates (auto/manual/off)
+2. Exit ownership guards to prevent duplicate close paths
+3. Websocket-to-polling fallback for monitoring continuity
+4. Mongo-backed lifecycle logging for post-trade audit
+5. Orphan monitor to reconcile unmanaged open positions
 
----
+## Troubleshooting Quick Checklist
 
-## Frontend Pages
+1. Backend not booting
+- Verify backend/config.py has required constants and credentials.
 
-| Page | Description |
-|------|-------------|
-| **Signal Radar** | Live per-symbol signal status, 13-filter checklist, RSI bar, EMA/VWAP chips |
-| **Dashboard** | Account overview and market summary |
-| **Live Positions** | Open option positions with live PnL |
-| **Overall Summary** | Trade history with exit snapshot analysis, win/loss/time filters |
-| **Trading View** | Candle chart + per-position Exit Watch (SL/TP/QP hit/will-hit) + symbol history cards |
-| **ATR View** | ATR-based volatility view |
+2. UI not updating
+- Check display lane (8002) health and browser console network calls.
 
----
+3. Order fails
+- Check Alpaca permissions, market state, and contract liquidity.
 
-## Safety
+4. No trade logs
+- Validate Mongo URI and collection writes.
 
-- `config.py` is git-ignored -- credentials never committed
-- Symbol mode gate: `auto` / `manual` / `off` per symbol (persisted in `logs/symbol_modes.json`)
-- Registry-based ownership prevents double-exits and duplicate monitor attachments
-- Manual-trade logging writes one Mongo record per completed trade
-- WebSocket -> polling fallback for robustness
-- Orphan position monitor handles positions opened outside the AIT thread
-- `PAPER_TRADING = True` by default -- set `False` only when ready for live
+## Disclaimer
+
+This project is an execution system, not financial advice. You are responsible for strategy risk, broker costs, slippage, and regulatory compliance.

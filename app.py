@@ -1,15 +1,14 @@
 import subprocess
 import sys
 import time
-import webbrowser
 import urllib.request
 import os
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 BACKEND_DIR = os.path.join(ROOT, "backend")
 
-BACKEND_URL = "http://localhost:8000/api/config"
-FRONTEND_URL = "http://localhost:5173"
+TRADING_BACKEND_URL = "http://localhost:8001/api/config"
+DISPLAY_BACKEND_URL = "http://localhost:8002/api/config"
 
 
 def wait_for(url, label, timeout=120):
@@ -34,45 +33,39 @@ print("  ========================================")
 print()
 
 # ── Step 1: Start Backend ─────────────────────────────────────────────────────
-print("[1/3] Starting backend (api_server.py)...")
-backend = subprocess.Popen(
-    [sys.executable, "api_server.py"],
+print("[1/4] Starting trading backend (api_server_trading.py)...")
+backend_trading = subprocess.Popen(
+    [sys.executable, "api_server_trading.py"],
     cwd=BACKEND_DIR,
     creationflags=subprocess.CREATE_NEW_CONSOLE,
 )
-wait_for(BACKEND_URL, "backend")
-print(f"      Backend running  → http://localhost:8000")
+wait_for(TRADING_BACKEND_URL, "trading backend")
+print(f"      Trading backend running  → http://localhost:8001")
 
-# ── Step 2: Start Frontend ────────────────────────────────────────────────────
+# ── Step 2: Start Display Backend ────────────────────────────────────────────
 print()
-print("[2/3] Starting frontend (npm run dev)...")
-frontend = subprocess.Popen(
-    ["npm", "run", "dev"],
-    cwd=ROOT,
-    shell=True,
+print("[2/4] Starting display backend (api_server_display.py)...")
+backend_display = subprocess.Popen(
+    [sys.executable, "api_server_display.py"],
+    cwd=BACKEND_DIR,
     creationflags=subprocess.CREATE_NEW_CONSOLE,
 )
-wait_for(FRONTEND_URL, "frontend")
-print(f"      Frontend running → http://localhost:5173")
-
-# ── Step 3: Open Browser ──────────────────────────────────────────────────────
-print()
-print("[3/3] Opening browser...")
-webbrowser.open(FRONTEND_URL)
+wait_for(DISPLAY_BACKEND_URL, "display backend")
+print(f"      Display backend running  → http://localhost:8002")
 
 print()
 print("  ========================================")
 print("   ALL SERVICES RUNNING")
-print("   Backend  : http://localhost:8000")
-print("   Frontend : http://localhost:5173")
+print("   Trading API : http://localhost:8001")
+print("   Display API : http://localhost:8002")
 print("  ========================================")
 print()
 print("  Press Ctrl+C to stop everything.")
 print()
 
 try:
-    backend.wait()
+    backend_trading.wait()
 except KeyboardInterrupt:
     print("\n  Shutting down...")
-    backend.terminate()
-    frontend.terminate()
+    backend_trading.terminate()
+    backend_display.terminate()

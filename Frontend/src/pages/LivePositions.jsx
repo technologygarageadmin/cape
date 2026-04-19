@@ -8,7 +8,7 @@ import {
 const GOLD = '#C9A227'
 const GOLD_LIGHT = '#F5C518'
 const GOLD_DEEP = '#A07C10'
-const API = 'http://localhost:8000'
+const API_DISPLAY = 'http://localhost:8002'
 
 const QUALITY_CONFIG = {
   EXCELLENT: { color: '#22c55e', bg: 'rgba(34,197,94,0.1)', icon: CheckCircle, label: 'Excellent Entry' },
@@ -838,7 +838,7 @@ export default function LivePositions() {
 
   const fetchPositions = async () => {
     try {
-      const res = await fetch(`${API}/api/live-positions`)
+      const res = await fetch(`${API_DISPLAY}/api/live-positions`)
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
       const data = await res.json()
       setPositions(data.positions || [])

@@ -130,6 +130,7 @@ CDT = ZoneInfo("America/Chicago")
 from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
+from starlette.requests import Request
 
 from alpaca.data.historical import OptionHistoricalDataClient, StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest, StockLatestQuoteRequest, StockLatestTradeRequest
@@ -482,7 +483,8 @@ stock_client, option_data_client, trading_client = _create_clients()
 
 app = FastAPI(title="Cape Trading Backend", version="1.0.0")
 
-allowed_origins = [origin.strip() for origin in os.getenv("ALLOWED_ORIGINS", "*").split(",")]
+# CORS configuration: allow all origins for development
+allowed_origins = ["*"]
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins,
@@ -490,6 +492,13 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def _request_log(request: Request, call_next):
+    response = await call_next(request)
+    print(f"[TRADING-API] {request.method} {request.url.path} -> {response.status_code}")
+    return response
 
 
 # ─────────────────────────────────────────────────────────────────────────────

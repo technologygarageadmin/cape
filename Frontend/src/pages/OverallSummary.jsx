@@ -6,7 +6,8 @@ import {
   Target, Percent,
 } from 'lucide-react'
 
-const API = 'http://localhost:8000'
+const API_TRADING = 'http://localhost:8001'
+const API_DISPLAY = 'http://localhost:8002'
 const GOLD      = '#C9A227'
 const GOLD_DEEP = '#A07C10'
 const GOLD_LIGHT = '#F5C518'
@@ -700,11 +701,11 @@ export default function OverallSummary() {
   const fetchAll = useCallback(async (silent = false) => {
     try {
       const [aitRes, manualRes, posRes, cfgRes, liveRes] = await Promise.allSettled([
-        fetch(`${API}/api/options-log?limit=500`),
-        fetch(`${API}/api/manual-trades?limit=500`),
-        fetch(`${API}/api/positions`),
-        fetch(`${API}/api/config`),
-        fetch(`${API}/api/live-positions`),
+        fetch(`${API_DISPLAY}/api/options-log?limit=500`),
+        fetch(`${API_DISPLAY}/api/manual-trades?limit=500`),
+        fetch(`${API_DISPLAY}/api/positions`),
+        fetch(`${API_DISPLAY}/api/config`),
+        fetch(`${API_DISPLAY}/api/live-positions`),
       ])
 
       if (aitRes.status === 'fulfilled' && aitRes.value.ok) {
@@ -778,7 +779,7 @@ export default function OverallSummary() {
     if (!window.confirm(`Sell ${symbol} now to lock in profit?`)) return
     setSellingSymbol(symbol)
     try {
-      const res = await fetch(`${API}/api/positions/${encodeURIComponent(symbol)}/close`, { method: 'POST' })
+      const res = await fetch(`${API_TRADING}/api/positions/${encodeURIComponent(symbol)}/close`, { method: 'POST' })
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
       const data = await res.json()
       const pnl = data.logged_trade?.pnl

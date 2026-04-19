@@ -27,7 +27,8 @@ const STOCK_SYMBOLS = [
 const INTERVALS = ['1m', '5m', '15m', '1H', '4H', '1D']
 const STRATEGIES = ['ATR Momentum', 'RSI Mean Reversion', 'Breakout Strategy', 'EMA Crossover', 'MACD Signal']
 
-const API = 'http://localhost:8000'
+const API_TRADING = 'http://localhost:8001'
+const API_DISPLAY = 'http://localhost:8002'
 const INTERVAL_MAP = { '1m': '1Min', '5m': '5Min', '15m': '15Min', '1H': '1Hour', '4H': '4Hour', '1D': '1Day' }
 // Bars to fetch per interval to cover ~2 trading days
 const BARS_LIMIT = { '1m': 800, '5m': 200, '15m': 70, '1H': 20, '4H': 8, '1D': 5 }
@@ -140,7 +141,7 @@ export default function TradingView() {
   // On mount: sync all symbol modes + global config gates from backend
   useEffect(() => {
     const fetchConfig = () =>
-      fetch(`${API}/api/config/trading-modes`)
+      fetch(`${API_DISPLAY}/api/config/trading-modes`)
         .then(r => r.ok ? r.json() : null)
         .catch(() => null)
         .then(cfg => {
@@ -246,7 +247,7 @@ export default function TradingView() {
 
     // Notify backend so main.py respects the new mode immediately
     try {
-      await fetch(`${API}/api/symbol/mode`, {
+      await fetch(`${API_DISPLAY}/api/symbol/mode`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ symbol: sym, mode: newMode }),
@@ -261,7 +262,7 @@ export default function TradingView() {
         // Stop any active AI trade before switching to manual
         if (tradeActive) {
           try {
-            await fetch(`${API}/api/ai-trade/stop`, {
+            await fetch(`${API_TRADING}/api/ai-trade/stop`, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ symbol: sym }),
@@ -294,7 +295,7 @@ export default function TradingView() {
     const symbols = STOCK_SYMBOLS.map(s => s.symbol).join(',')
     const poll = async () => {
       try {
-        const res = await fetch(`${API}/api/quotes?symbols=${symbols}`)
+        const res = await fetch(`${API_DISPLAY}/api/quotes?symbols=${symbols}`)
         if (!res.ok) return
         const data = await res.json()
         const priceMap = {}
@@ -406,7 +407,7 @@ export default function TradingView() {
     const tp    = +(entry * (1 + parseFloat(tpPct) / 100)).toFixed(2)
     const sl    = +(entry * (1 - parseFloat(slPct) / 100)).toFixed(2)
     try {
-      await fetch(`${API}/api/orders`, {
+      await fetch(`${API_TRADING}/api/orders`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -432,7 +433,7 @@ export default function TradingView() {
   const stopTrade = async () => {
     let exitPrice = livePrice
     try {
-      const res = await fetch(`${API}/api/positions/${selected.symbol}/close`, { method: 'POST' })
+      const res = await fetch(`${API_TRADING}/api/positions/${selected.symbol}/close`, { method: 'POST' })
       if (res.ok) {
         const closed = await res.json()
         exitPrice = closed.exit_price ?? livePrice
@@ -483,7 +484,7 @@ export default function TradingView() {
       const underlying = symbol.replace(/\d{6}[CP]\d+$/i, '')
       if (underlying) {
         try {
-          await fetch(`${API}/api/ai-trade/stop`, {
+          await fetch(`${API_TRADING}/api/ai-trade/stop`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ symbol: underlying }),
@@ -492,7 +493,7 @@ export default function TradingView() {
       }
 
       // 2. Close the position via Alpaca
-      const res = await fetch(`${API}/api/positions/${encodeURIComponent(symbol)}/close`, {
+      const res = await fetch(`${API_TRADING}/api/positions/${encodeURIComponent(symbol)}/close`, {
         method: 'POST',
       })
       if (!res.ok) {
@@ -519,7 +520,7 @@ export default function TradingView() {
       try {
         const tf    = INTERVAL_MAP[interval] || '5Min'
         const limit = BARS_LIMIT[interval]   || 200
-        const res = await fetch(`${API}/api/bars?symbol=${selected.symbol}&timeframe=${tf}&limit=${limit}`)
+        const res = await fetch(`${API_DISPLAY}/api/bars?symbol=${selected.symbol}&timeframe=${tf}&limit=${limit}`)
         if (!res.ok) throw new Error('bad response')
         const data = await res.json()
         if (data.bars?.length) {
@@ -547,7 +548,7 @@ export default function TradingView() {
   useEffect(() => {
     const fetchObr = async () => {
       try {
-        const res = await fetch(`${API}/api/bars?symbol=${selected.symbol}&timeframe=5Min&limit=5`)
+        const res = await fetch(`${API_DISPLAY}/api/bars?symbol=${selected.symbol}&timeframe=5Min&limit=5`)
         if (!res.ok) return
         const data = await res.json()
         if (data.obr?.high != null && data.obr?.low != null) {
@@ -567,7 +568,7 @@ export default function TradingView() {
   useEffect(() => {
     const fetchPositions = async () => {
       try {
-        const res = await fetch(`${API}/api/positions`)
+        const res = await fetch(`${API_DISPLAY}/api/positions`)
         if (!res.ok) return
         const data = await res.json()
         const rows = Array.isArray(data)
@@ -588,7 +589,7 @@ export default function TradingView() {
   useEffect(() => {
     const fetchRegistry = async () => {
       try {
-        const res = await fetch(`${API}/api/live-positions`)
+        const res = await fetch(`${API_DISPLAY}/api/live-positions`)
         if (!res.ok) return
         const data = await res.json()
         setRegistryPositions(Array.isArray(data?.positions) ? data.positions : [])
@@ -605,7 +606,7 @@ export default function TradingView() {
       try {
         const tf  = INTERVAL_MAP[interval] || '5Min'
         const limit = BARS_LIMIT[interval] || 200
-        const res = await fetch(`${API}/api/bars?symbol=${selected.symbol}&timeframe=${tf}&limit=${limit}`)
+        const res = await fetch(`${API_DISPLAY}/api/bars?symbol=${selected.symbol}&timeframe=${tf}&limit=${limit}`)
         if (!res.ok) return
         const data = await res.json()
         if (!data.bars?.length) return
@@ -654,7 +655,7 @@ export default function TradingView() {
   useEffect(() => {
     const restore = async () => {
       try {
-        const posRes = await fetch(`${API}/api/positions`)
+        const posRes = await fetch(`${API_DISPLAY}/api/positions`)
         if (posRes.ok) {
           const positions = await posRes.json()
           const active = positions.find(p => p.symbol === selected.symbol)
@@ -676,8 +677,8 @@ export default function TradingView() {
       try {
         // Fetch real trade history from MongoDB: options-log (AIT/Straddle) + manual-trades
         const [optRes, manRes] = await Promise.allSettled([
-          fetch(`${API}/api/options-log?limit=500`),
-          fetch(`${API}/api/manual-trades?limit=500`),
+          fetch(`${API_DISPLAY}/api/options-log?limit=500`),
+          fetch(`${API_DISPLAY}/api/manual-trades?limit=500`),
         ])
         const normalize = (t, type) => ({
           ...t,
@@ -729,8 +730,8 @@ export default function TradingView() {
           _entryIso: t.entryTime || t.createdAt,
         })
         const [optRes, manRes] = await Promise.allSettled([
-          fetch(`${API}/api/options-log?limit=500`),
-          fetch(`${API}/api/manual-trades?limit=500`),
+          fetch(`${API_DISPLAY}/api/options-log?limit=500`),
+          fetch(`${API_DISPLAY}/api/manual-trades?limit=500`),
         ])
         let combined = []
         if (optRes.status === 'fulfilled' && optRes.value.ok) {
@@ -765,7 +766,7 @@ export default function TradingView() {
     const orderId = manualPosition.orderId
     const checkBackendExit = async () => {
       try {
-        const res = await fetch(`${API}/api/live-positions`)
+        const res = await fetch(`${API_DISPLAY}/api/live-positions`)
         if (!res.ok) return
         const data = await res.json()
         const positions = Array.isArray(data?.positions) ? data.positions : []
@@ -790,8 +791,8 @@ export default function TradingView() {
               _entryIso: t.entryTime || t.createdAt,
             })
             const [optRes, manRes] = await Promise.allSettled([
-              fetch(`${API}/api/options-log?limit=500`),
-              fetch(`${API}/api/manual-trades?limit=500`),
+              fetch(`${API_DISPLAY}/api/options-log?limit=500`),
+              fetch(`${API_DISPLAY}/api/manual-trades?limit=500`),
             ])
             let combined = []
             if (optRes.status === 'fulfilled' && optRes.value.ok) {
@@ -809,7 +810,7 @@ export default function TradingView() {
           let exitReason = myPos?.live?.exit_reason || null
           if (!exitReason) {
             try {
-              const r = await fetch(`${API}/api/manual-trades?limit=10`)
+              const r = await fetch(`${API_DISPLAY}/api/manual-trades?limit=10`)
               if (r.ok) {
                 const d = await r.json()
                 const match = (d.trades || []).find(t =>
@@ -838,7 +839,7 @@ export default function TradingView() {
     if (!manualPosition?.contractSymbol) return
     const poll = async () => {
       try {
-        const res = await fetch(`${API}/api/options/price?contract=${encodeURIComponent(manualPosition.contractSymbol)}`)
+        const res = await fetch(`${API_DISPLAY}/api/options/price?contract=${encodeURIComponent(manualPosition.contractSymbol)}`)
         if (res.ok) {
           const data = await res.json()
           if (data.price != null) setContractPrice(data.price)
@@ -877,7 +878,7 @@ export default function TradingView() {
     if (!manualPosition?.orderId || orderStatus === 'filled') return
     const poll = async () => {
       try {
-        const res = await fetch(`${API}/api/orders/${manualPosition.orderId}/status`)
+        const res = await fetch(`${API_DISPLAY}/api/orders/${manualPosition.orderId}/status`)
         if (res.ok) {
           const data = await res.json()
           const stRaw = String(data.status ?? '')
@@ -914,7 +915,7 @@ export default function TradingView() {
         const params = new URLSearchParams({ symbol: selected.symbol })
         if (optionType) params.set('option_type', optionType)
         if (strikePrice) params.set('strike_price', strikePrice)
-        const sRes = await fetch(`${API}/api/options/suggest?${params}`)
+        const sRes = await fetch(`${API_TRADING}/api/options/suggest?${params}`)
         if (!sRes.ok) throw new Error('Could not fetch contract — try clicking Refresh first')
         const sData = await sRes.json()
         if (!sData.contract_name) throw new Error('No listed contract available right now (market may be closed or contract unavailable)')
@@ -931,7 +932,7 @@ export default function TradingView() {
       }
 
       // Call the new endpoint: buy + wait for fill + start backend exit monitor
-      const res = await fetch(`${API}/api/manual-trade/buy`, {
+      const res = await fetch(`${API_TRADING}/api/manual-trade/buy`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -996,7 +997,7 @@ export default function TradingView() {
       const closeSymbol = manualPosition.contractSymbol || selected.symbol
       try {
         // Close option position by contract symbol
-        const res = await fetch(`${API}/api/positions/${encodeURIComponent(closeSymbol)}/close`, { method: 'POST' })
+        const res = await fetch(`${API_TRADING}/api/positions/${encodeURIComponent(closeSymbol)}/close`, { method: 'POST' })
         if (res.ok) {
           const closed = await res.json()
           exitPrice = closed.exit_price ?? contractPrice
@@ -1032,7 +1033,7 @@ export default function TradingView() {
       // the backend monitor thread already logged the trade to avoid duplicates.
       if (!manualPosition.backendMonitored) {
         try {
-          await fetch(`${API}/api/manual-trades`, {
+          await fetch(`${API_DISPLAY}/api/manual-trades`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -1072,7 +1073,7 @@ export default function TradingView() {
     try {
       const params = new URLSearchParams({ symbol: sym || selected.symbol })
       if (optType) params.set('option_type', optType)
-      const res = await fetch(`${API}/api/options/suggest?${params}`)
+      const res = await fetch(`${API_TRADING}/api/options/suggest?${params}`)
       if (res.ok) {
         const data = await res.json()
         setStrikePrice(String(data.strike_price ?? ''))
@@ -1110,7 +1111,7 @@ export default function TradingView() {
     }
     if (mode === 'manual' && tradeActive) {
       try {
-        await fetch(`${API}/api/ai-trade/stop`, {
+        await fetch(`${API_TRADING}/api/ai-trade/stop`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ symbol: selected.symbol }),
@@ -1129,7 +1130,7 @@ export default function TradingView() {
     // Persist to backend — without this, config polling resets tradeMode back to 'ai'
     // every 30s, causing the Buy button to disappear after sell
     try {
-      await fetch(`${API}/api/symbol/mode`, {
+      await fetch(`${API_DISPLAY}/api/symbol/mode`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ symbol: selected.symbol, mode: backendMode }),

@@ -124,6 +124,14 @@ def get_open_positions() -> list[dict]:
     with _positions_lock:
         return [v for v in _positions.values() if v["status"] != "CLOSED"]
 
+def get_externally_managed_symbols() -> set[str]:
+    """Return contract symbols already managed by the bot's dedicated trade monitors."""
+    with _positions_lock:
+        return {
+            str(v.get("contract_symbol") or "")
+            for v in _positions.values()
+            if v["status"] != "CLOSED" and v.get("contract_symbol")
+        }
 
 def update_live_exit_state(buy_order_id: str, exit_state: dict, pnl_pct: float, current_price: float) -> None:
     """Called from monitoring loops on each tick to update live exit thresholds."""
