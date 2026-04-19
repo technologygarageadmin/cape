@@ -259,6 +259,76 @@ Assume current defaults:
 3. OverallSummary
 - Trade appears in history with lifecycle fields and exit reason
 
+## When Limit Orders Change
+
+This section explains exactly when the system creates or updates limit-related orders.
+
+### 1) Entry order limit changes
+
+1. Default behavior is market entry.
+2. Entry uses limit only when entry order mode is set to limit or a forced limit path is used.
+3. If limit mode is enabled but no valid reference price is available, backend falls back to market.
+
+### 2) Quick Profit limit order changes
+
+1. QP level is dynamic and follows peak pnl using peak minus QP gap.
+2. When QP dynamic percent ratchets upward, a new QP limit sell can be placed at the new QP level.
+3. If bracket QP mode is enabled, backend may replace the existing bracket stop child instead of placing independent QP limits.
+4. Once one QP order fills, remaining QP and related protection orders are cancelled.
+
+### 3) Stop Loss stop-limit changes
+
+1. A safety SL stop-limit is placed after fill.
+2. As dynamic SL ratchets upward, backend updates this protection using order replace.
+3. Trailing states continue replacing SL stop-limit to lock gains.
+
+### 4) What you see in UI
+
+1. TradingView and LivePositions show dynamic threshold movement per tick.
+2. History shows final exit reason such as QUICK_PROFIT_EXIT, STOP_LOSS_EXIT, or TRAILING_STOP_EXIT.
+3. If an order was replaced, backend timeline records reflect order update events.
+
+### 5) Concrete example: price change -> limit/stop change
+
+Using the same MT sample path:
+
+8.00 -> 8.05 -> 8.12 -> 8.09 -> 7.95 -> 7.90 -> 8.00 -> 8.05 -> 8.11
+
+With current defaults:
+
+1. QP_GAP_PCT = 0.25
+2. QP_MIN_EXIT_PCT = 0.20
+3. EXIT_BRACKET_QP_ENABLED = True
+4. SL_STOP_LIMIT_BUFFER_PCT = 5.0
+
+Tick-by-tick order behavior:
+
+1. Entry at 8.00
+- Initial safety SL stop-limit is placed around stop 7.72 (limit uses stop-limit buffer).
+
+2. Price 8.05
+- Peak pnl rises to about +0.625%.
+- QP dynamic becomes about +0.375%.
+- Because bracket QP mode is enabled, backend replaces the bracket SL child upward (instead of adding a separate independent QP limit ladder).
+
+3. Price 8.12
+- Peak pnl rises to about +1.50%.
+- QP dynamic moves to about +1.25%.
+- Backend replaces the same bracket SL child again to the new higher protection level.
+
+4. Price 8.09
+- Current pnl falls to about +1.125%.
+- QP exit condition is met, so position exits as QUICK_PROFIT_EXIT.
+- Remaining protection orders are cancelled after fill.
+
+5. Later prices 7.95 -> 7.90 -> 8.00 -> 8.05 -> 8.11
+- No further order updates for that trade because the position is already closed at 8.09.
+
+Notes:
+
+1. If bracket QP is disabled, backend can place separate QP SELL limit orders when QP ratchets up.
+2. In bracket QP mode, you mainly see replace events on the bracket stop child as price improves.
+
 ## Configuration
 
 Primary control file:
