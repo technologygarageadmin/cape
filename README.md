@@ -189,40 +189,75 @@ For full schemas and live testing, open docs from a running service.
 6. ATRView
 - Volatility-oriented view
 
-## End-to-End Sample Trade
+## End-to-End Sample Trade (Tick-by-Tick)
 
-Example: AIT CALL on TSLA
+Example: MT entry at 8.00 with tick path:
 
-1. Radar phase
-- TSLA in auto mode.
-- RSI cross-up appears with required RSI-MA gap.
-- EMA, VWAP, momentum, volume, candle, structure filters pass.
+8.00 -> 8.05 -> 8.12 -> 8.09 -> 7.95 -> 7.90 -> 8.00 -> 8.05 -> 8.11
 
-2. Entry phase
-- Backend selects contract (for example TSLA260424C00387500).
-- Buy order submitted and filled.
-- Position is registered with entry metadata.
+Assume current defaults:
 
-3. Monitor phase
-- Live ticks update current PnL, max PnL, dynamic SL/QP/TP state.
-- Safety SL remains active and is replaced as needed.
+1. TP = +8.0%
+2. SL = -3.5%
+3. QP gap = 0.25%
+4. QP min peak = 0%
+5. QP min exit pnl = +0.20%
 
-4. Exit phase
-- Suppose peak reaches +2.4%, QP arms and tracks at peak-gap.
-- Price pulls back below QP dynamic threshold.
-- Exit executes; reason logged as QUICK_PROFIT style reason.
+### Tick Timeline (what UI should show)
 
-5. Logging phase
-- Trade stored in Mongo options_log/manual-trades with:
-  - symbol, contract, qty
-  - buy/sell prices
-  - pnl and pnlPct
-  - entry/exit timestamps
-  - exit reason and thresholds snapshot
+1. Tick 0: 8.00
+- PnL = 0.00%
+- Peak = 0.00%
+- LivePositions Exit Watch:
+  - SL: Will hit SL
+  - TP: Will hit TP
+  - QP: Not armed yet / base state
 
-6. UI phase
-- Trade appears in TradingView history and OverallSummary.
-- LivePositions reflects closure and exit rationale.
+2. Tick 1: 8.05
+- PnL = +0.625%
+- Peak = +0.625%
+- QP dynamic becomes about +0.375% (peak - 0.25)
+- LivePositions Exit Watch:
+  - QP: Will hit QP (armed and tracking)
+
+3. Tick 2: 8.12
+- PnL = +1.50%
+- Peak = +1.50%
+- QP dynamic updates to about +1.25%
+- Breakeven logic is now active (peak >= 1.5%)
+- LivePositions Exit Watch:
+  - QP: Will hit QP at pullback threshold
+  - SL: tighter than initial static SL
+
+4. Tick 3: 8.09
+- PnL = +1.125%
+- Peak remains +1.50%
+- QP condition is satisfied (current pnl <= qp_dynamic)
+- Exit fires here as QUICK_PROFIT_EXIT
+
+5. Tick 4+: 7.95 -> 7.90 -> 8.00 -> 8.05 -> 8.11
+- Trade is already closed at Tick 3
+- UI should show closed state and exit reason QUICK_PROFIT_EXIT
+- These later ticks are not part of the same open position lifecycle
+
+### Result Summary
+
+1. Exit tick: 8.09
+2. Exit reason: QUICK_PROFIT_EXIT
+3. Approx realized pnl: around +1.1% to +1.25% zone (fill dependent)
+
+### Where this appears in UI
+
+1. TradingView
+- Open position card shows Exit Watch changes tick-by-tick until close
+- After close, symbol history row shows QUICK_PROFIT_EXIT
+
+2. LivePositions
+- Position moves from active to exited
+- Exit reason and final pnl are visible in the card
+
+3. OverallSummary
+- Trade appears in history with lifecycle fields and exit reason
 
 ## Configuration
 
