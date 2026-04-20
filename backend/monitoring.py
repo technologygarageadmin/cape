@@ -14,6 +14,7 @@ from alpaca_helpers import (
 )
 from config import (
     API_KEY,
+    EXIT_BRACKET_QP_ENABLED,
     EXIT_ALLOW_POSITIVE_PNL_IN_ENTRY_CANDLE,
     EXIT_BAD_ENTRY_ENABLED,
     EXIT_BAD_ENTRY_EXIT_THRESHOLD_PCT,
@@ -66,6 +67,7 @@ def _init_exit_state(fill_price: float, tp_price: float, sl_price: float) -> dic
     # Gap shrinks as profit grows so we lock in more of larger moves.
     qp_gap_pct = QP_GAP_PCT   # lock in peak minus QP_GAP_PCT (tight lock from the start)
     return {
+        "use_bracket_exit": bool(EXIT_BRACKET_QP_ENABLED),
         "fill_price": fill_price,
         "tp_pct": tp_pct,
         "sl_static_pct": sl_pct,
@@ -92,6 +94,67 @@ def _init_exit_state(fill_price: float, tp_price: float, sl_price: float) -> dic
         "sl_last_placed_pct": None,    # sl_dynamic_pct value at which the last SL order was placed
         "timeline": [],
     }
+
+
+def _seed_bracket_exit_orders(tc, exit_state: dict, buy_order_id: str | None) -> None:
+    """Seed TP/SL child order IDs from a bracket parent so monitor can track them."""
+    if tc is None or not buy_order_id or not bool(exit_state.get("use_bracket_exit", False)):
+        return
+    if (exit_state.get("tp_order_ids") or exit_state.get("sl_order_ids")):
+        return
+
+    parent = None
+    legs = []
+    for _ in range(3):
+        try:
+            parent = tc.get_order_by_id(buy_order_id)
+        except Exception as ex:
+            debug(f"[BRACKET] Could not fetch parent order {buy_order_id}: {ex}")
+            return
+        legs = list(getattr(parent, "legs", None) or [])
+        if legs:
+            break
+        time.sleep(0.4)
+
+    if not legs:
+        debug(f"[BRACKET] Parent {buy_order_id} has no child legs yet")
+        return
+
+    tp_ids: list[str] = []
+    sl_ids: list[str] = []
+    for leg in legs:
+        oid = str(getattr(leg, "id", "") or "")
+        if not oid:
+            continue
+        limit_price = float(getattr(leg, "limit_price", 0) or 0)
+        stop_price = float(getattr(leg, "stop_price", 0) or 0)
+        if stop_price > 0:
+            sl_ids.append(oid)
+        elif limit_price > 0:
+            tp_ids.append(oid)
+
+    if tp_ids:
+        exit_state["tp_order_ids"] = tp_ids
+    if sl_ids:
+        # Keep exactly one active SL id in state; replacements will rotate this id.
+        exit_state["sl_order_ids"] = [sl_ids[0]]
+        exit_state["sl_order_exit_reason"] = "STOP_LOSS_EXIT"
+        exit_state["sl_last_placed_pct"] = float(exit_state.get("sl_dynamic_pct", exit_state.get("sl_static_pct", 0.0)))
+
+    if tp_ids or sl_ids:
+        timeline = exit_state.setdefault("timeline", [])
+        timeline.append({
+            "ts": _iso_now_utc(),
+            "source": "order_seeded",
+            "order_type": "BRACKET_CHILDREN",
+            "parent_order_id": buy_order_id,
+            "tp_order_ids": tp_ids,
+            "sl_order_ids": sl_ids,
+            "status": "live",
+        })
+        info(
+            f"[BRACKET] Seeded parent={buy_order_id} tp={len(tp_ids)} sl={len(sl_ids)}"
+        )
 
 
 def _iso_now_utc() -> str:
@@ -380,7 +443,7 @@ def _cancel_sl_orders(tc, exit_state: dict) -> None:
 
 
 def _check_sl_order_filled(tc, exit_state: dict) -> bool:
-    """Check if any SL stop-limit order filled. On fill: cancel remaining SL + all QP orders."""
+    """Check if any SL stop-limit order filled. On fill: cancel remaining SL + TP."""
     if tc is None:
         return False
     order_ids = list(exit_state.get("sl_order_ids") or [])
@@ -424,12 +487,78 @@ def _check_sl_order_filled(tc, exit_state: dict) -> bool:
         exit_state["sl_order_id_filled"] = filled_id
         exit_state["sl_order_fill_price"] = filled_price
         exit_state["sl_order_exit_reason"] = "STOP_LOSS_EXIT"
+        _cancel_tp_orders(tc, exit_state)
         info(
             f"[SL STOP] Order {filled_id} filled at {filled_price:.4f} — "
             f"{len(order_ids)-1} other SL orders cancelled → {exit_state['sl_order_exit_reason']}"
         )
         return True
     return False
+
+
+def _detect_market_fallback_reason(tc, exit_state: dict, sellable_price: float) -> tuple[str | None, str | None]:
+    """Return fallback reason when market sell must be forced.
+
+    Case 1: SL missed in a gap-down (price below SL limit after trigger).
+    Case 2: Order-system failure (missing/rejected/cancelled TP/SL children).
+    """
+    if tc is None or bool(exit_state.get("is_closing", False)):
+        return None, None
+
+    tp_ids = list(exit_state.get("tp_order_ids") or [])
+    sl_ids = list(exit_state.get("sl_order_ids") or [])
+
+    # No protection orders live while position is still open => order-system failure.
+    if (
+        not tp_ids
+        and not sl_ids
+        and not bool(exit_state.get("tp_order_filled", False))
+        and not bool(exit_state.get("sl_order_filled", False))
+    ):
+        return "ORDER_SYSTEM_FAILURE_MARKET_EXIT", "missing_tp_and_sl_orders"
+
+    fetched_any = False
+    failure_tokens = ("rejected", "expired", "canceled", "cancelled")
+
+    for oid in tp_ids:
+        try:
+            order = tc.get_order_by_id(oid)
+            fetched_any = True
+        except Exception:
+            continue
+        status = str(getattr(order, "status", "") or "").lower()
+        if any(tok in status for tok in failure_tokens):
+            return "ORDER_SYSTEM_FAILURE_MARKET_EXIT", f"tp_order_status={status}:{oid}"
+
+    for oid in sl_ids:
+        try:
+            order = tc.get_order_by_id(oid)
+            fetched_any = True
+        except Exception:
+            continue
+        status = str(getattr(order, "status", "") or "").lower()
+        if any(tok in status for tok in failure_tokens):
+            return "ORDER_SYSTEM_FAILURE_MARKET_EXIT", f"sl_order_status={status}:{oid}"
+
+        if "filled" in status:
+            continue
+
+        stop_price = float(getattr(order, "stop_price", 0) or 0)
+        limit_price = float(getattr(order, "limit_price", 0) or 0)
+
+        # Gap-down miss: stop triggered but market below limit, so stop-limit cannot fill.
+        if stop_price > 0 and limit_price > 0 and sellable_price <= stop_price and sellable_price < limit_price:
+            detail = (
+                f"sl_gap_down_miss:oid={oid}:sellable={sellable_price:.4f}:"
+                f"stop={stop_price:.4f}:limit={limit_price:.4f}:status={status}"
+            )
+            return "SL_MISSED_GAPDOWN_MARKET_EXIT", detail
+
+    # If broker did not return state for any tracked order ids, treat as system failure.
+    if (tp_ids or sl_ids) and not fetched_any:
+        return "ORDER_SYSTEM_FAILURE_MARKET_EXIT", "tracked_orders_not_confirmed_by_broker"
+
+    return None, None
 
 
 def _cancel_exit_orders(tc, exit_state: dict) -> None:
@@ -654,7 +783,9 @@ def monitor_with_polling(
     exit_state = initial_exit_state or _init_exit_state(fill_price, tp_price, sl_price)
     if not isinstance(exit_state.get("timeline"), list):
         exit_state["timeline"] = []
-    _place_sl_stop_order(tc, exit_state, contract_symbol, qty)
+    _seed_bracket_exit_orders(tc, exit_state, buy_entry_order_id or buy_order_id)
+    if not (exit_state.get("sl_order_ids") or []):
+        _place_sl_stop_order(tc, exit_state, contract_symbol, qty)
     hold_notice_emitted = False
     entry_ts = time.time()
     bad_entry_fired = False
@@ -709,6 +840,26 @@ def monitor_with_polling(
             info(f"{label}{sl_exit} - SL stop-limit order filled by Alpaca at {sl_fill:.4f}")
             _append_sell_tick(exit_state, sl_exit, sl_fill, fill_price)
             return sl_exit, sl_fill, exit_state
+
+        fallback_reason, fallback_detail = _detect_market_fallback_reason(tc, exit_state, sellable_price)
+        if fallback_reason:
+            if buy_order_id:
+                set_live_exit_reason(buy_order_id, fallback_reason)
+            info(
+                f"{label}{fallback_reason} - {fallback_detail} - "
+                f"forcing market-exit fallback at {sellable_price:.4f}"
+            )
+            _cancel_exit_orders(tc, exit_state)
+            _append_sell_tick(
+                exit_state,
+                fallback_reason,
+                sellable_price,
+                fill_price,
+                bid_price=bid_price if bid_price > 0 else None,
+                mid_price=price,
+            )
+            return fallback_reason, sellable_price, exit_state
+
         _append_timeline_tick(
             exit_state,
             source="poll",
@@ -723,6 +874,10 @@ def monitor_with_polling(
         # Broadcast live state to frontend
         if buy_order_id:
             update_live_exit_state(buy_order_id, exit_state, pnl_pct, sellable_price)
+
+        # Bracket-only mode: TP/SL child fills are the only exits.
+        if bool(exit_state.get("use_bracket_exit", False)):
+            continue
 
         now_ts = time.time()
 
@@ -913,7 +1068,9 @@ def monitor_with_websocket(
             "entry_ts": time.time(),
             "bad_entry_fired": False,
         }
-        _place_sl_stop_order(tc, state["exit_state"], contract_symbol, qty)
+        _seed_bracket_exit_orders(tc, state["exit_state"], buy_entry_order_id or buy_order_id)
+        if not (state["exit_state"].get("sl_order_ids") or []):
+            _place_sl_stop_order(tc, state["exit_state"], contract_symbol, qty)
         _append_timeline_tick(
             state["exit_state"],
             source="entry",
@@ -999,6 +1156,33 @@ def monitor_with_websocket(
                     done.set()
                     stop_stream(stream)
                     return
+
+                fallback_reason, fallback_detail = _detect_market_fallback_reason(
+                    tc,
+                    state["exit_state"],
+                    sellable_price,
+                )
+                if fallback_reason:
+                    if buy_order_id:
+                        set_live_exit_reason(buy_order_id, fallback_reason)
+                    info(
+                        f"{label}{fallback_reason} - {fallback_detail} - "
+                        f"forcing market-exit fallback at {sellable_price:.4f}"
+                    )
+                    _cancel_exit_orders(tc, state["exit_state"])
+                    state["last_price"] = sellable_price
+                    state["exit_reason"] = fallback_reason
+                    _append_sell_tick(
+                        state["exit_state"],
+                        fallback_reason,
+                        sellable_price,
+                        fill_price,
+                        bid_price=bid if bid > 0 else None,
+                        mid_price=price,
+                    )
+                    done.set()
+                    stop_stream(stream)
+                    return
             _append_timeline_tick(
                 state["exit_state"],
                 source="ws",
@@ -1027,6 +1211,10 @@ def monitor_with_websocket(
                         f"sellable={sellable_price:.4f} pnl={pnl_pct:+.2f}%"
                     )
                 state["last_print_ts"] = now
+
+            # Bracket-only mode: TP/SL child fills are the only exits.
+            if bool(state["exit_state"].get("use_bracket_exit", False)):
+                return
 
             same_candle_price = sellable_price if EXIT_SAME_CANDLE_USE_BID_PRICE else price
             same_candle_pnl_pct = (same_candle_price - fill_price) / fill_price * 100

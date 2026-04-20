@@ -680,21 +680,35 @@ export default function TradingView() {
           fetch(`${API_DISPLAY}/api/options-log?limit=500`),
           fetch(`${API_DISPLAY}/api/manual-trades?limit=500`),
         ])
-        const normalize = (t, type) => ({
-          ...t,
-          id: t.id || String(Date.now() + Math.random()),
-          type,
-          name: STOCK_SYMBOLS.find(s => s.symbol === t.symbol)?.name || t.symbol,
-          contractName: t.contractName || t.symbol,
-          strikePrice: t.strikePrice ?? '—',
-          optionType: String(t.optionType || t.direction || '—').toLowerCase(),
-          buyPrice: Number(t.buyPrice) || 0,
-          sellPrice: Number(t.sellPrice) || 0,
-          pnl: Number(t.pnl) || 0,
-          entryTime: fmtEntryTime(t.entryTime),
-          exitTime: fmtEntryTime(t.exitTime),
-          _entryIso: t.entryTime || t.createdAt,
-        })
+        const normalize = (t, type) => {
+          const tradeTypeRaw = String(t.tradeType || t.trade_type || '').toUpperCase()
+          const normalizedType = type === 'manual'
+            ? 'manual'
+            : tradeTypeRaw === 'STRADDLE'
+              ? 'straddle'
+              : tradeTypeRaw === 'RECOVERY'
+                ? 'recovery'
+                : tradeTypeRaw === 'MONITOR_EXIT'
+                  ? 'monitor'
+                  : 'ai'
+
+          return {
+            ...t,
+            id: t.id || String(Date.now() + Math.random()),
+            type: normalizedType,
+            tradeTypeRaw,
+            name: STOCK_SYMBOLS.find(s => s.symbol === t.symbol)?.name || t.symbol,
+            contractName: t.contractName || t.symbol,
+            strikePrice: t.strikePrice ?? '—',
+            optionType: String(t.optionType || t.option_type || t.direction || '—').toLowerCase(),
+            buyPrice: Number(t.buyPrice) || 0,
+            sellPrice: Number(t.sellPrice) || 0,
+            pnl: Number(t.pnl) || 0,
+            entryTime: fmtEntryTime(t.entryTime),
+            exitTime: fmtEntryTime(t.exitTime),
+            _entryIso: t.entryTime || t.createdAt,
+          }
+        }
         let combined = []
         if (optRes.status === 'fulfilled' && optRes.value.ok) {
           const d = await optRes.value.json()
@@ -714,21 +728,35 @@ export default function TradingView() {
   useEffect(() => {
     const fetchHistory = async () => {
       try {
-        const normalize = (t, type) => ({
-          ...t,
-          id: t.id || String(Date.now() + Math.random()),
-          type,
-          name: STOCK_SYMBOLS.find(s => s.symbol === t.symbol)?.name || t.symbol,
-          contractName: t.contractName || t.symbol,
-          strikePrice: t.strikePrice ?? '—',
-          optionType: String(t.optionType || t.direction || '—').toLowerCase(),
-          buyPrice: Number(t.buyPrice) || 0,
-          sellPrice: Number(t.sellPrice) || 0,
-          pnl: Number(t.pnl) || 0,
-          entryTime: fmtEntryTime(t.entryTime),
-          exitTime: fmtEntryTime(t.exitTime),
-          _entryIso: t.entryTime || t.createdAt,
-        })
+        const normalize = (t, type) => {
+          const tradeTypeRaw = String(t.tradeType || t.trade_type || '').toUpperCase()
+          const normalizedType = type === 'manual'
+            ? 'manual'
+            : tradeTypeRaw === 'STRADDLE'
+              ? 'straddle'
+              : tradeTypeRaw === 'RECOVERY'
+                ? 'recovery'
+                : tradeTypeRaw === 'MONITOR_EXIT'
+                  ? 'monitor'
+                  : 'ai'
+
+          return {
+            ...t,
+            id: t.id || String(Date.now() + Math.random()),
+            type: normalizedType,
+            tradeTypeRaw,
+            name: STOCK_SYMBOLS.find(s => s.symbol === t.symbol)?.name || t.symbol,
+            contractName: t.contractName || t.symbol,
+            strikePrice: t.strikePrice ?? '—',
+            optionType: String(t.optionType || t.option_type || t.direction || '—').toLowerCase(),
+            buyPrice: Number(t.buyPrice) || 0,
+            sellPrice: Number(t.sellPrice) || 0,
+            pnl: Number(t.pnl) || 0,
+            entryTime: fmtEntryTime(t.entryTime),
+            exitTime: fmtEntryTime(t.exitTime),
+            _entryIso: t.entryTime || t.createdAt,
+          }
+        }
         const [optRes, manRes] = await Promise.allSettled([
           fetch(`${API_DISPLAY}/api/options-log?limit=500`),
           fetch(`${API_DISPLAY}/api/manual-trades?limit=500`),
@@ -775,21 +803,35 @@ export default function TradingView() {
         if (!myPos || myPos.live?.monitoring_active === false) {
           // Re-fetch history so the backend-logged trade appears
           try {
-            const normalize = (t, type) => ({
-              ...t,
-              id: t.id || String(Date.now() + Math.random()),
-              type,
-              name: STOCK_SYMBOLS.find(s => s.symbol === t.symbol)?.name || t.symbol,
-              contractName: t.contractName || t.symbol,
-              strikePrice: t.strikePrice ?? '—',
-              optionType: String(t.optionType || t.direction || '—').toLowerCase(),
-              buyPrice: Number(t.buyPrice) || 0,
-              sellPrice: Number(t.sellPrice) || 0,
-              pnl: Number(t.pnl) || 0,
-              entryTime: fmtEntryTime(t.entryTime),
-              exitTime: fmtEntryTime(t.exitTime),
-              _entryIso: t.entryTime || t.createdAt,
-            })
+            const normalize = (t, type) => {
+              const tradeTypeRaw = String(t.tradeType || t.trade_type || '').toUpperCase()
+              const normalizedType = type === 'manual'
+                ? 'manual'
+                : tradeTypeRaw === 'STRADDLE'
+                  ? 'straddle'
+                  : tradeTypeRaw === 'RECOVERY'
+                    ? 'recovery'
+                    : tradeTypeRaw === 'MONITOR_EXIT'
+                      ? 'monitor'
+                      : 'ai'
+
+              return {
+                ...t,
+                id: t.id || String(Date.now() + Math.random()),
+                type: normalizedType,
+                tradeTypeRaw,
+                name: STOCK_SYMBOLS.find(s => s.symbol === t.symbol)?.name || t.symbol,
+                contractName: t.contractName || t.symbol,
+                strikePrice: t.strikePrice ?? '—',
+                optionType: String(t.optionType || t.option_type || t.direction || '—').toLowerCase(),
+                buyPrice: Number(t.buyPrice) || 0,
+                sellPrice: Number(t.sellPrice) || 0,
+                pnl: Number(t.pnl) || 0,
+                entryTime: fmtEntryTime(t.entryTime),
+                exitTime: fmtEntryTime(t.exitTime),
+                _entryIso: t.entryTime || t.createdAt,
+              }
+            }
             const [optRes, manRes] = await Promise.allSettled([
               fetch(`${API_DISPLAY}/api/options-log?limit=500`),
               fetch(`${API_DISPLAY}/api/manual-trades?limit=500`),
@@ -1698,7 +1740,7 @@ export default function TradingView() {
             ? timeFiltered
             : histTypeFilter === 'MT'
               ? timeFiltered.filter(t => t.type === 'manual')
-              : timeFiltered.filter(t => t.type === 'ai')
+              : timeFiltered.filter(t => t.type !== 'manual')
           // Sort by entry time descending (most recent first)
           const filteredHistory = [...typeFiltered].sort((a, b) => {
             const ta = new Date(a._entryIso || a.entryTime || 0).getTime()
@@ -1800,8 +1842,15 @@ export default function TradingView() {
                 const isBreakeven = t.result === 'BREAKEVEN'
                 const accent = isBreakeven ? '#d97706' : isWin ? '#16a34a' : '#ef4444'
                 const accentBg = isBreakeven ? 'rgba(217,119,6,0.08)' : isWin ? 'rgba(22,163,74,0.06)' : 'rgba(239,68,68,0.06)'
-                const sourceBg = t.type === 'manual' ? 'rgba(37,99,235,0.12)' : 'rgba(201,162,39,0.12)'
-                const sourceColor = t.type === 'manual' ? '#2563eb' : GOLD_DEEP
+                const sourceMeta = t.type === 'manual'
+                  ? { label: 'MT', bg: 'rgba(37,99,235,0.12)', color: '#2563eb' }
+                  : t.type === 'straddle'
+                    ? { label: 'STRADDLE', bg: 'rgba(201,162,39,0.15)', color: GOLD_DEEP }
+                    : t.type === 'recovery'
+                      ? { label: 'RECOVERY', bg: 'rgba(148,163,184,0.16)', color: '#475569' }
+                      : t.type === 'monitor'
+                        ? { label: 'MONITOR', bg: 'rgba(99,102,241,0.14)', color: '#4338ca' }
+                        : { label: 'AIT', bg: 'rgba(201,162,39,0.12)', color: GOLD_DEEP }
                 const sideLabel = t.optionType !== '—' ? t.optionType.toUpperCase() : '—'
                 const exitReason = String(t.exitReason || t.exit_reason || '—').replace(/_/g, ' ')
 
@@ -1825,8 +1874,8 @@ export default function TradingView() {
                           <span style={{
                             padding: '0.13rem 0.42rem', borderRadius: '4px',
                             fontWeight: 800, fontSize: '0.63rem', letterSpacing: '0.03em',
-                            background: sourceBg, color: sourceColor,
-                          }}>{t.type === 'manual' ? 'MT' : 'AIT'}</span>
+                            background: sourceMeta.bg, color: sourceMeta.color,
+                          }}>{sourceMeta.label}</span>
                           <span style={{
                             padding: '0.13rem 0.42rem', borderRadius: '20px',
                             fontWeight: 800, fontSize: '0.62rem',

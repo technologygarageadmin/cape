@@ -149,7 +149,6 @@ from pymongo import MongoClient
 
 from config import (
     API_KEY, CHECK_INTERVAL_SEC, FILL_WAIT_SEC, MONGO_DB_NAME, MONGO_ENABLED, MONGO_URI,
-    BRACKET_QP_PLACEHOLDER_PCT,
     EXIT_ALLOW_POSITIVE_PNL_IN_ENTRY_CANDLE,
     EXIT_BRACKET_QP_ENABLED,
     EXIT_AFTER_NEXT_CANDLE_ENABLED,
@@ -1001,7 +1000,7 @@ def _poll_straddle_call_call_day(
         exit_reason = _evaluate_priority_exit(pnl_pct, exit_state, use_extended_exit_criteria=True)
 
         # CALL-day: suppress SL so the winning leg can run to TP/QP
-        if call_day and exit_reason in ("STOP_LOSS_EXIT", "TRAILING_STOP_EXIT"):
+        if call_day and exit_reason == "STOP_LOSS_EXIT":
             exit_reason = None
 
         if exit_reason:
@@ -1080,7 +1079,7 @@ def _poll_straddle_call_call_day(
         exit_reason = _evaluate_priority_exit(pnl_pct, exit_state, use_extended_exit_criteria=True)
 
         # CALL-day: suppress SL so the winning leg can run to TP/QP
-        if call_day and exit_reason in ("STOP_LOSS_EXIT", "TRAILING_STOP_EXIT"):
+        if call_day and exit_reason == "STOP_LOSS_EXIT":
             exit_reason = None
 
         if exit_reason:
@@ -1116,24 +1115,7 @@ def _ait_run_straddle(
         )
         return
 
-    # ── Wait for second candle (at least 60 s after open = 9:31 ET) ──
-    wait_for_candle = max(0.0, 60.0 - seconds_since_open)
-    if wait_for_candle > 0:
-        print(
-            f"[AIT:{symbol}] Straddle: waiting {wait_for_candle:.0f}s for second candle "
-            f"(first candle still open)..."
-        )
-        time.sleep(wait_for_candle)
-
-    # Re-check window after the candle wait
-    now_et = datetime.now(ET)
-    seconds_since_open = (now_et - mkt_open_et).total_seconds()
-    if seconds_since_open >= STRADDLE_OPEN_WINDOW_MIN * 60:
-        print(
-            f"[AIT:{symbol}] Straddle skipped — past window after candle wait "
-            f"({now_et.strftime('%H:%M:%S')} ET)."
-        )
-        return
+    # Run at/after market open immediately (within configured open window).
 
     current_price: float | None = None
     price_bartime = "N/A"
@@ -1178,7 +1160,7 @@ def _ait_run_straddle(
                     if entry_option_price and entry_option_price > 0 else None
                 ),
                 stop_loss_price=(
-                    max(0.01, round(entry_option_price * (1 + BRACKET_QP_PLACEHOLDER_PCT / 100.0), 4))
+                    max(0.01, round(entry_option_price * (1 - STOP_LOSS_PCT), 4))
                     if entry_option_price and entry_option_price > 0 else None
                 ),
             )
@@ -1227,9 +1209,6 @@ def _ait_run_straddle(
 
     expiry_ref = expiry   # capture for closures
 
-    # Shared state: fires when PUT exits at a loss → CALL day (CALL SL disabled).
-    call_day_event = threading.Event()
-
     def _monitor_and_sell(leg: dict) -> None:
         leg_name = leg["leg_name"]
         contract = leg["contract"]
@@ -1237,19 +1216,12 @@ def _ait_run_straddle(
         tp_price = leg["tp_price"]
         sl_price = leg["sl_price"]
         buy_order_id = leg["buy_order_id"]
-        tp_pct = (tp_price / fill_price - 1.0) * 100.0
-        sl_pct = (sl_price / fill_price - 1.0) * 100.0
+        market_fallback_reasons = {
+            "SL_MISSED_GAPDOWN_MARKET_EXIT",
+            "ORDER_SYSTEM_FAILURE_MARKET_EXIT",
+        }
         try:
-            if leg_name == "CALL":
-                # CALL leg: custom polling that respects the CALL-day override
-                # (SL disabled once PUT exits at loss, confirming bullish direction).
-                exit_reason, opt_price, exit_state = _poll_straddle_call_call_day(
-                    odc, contract.symbol, fill_price, tp_pct, sl_pct,
-                    buy_order_id, symbol, call_day_event,
-                    tc=tc, qty=QTY,
-                )
-            else:
-                # PUT leg: full monitoring with QP + trailing SL.
+            while True:
                 exit_reason, opt_price, exit_state = monitor_with_polling(
                     odc, contract.symbol, fill_price, tp_price, sl_price,
                     context_label=f"STRADDLE {symbol} {leg_name}", signal=leg_name,
@@ -1259,51 +1231,64 @@ def _ait_run_straddle(
                     buy_entry_order_id=buy_order_id,
                     tc=tc, qty=QTY,
                 )
-            exit_signal_time_iso = datetime.now(CDT).isoformat(timespec="seconds")
-            # Fast-path: QP limit order already filled on Alpaca
-            if exit_reason == "QUICK_PROFIT_EXIT" and exit_state.get("qp_order_filled"):
-                sell_price = float(exit_state.get("qp_order_fill_price") or opt_price)
-                sell_order_id = exit_state.get("qp_order_id_filled") or ""
-                sell_filled_time_iso = datetime.now(CDT).isoformat(timespec="seconds")
-                mark_selling(buy_order_id, sell_order_id)
-                close_position(buy_order_id)
-            # Fast-path: SL/Trailing stop-limit order already filled on Alpaca
-            elif exit_reason in ("STOP_LOSS_EXIT", "TRAILING_STOP_EXIT") and exit_state.get("sl_order_filled"):
-                sell_price = float(exit_state.get("sl_order_fill_price") or opt_price)
-                sell_order_id = exit_state.get("sl_order_id_filled") or ""
-                sell_filled_time_iso = datetime.now(CDT).isoformat(timespec="seconds")
-                mark_selling(buy_order_id, sell_order_id)
-                close_position(buy_order_id)
-            else:
-                sell_order = place_market_order(
-                    tc,
-                    contract.symbol,
-                    QTY,
-                    OrderSide.SELL,
-                    reference_price=opt_price,
+                exit_signal_time_iso = datetime.now(CDT).isoformat(timespec="seconds")
+
+                if exit_reason == "TAKE_PROFIT_EXIT" and exit_state.get("tp_order_filled"):
+                    sell_price = float(exit_state.get("tp_order_fill_price") or opt_price)
+                    sell_order_id = exit_state.get("tp_order_id_filled") or ""
+                    sell_filled_time_iso = datetime.now(CDT).isoformat(timespec="seconds")
+                    mark_selling(buy_order_id, sell_order_id)
+                    close_position(buy_order_id)
+                    break
+
+                if exit_reason == "STOP_LOSS_EXIT" and exit_state.get("sl_order_filled"):
+                    sell_price = float(exit_state.get("sl_order_fill_price") or opt_price)
+                    sell_order_id = exit_state.get("sl_order_id_filled") or ""
+                    sell_filled_time_iso = datetime.now(CDT).isoformat(timespec="seconds")
+                    mark_selling(buy_order_id, sell_order_id)
+                    close_position(buy_order_id)
+                    break
+
+                if exit_reason in market_fallback_reasons:
+                    print(
+                        f"[AIT:{symbol}] Straddle {leg_name}: {exit_reason} -> forcing MARKET sell"
+                    )
+                    sell_order = place_market_order(
+                        tc,
+                        contract.symbol,
+                        QTY,
+                        OrderSide.SELL,
+                        reference_price=opt_price,
+                        allow_limit=False,
+                    )
+                    sell_order_id = str(sell_order.id)
+                    mark_selling(buy_order_id, sell_order_id)
+                    filled_sell = wait_for_fill(tc, sell_order_id, FILL_WAIT_SEC)
+                    if filled_sell.status != OrderStatus.FILLED:
+                        print(
+                            f"[AIT:{symbol}] Straddle {leg_name}: market fallback sell not filled "
+                            f"(status={filled_sell.status}). Retrying monitor..."
+                        )
+                        time.sleep(CHECK_INTERVAL_SEC)
+                        continue
+                    sell_price = float(filled_sell.filled_avg_price or opt_price or 0)
+                    sell_filled_time_iso = (
+                        _to_iso(getattr(filled_sell, "filled_at", None))
+                        or datetime.now(CDT).isoformat(timespec="seconds")
+                    )
+                    close_position(buy_order_id)
+                    break
+
+                print(
+                    f"[AIT:{symbol}] Straddle {leg_name}: waiting for broker TP/SL child fill "
+                    f"(exit_reason={exit_reason})"
                 )
-                sell_order_id = str(sell_order.id)
-                mark_selling(buy_order_id, sell_order_id)
-                filled_sell = wait_for_fill(tc, sell_order_id, FILL_WAIT_SEC)
-                sell_price = float(filled_sell.filled_avg_price or opt_price)
-                sell_filled_time_iso = (
-                    _to_iso(getattr(filled_sell, "filled_at", None))
-                    or datetime.now(CDT).isoformat(timespec="seconds")
-                )
-                close_position(buy_order_id)
+                time.sleep(CHECK_INTERVAL_SEC)
+
             exit_reason = exit_reason or "FORCED_EXIT_NO_SIGNAL"
             pnl_pct = (sell_price - fill_price) / fill_price * 100
             pnl_dollar = round((sell_price - fill_price) * QTY * 100, 2)
             result = "WIN" if pnl_pct > 0 else "LOSS" if pnl_pct < 0 else "BREAKEVEN"
-
-            # ── CALL day: PUT exited at a loss → market is moving up ──
-            # Signal the CALL leg to disable its SL so it can ride to TP.
-            if leg_name == "PUT" and result == "LOSS" and not call_day_event.is_set():
-                call_day_event.set()
-                print(
-                    f"[AIT:{symbol}] Straddle PUT exited at LOSS ({pnl_pct:+.2f}%) "
-                    f"— CALL day declared, CALL SL disabled"
-                )
 
             print(
                 f"[AIT:{symbol}] Straddle {leg_name} SOLD: {sell_price:.4f} "
@@ -1479,7 +1464,7 @@ def _ait_trade_loop(
                     if entry_signal_price and entry_signal_price > 0 else None
                 ),
                 stop_loss_price=(
-                    max(0.01, round(entry_signal_price * (1 + BRACKET_QP_PLACEHOLDER_PCT / 100.0), 4))
+                    max(0.01, round(entry_signal_price * (1 - STOP_LOSS_PCT), 4))
                     if entry_signal_price and entry_signal_price > 0 else None
                 ),
             )
@@ -1537,15 +1522,10 @@ def _ait_trade_loop(
                 entry_reasons=entry_info.get("reasons") if entry_info else None,
                 entry_filters_passed=entry_info.get("filters_passed") if entry_info else None,
             )
-            print(f"[AIT:{symbol}] BUY FILLED: {fill_price:.4f} | buy_order_id={rsi_buy_order_id} | waiting for RSI marker SELL")
-
-            bid_limit_exit_reasons = {
-                "SAME_CANDLE_POSITIVE_EXIT",
-                "RSI_OPPOSITE_CROSS_EXIT",
-                "TAKE_PROFIT_EXIT",
-                "QUICK_PROFIT_EXIT",
-                "STOP_LOSS_EXIT",
-                "TRAILING_STOP_EXIT",
+            print(f"[AIT:{symbol}] BUY FILLED: {fill_price:.4f} | buy_order_id={rsi_buy_order_id} | waiting for bracket TP/SL fill")
+            market_fallback_reasons = {
+                "SL_MISSED_GAPDOWN_MARKET_EXIT",
+                "ORDER_SYSTEM_FAILURE_MARKET_EXIT",
             }
 
             while True:
@@ -1570,65 +1550,20 @@ def _ait_trade_loop(
                         tc=tc, qty=QTY,
                     )
 
-                # Guard against stale quote spikes for same-candle positive exits.
-                if (
-                    exit_reason == "SAME_CANDLE_POSITIVE_EXIT"
-                    and EXIT_ALLOW_POSITIVE_PNL_IN_ENTRY_CANDLE
-                ):
-                    try:
-                        confirmed_sellable, confirmed_bid, confirmed_mid = _fetch_option_sellable_price(
-                            odc,
-                            contract_symbol,
-                        )
-                    except Exception as ex:
-                        print(
-                            f"[AIT:{symbol}] Could not revalidate SAME_CANDLE_POSITIVE_EXIT "
-                            f"for {contract_symbol}: {ex}. Re-monitoring."
-                        )
-                        continue
-
-                    if confirmed_sellable <= 0:
-                        print(
-                            f"[AIT:{symbol}] SAME_CANDLE_POSITIVE_EXIT revalidation got no sellable "
-                            f"price (bid={confirmed_bid:.4f}, mid={confirmed_mid:.4f}). Re-monitoring."
-                        )
-                        continue
-
-                    confirmed_pnl_pct = (confirmed_sellable - fill_price) / fill_price * 100
-                    if confirmed_pnl_pct < EXIT_SAME_CANDLE_MIN_PNL_PCT:
-                        print(
-                            f"[AIT:{symbol}] SAME_CANDLE_POSITIVE_EXIT stale quote ignored "
-                            f"(confirmed pnl={confirmed_pnl_pct:+.2f}% < "
-                            f"{EXIT_SAME_CANDLE_MIN_PNL_PCT:+.2f}%). Re-monitoring."
-                        )
-                        continue
-
-                    opt_price = confirmed_sellable
-
                 exit_signal_time_iso = datetime.now(CDT).isoformat(timespec="seconds")
                 exit_signal_price = float(opt_price) if opt_price else None
 
-                signal_pnl_pct = None
-                if exit_signal_price and fill_price > 0:
-                    signal_pnl_pct = (exit_signal_price - fill_price) / fill_price * 100
-
-                use_bid_limit_sell = bool(
-                    exit_reason in bid_limit_exit_reasons
-                    and exit_signal_price is not None
-                    and exit_signal_price > 0
-                )
-
                 # ── Exit order already filled by Alpaca — skip placing new sell ──
-                if exit_reason == "QUICK_PROFIT_EXIT" and exit_state.get("qp_order_filled"):
-                    rsi_sell_order_id = exit_state.get("qp_order_id_filled") or ""
-                    sell_price = float(exit_state.get("qp_order_fill_price") or exit_signal_price or opt_price or 0)
+                if exit_reason == "TAKE_PROFIT_EXIT" and exit_state.get("tp_order_filled"):
+                    rsi_sell_order_id = exit_state.get("tp_order_id_filled") or ""
+                    sell_price = float(exit_state.get("tp_order_fill_price") or exit_signal_price or opt_price or 0)
                     sell_filled_time_iso = datetime.now(CDT).isoformat(timespec="seconds")
                     mark_selling(rsi_buy_order_id, rsi_sell_order_id)
                     close_position(rsi_buy_order_id)
-                    print(f"[AIT:{symbol}] QUICK_PROFIT_EXIT via Alpaca QP limit order filled at {sell_price:.4f}")
+                    print(f"[AIT:{symbol}] TAKE_PROFIT_EXIT via Alpaca TP limit order filled at {sell_price:.4f}")
                     break
 
-                if exit_reason in ("STOP_LOSS_EXIT", "TRAILING_STOP_EXIT") and exit_state.get("sl_order_filled"):
+                if exit_reason == "STOP_LOSS_EXIT" and exit_state.get("sl_order_filled"):
                     rsi_sell_order_id = exit_state.get("sl_order_id_filled") or ""
                     sell_price = float(exit_state.get("sl_order_fill_price") or exit_signal_price or opt_price or 0)
                     sell_filled_time_iso = datetime.now(CDT).isoformat(timespec="seconds")
@@ -1637,22 +1572,8 @@ def _ait_trade_loop(
                     print(f"[AIT:{symbol}] {exit_reason} via Alpaca SL stop-limit order filled at {sell_price:.4f}")
                     break
 
-                if use_bid_limit_sell:
-                    signal_pnl_text = f"{signal_pnl_pct:+.2f}%" if signal_pnl_pct is not None else "N/A"
-                    print(
-                        f"[AIT:{symbol}] Exit ({exit_reason}) -> placing "
-                        f"bid-anchored limit sell at {exit_signal_price:.4f} "
-                        f"(signal pnl={signal_pnl_text})"
-                    )
-                    sell_order = place_market_order(
-                        tc,
-                        contract_symbol,
-                        QTY,
-                        OrderSide.SELL,
-                        reference_price=exit_signal_price,
-                        force_limit=True,
-                    )
-                else:
+                if exit_reason in market_fallback_reasons:
+                    print(f"[AIT:{symbol}] {exit_reason} -> forcing MARKET sell")
                     sell_order = place_market_order(
                         tc,
                         contract_symbol,
@@ -1661,41 +1582,34 @@ def _ait_trade_loop(
                         reference_price=exit_signal_price,
                         allow_limit=False,
                     )
+                    rsi_sell_order_id = str(sell_order.id)
+                    mark_selling(rsi_buy_order_id, rsi_sell_order_id)
+                    filled_sell = wait_for_fill(tc, rsi_sell_order_id, FILL_WAIT_SEC)
+                    if filled_sell.status != OrderStatus.FILLED:
+                        print(
+                            f"[AIT:{symbol}] MARKET fallback sell not filled "
+                            f"(status={filled_sell.status}) for {contract_symbol}. Re-monitoring."
+                        )
+                        time.sleep(CHECK_INTERVAL_SEC)
+                        continue
 
-                rsi_sell_order_id = str(sell_order.id)
-                mark_selling(rsi_buy_order_id, rsi_sell_order_id)
-                filled_sell = wait_for_fill(tc, rsi_sell_order_id, FILL_WAIT_SEC)
-
-                if filled_sell.status != OrderStatus.FILLED:
-                    print(
-                        f"[AIT:{symbol}] SELL not filled (status={filled_sell.status}) "
-                        f"for {contract_symbol}"
+                    sell_price = float(filled_sell.filled_avg_price or opt_price or 0)
+                    sell_filled_time_iso = (
+                        _to_iso(getattr(filled_sell, "filled_at", None))
+                        or datetime.now(CDT).isoformat(timespec="seconds")
                     )
-                    if use_bid_limit_sell:
-                        try:
-                            tc.cancel_order_by_id(rsi_sell_order_id)
-                            print(f"[AIT:{symbol}] Canceled unfilled limit sell {rsi_sell_order_id}; re-monitoring")
-                        except Exception as ex:
-                            print(f"[AIT:{symbol}] Could not cancel limit sell {rsi_sell_order_id}: {ex}")
-                    time.sleep(CHECK_INTERVAL_SEC)
-                    continue
+                    close_position(rsi_buy_order_id)
+                    break
 
-                sell_price = float(filled_sell.filled_avg_price or opt_price)
-                sell_filled_time_iso = (
-                    _to_iso(getattr(filled_sell, "filled_at", None))
-                    or datetime.now(CDT).isoformat(timespec="seconds")
+                print(
+                    f"[AIT:{symbol}] Waiting for broker TP/SL child fill "
+                    f"(exit_reason={exit_reason})"
                 )
-                close_position(rsi_buy_order_id)
-                break
+                time.sleep(CHECK_INTERVAL_SEC)
+                continue
 
             exit_reason = exit_reason or "FORCED_EXIT_NO_SIGNAL"
             pnl_pct = (sell_price - fill_price) / fill_price * 100
-            if exit_reason == "SAME_CANDLE_POSITIVE_EXIT" and pnl_pct <= 0:
-                print(
-                    f"[AIT:{symbol}] SAME_CANDLE_POSITIVE_EXIT experienced slippage "
-                    f"(final pnl={pnl_pct:+.2f}%)."
-                )
-                exit_reason = "SAME_CANDLE_POSITIVE_SIGNAL_SLIPPAGE_EXIT"
             pnl_dollar = round((sell_price - fill_price) * QTY * 100, 2)
             result = "WIN" if pnl_pct > 0 else "LOSS" if pnl_pct < 0 else "BREAKEVEN"
             print(f"[AIT:{symbol}] SELL: {sell_price:.4f} | PnL: {pnl_pct:+.2f}% | {exit_reason} | buy_order_id={rsi_buy_order_id} sell_order_id={rsi_sell_order_id}")
@@ -1802,21 +1716,22 @@ def _ait_symbol_thread(symbol: str) -> None:
             today_str = datetime.now(tz=ET).strftime("%Y-%m-%d")
             with _ait_straddle_done_lock:
                 straddle_done = _ait_straddle_done.get(symbol) == today_str
+            current_mode = get_mode(symbol)
             if not STRADDLE_ENABLED:
                 print(f"[AIT:{symbol}] Straddle disabled in config.")
             elif straddle_done:
                 print(f"[AIT:{symbol}] Straddle already done today.")
-            elif get_mode(symbol) == "auto":
-                print(f"[AIT:{symbol}] Running straddle...")
+            elif current_mode in ("auto", "manual"):
+                print(f"[AIT:{symbol}] Running straddle (mode={current_mode})...")
                 _ait_run_straddle(symbol, sc, odc, tc)
                 with _ait_straddle_done_lock:
                     _ait_straddle_done[symbol] = today_str
                     _save_straddle_done(_ait_straddle_done)
-                print(f"[AIT:{symbol}] Straddle complete. Starting AIT trade loop.")
+                print(f"[AIT:{symbol}] Straddle complete.")
             else:
-                print(f"[AIT:{symbol}] Mode={get_mode(symbol)}, skipping straddle.")
+                print(f"[AIT:{symbol}] Mode={current_mode}, skipping straddle.")
 
-            if get_mode(symbol) == "auto":
+            if current_mode == "auto":
                 try:
                     _refresh_ait_contract_cache(symbol, sc, odc, tc)
                 except Exception as ex:
@@ -1893,128 +1808,103 @@ def _recovery_monitor_thread(
             print(f"[RECOVERY:{underlying}] Current price={snap_price:.4f} pnl={pnl_now:+.2f}%")
             if pnl_now <= -STOP_LOSS_PCT * 100:
                 print(f"[RECOVERY:{underlying}] Already past SL ({pnl_now:+.2f}%) — selling immediately")
-                exit_reason = "STOP_LOSS_EXIT"
+                exit_reason = "SL_MISSED_GAPDOWN_MARKET_EXIT"
                 opt_price = snap_price
     except Exception as ex:
         print(f"[RECOVERY:{underlying}] Quick price check failed: {ex}")
 
-    if exit_reason is None:
-        # 1. Monitor via websocket first, fallback to polling
-        exit_reason, opt_price, exit_state = monitor_with_websocket(
-            contract_symbol, entry_price, tp_price, sl_price,
-            context_label=f"RECOVERY {underlying} {signal}",
-            signal=signal,
-            underlying_symbol=underlying,
-            buy_order_id=buy_order_id,
-            buy_entry_order_id=buy_order_id,
-            tc=tc, qty=qty,
-        )
-    if exit_reason is None:
-        exit_reason, opt_price, exit_state = monitor_with_polling(
-            odc, contract_symbol, entry_price, tp_price, sl_price,
-            context_label=f"RECOVERY {underlying} {signal}",
-            signal=signal,
-            underlying_symbol=underlying,
-            buy_order_id=buy_order_id,
-            buy_entry_order_id=buy_order_id,
-            initial_exit_state=exit_state if exit_state else None,
-            tc=tc, qty=qty,
-        )
+    sell_price = None
+    sell_filled_time_iso = None
+    rsi_sell_order_id = None
+    exit_signal_time_iso = None
+    exit_signal_price = None
+    market_fallback_reasons = {
+        "SL_MISSED_GAPDOWN_MARKET_EXIT",
+        "ORDER_SYSTEM_FAILURE_MARKET_EXIT",
+    }
 
-    exit_reason = exit_reason or "FORCED_EXIT_NO_SIGNAL"
-    exit_signal_time_iso = datetime.now(CDT).isoformat(timespec="seconds")
-    exit_signal_price = float(opt_price) if opt_price else None
-
-    # 2. Close via Alpaca close_position API (most reliable) with retry
-    # First cancel any stale pending orders that may be holding the qty
-
-    # ── Exit order already filled by Alpaca — use pre-filled data ──
-    if exit_reason == "QUICK_PROFIT_EXIT" and exit_state.get("qp_order_filled"):
-        sell_price = float(exit_state.get("qp_order_fill_price") or opt_price or 0)
-        rsi_sell_order_id = exit_state.get("qp_order_id_filled") or ""
-        sell_filled_time_iso = datetime.now(CDT).isoformat(timespec="seconds")
-        mark_selling(buy_order_id, rsi_sell_order_id)
-        close_position(buy_order_id)
-        print(f"[RECOVERY:{underlying}] QUICK_PROFIT_EXIT via Alpaca QP limit order at {sell_price:.4f}")
-    elif exit_reason in ("STOP_LOSS_EXIT", "TRAILING_STOP_EXIT") and exit_state.get("sl_order_filled"):
-        sell_price = float(exit_state.get("sl_order_fill_price") or opt_price or 0)
-        rsi_sell_order_id = exit_state.get("sl_order_id_filled") or ""
-        sell_filled_time_iso = datetime.now(CDT).isoformat(timespec="seconds")
-        mark_selling(buy_order_id, rsi_sell_order_id)
-        close_position(buy_order_id)
-        print(f"[RECOVERY:{underlying}] {exit_reason} via Alpaca SL stop-limit order at {sell_price:.4f}")
-    else:
-        try:
-            from alpaca.trading.requests import GetOrdersRequest
-            from alpaca.trading.enums import QueryOrderStatus
-            stale_orders = tc.get_orders(
-                filter=GetOrdersRequest(status=QueryOrderStatus.OPEN, symbols=[contract_symbol])
+    while True:
+        if exit_reason is None:
+            # 1. Monitor via websocket first, fallback to polling
+            exit_reason, opt_price, exit_state = monitor_with_websocket(
+                contract_symbol, entry_price, tp_price, sl_price,
+                context_label=f"RECOVERY {underlying} {signal}",
+                signal=signal,
+                underlying_symbol=underlying,
+                buy_order_id=buy_order_id,
+                buy_entry_order_id=buy_order_id,
+                tc=tc, qty=qty,
             )
-            for stale_ord in stale_orders:
-                try:
-                    tc.cancel_order_by_id(str(stale_ord.id))
-                    print(f"[RECOVERY:{underlying}] Cancelled stale order {stale_ord.id}")
-                except Exception:
-                    pass
-            if stale_orders:
-                time.sleep(1)
-        except Exception:
-            pass
+        if exit_reason is None:
+            exit_reason, opt_price, exit_state = monitor_with_polling(
+                odc, contract_symbol, entry_price, tp_price, sl_price,
+                context_label=f"RECOVERY {underlying} {signal}",
+                signal=signal,
+                underlying_symbol=underlying,
+                buy_order_id=buy_order_id,
+                buy_entry_order_id=buy_order_id,
+                initial_exit_state=exit_state if exit_state else None,
+                tc=tc, qty=qty,
+            )
 
-        sell_price = None
-        sell_filled_time_iso = None
-        rsi_sell_order_id = None
-        for _sell_attempt in range(3):
-            try:
-                print(f"[RECOVERY:{underlying}] Closing {contract_symbol} attempt {_sell_attempt+1}/3 via Alpaca close_position...")
-                response = tc.close_position(contract_symbol)
-                # response is an Order object
-                order_id = str(getattr(response, "id", ""))
-                rsi_sell_order_id = order_id
-                mark_selling(buy_order_id, order_id)
-                # Wait for the close order to fill
-                filled = wait_for_fill(tc, order_id, FILL_WAIT_SEC)
-                if filled.status == OrderStatus.FILLED:
-                    sell_price = float(filled.filled_avg_price or opt_price or 0)
-                    sell_filled_time_iso = (
-                        _to_iso(getattr(filled, "filled_at", None))
-                        or datetime.now(CDT).isoformat(timespec="seconds")
-                    )
-                    print(f"[RECOVERY:{underlying}] Close filled at {sell_price:.4f}")
-                    break
-                else:
-                    print(f"[RECOVERY:{underlying}] Close order status: {filled.status}")
-                    time.sleep(5)
-            except Exception as ex:
-                ex_str = str(ex)
-                # If position no longer exists, it was already closed externally
-                if "position does not exist" in ex_str.lower() or "404" in ex_str:
-                    print(f"[RECOVERY:{underlying}] Position already closed externally")
-                    close_position(buy_order_id)
-                    return
-                print(f"[RECOVERY:{underlying}] Close attempt {_sell_attempt+1}/3 error: {ex}")
-                time.sleep(5)
+        exit_reason = exit_reason or "FORCED_EXIT_NO_SIGNAL"
+        exit_signal_time_iso = datetime.now(CDT).isoformat(timespec="seconds")
+        exit_signal_price = float(opt_price) if opt_price else None
 
-    if sell_price is None:
-        # Final fallback — try place_market_order SELL
-        print(f"[RECOVERY:{underlying}] close_position failed, trying market sell order...")
-        try:
+        # ── Exit order already filled by Alpaca — use pre-filled data ──
+        if exit_reason == "TAKE_PROFIT_EXIT" and exit_state.get("tp_order_filled"):
+            sell_price = float(exit_state.get("tp_order_fill_price") or opt_price or 0)
+            rsi_sell_order_id = exit_state.get("tp_order_id_filled") or ""
+            sell_filled_time_iso = datetime.now(CDT).isoformat(timespec="seconds")
+            mark_selling(buy_order_id, rsi_sell_order_id)
+            close_position(buy_order_id)
+            print(f"[RECOVERY:{underlying}] TAKE_PROFIT_EXIT via Alpaca TP limit order at {sell_price:.4f}")
+            break
+
+        if exit_reason == "STOP_LOSS_EXIT" and exit_state.get("sl_order_filled"):
+            sell_price = float(exit_state.get("sl_order_fill_price") or opt_price or 0)
+            rsi_sell_order_id = exit_state.get("sl_order_id_filled") or ""
+            sell_filled_time_iso = datetime.now(CDT).isoformat(timespec="seconds")
+            mark_selling(buy_order_id, rsi_sell_order_id)
+            close_position(buy_order_id)
+            print(f"[RECOVERY:{underlying}] {exit_reason} via Alpaca SL stop-limit order at {sell_price:.4f}")
+            break
+
+        if exit_reason in market_fallback_reasons:
+            print(f"[RECOVERY:{underlying}] {exit_reason} -> forcing MARKET sell")
             sell_order = place_market_order(
-                tc, contract_symbol, qty, OrderSide.SELL,
+                tc,
+                contract_symbol,
+                qty,
+                OrderSide.SELL,
+                reference_price=opt_price,
                 allow_limit=False,
             )
             rsi_sell_order_id = str(sell_order.id)
             mark_selling(buy_order_id, rsi_sell_order_id)
             filled_sell = wait_for_fill(tc, rsi_sell_order_id, FILL_WAIT_SEC)
-            if filled_sell.status == OrderStatus.FILLED:
-                sell_price = float(filled_sell.filled_avg_price or opt_price or 0)
-                sell_filled_time_iso = (
-                    _to_iso(getattr(filled_sell, "filled_at", None))
-                    or datetime.now(CDT).isoformat(timespec="seconds")
+            if filled_sell.status != OrderStatus.FILLED:
+                print(
+                    f"[RECOVERY:{underlying}] MARKET fallback sell not filled "
+                    f"(status={filled_sell.status}) for {contract_symbol}. Re-monitoring."
                 )
-                print(f"[RECOVERY:{underlying}] Market sell filled at {sell_price:.4f}")
-        except Exception as ex:
-            print(f"[RECOVERY:{underlying}] Market sell also failed: {ex}")
+                exit_reason = None
+                time.sleep(CHECK_INTERVAL_SEC)
+                continue
+            sell_price = float(filled_sell.filled_avg_price or opt_price or 0)
+            sell_filled_time_iso = (
+                _to_iso(getattr(filled_sell, "filled_at", None))
+                or datetime.now(CDT).isoformat(timespec="seconds")
+            )
+            close_position(buy_order_id)
+            break
+
+        print(
+            f"[RECOVERY:{underlying}] Waiting for broker TP/SL child fill "
+            f"(exit_reason={exit_reason})"
+        )
+        exit_reason = None
+        time.sleep(CHECK_INTERVAL_SEC)
 
     if sell_price is None:
         print(f"[RECOVERY:{underlying}] ALL sell methods failed for {contract_symbol}")
@@ -2744,10 +2634,8 @@ def get_live_positions_api() -> dict[str, Any]:
     EXIT_REASON_DESCRIPTIONS = {
         "STOP_LOSS_EXIT": "Price dropped below the static stop-loss level. This is the maximum allowed loss per trade.",
         "TAKE_PROFIT_EXIT": "Price hit the take-profit target. Full profit captured!",
-        "QUICK_PROFIT_EXIT": "Price pulled back after a quick positive move. Locked in a small win before reversal.",
-        "TRAILING_STOP_EXIT": "Trailing stop triggered — price retreated from its peak. The dynamic SL ratcheted up to protect gains.",
-        "RSI_OPPOSITE_CROSS_EXIT": "RSI crossed in the opposite direction of the trade — momentum reversed.",
-        "SAME_CANDLE_POSITIVE_EXIT": "Price went positive within the entry candle. Exited to capture quick same-bar profit.",
+        "SL_MISSED_GAPDOWN_MARKET_EXIT": "SL stop-limit could not fill during a gap-down (market below SL limit). Forced market sell was used.",
+        "ORDER_SYSTEM_FAILURE_MARKET_EXIT": "Broker TP/SL order state was missing or invalid. Forced market sell was used as recovery.",
         "FORCED_EXIT_NO_SIGNAL": "Forced exit due to timeout or market close. No clear signal to hold longer.",
     }
 
@@ -3058,7 +2946,7 @@ def manual_option_buy(body: ManualOptionBuyBody) -> dict[str, Any]:
                 if entry_price and entry_price > 0 else None
             ),
             stop_loss_price=(
-                max(0.01, round(entry_price * (1 + BRACKET_QP_PLACEHOLDER_PCT / 100.0), 4))
+                max(0.01, round(entry_price * (1 - STOP_LOSS_PCT), 4))
                 if entry_price and entry_price > 0 else None
             ),
         )
@@ -3206,12 +3094,13 @@ def _manual_trade_monitor_thread(
     entry_time_iso: str,
 ) -> None:
     """
-    Monitor a manually entered option position using the same exit strategy as AIT.
-    Sells when TP/SL/QP/bad-entry/time triggers fire, then logs to manual_trade_history.
+    Monitor a manually entered option position in bracket-only mode.
+    Sells only when broker TP/SL child order fills, then logs to manual_trade_history.
     """
     parsed = _parse_option_contract(contract_symbol)
-    option_type = parsed.get("option_type", "").upper() if parsed else "—"
-    signal = option_type or "CALL"   # fallback so monitor_with_polling gets a direction label
+    # _parse_option_contract returns "signal" as CALL/PUT.
+    option_type = parsed.get("signal", "").upper() if parsed else ""
+    signal = option_type if option_type in ("CALL", "PUT") else "CALL"
 
     tp_price = entry_price * (1 + TAKE_PROFIT_PCT)
     sl_price = entry_price * (1 - STOP_LOSS_PCT)
@@ -3221,89 +3110,98 @@ def _manual_trade_monitor_thread(
         f"entry={entry_price:.4f} tp={tp_price:.4f} sl={sl_price:.4f}"
     )
 
-    # 1. Monitor via websocket first, fallback to polling (same as AIT/recovery)
-    exit_reason, opt_price, exit_state = monitor_with_websocket(
-        contract_symbol, entry_price, tp_price, sl_price,
-        context_label=f"MANUAL {underlying} {signal}",
-        signal=signal,
-        underlying_symbol=underlying,
-        buy_order_id=buy_order_id,
-        buy_entry_order_id=buy_order_id,
-        tc=tc, qty=qty,
-    )
-    if exit_reason is None:
-        exit_reason, opt_price, exit_state = monitor_with_polling(
-            odc, contract_symbol, entry_price, tp_price, sl_price,
+    # 1. Bracket-only monitoring: wait until broker TP/SL child order fills.
+    exit_reason = None
+    opt_price = entry_price
+    exit_state = {}
+    exit_signal_time_iso = None
+
+    # 2. Resolve fill details from broker child exits only (no manual close fallback).
+    sell_price = None
+    sell_order_id = None
+    sell_filled_time_iso = None
+    market_fallback_reasons = {
+        "SL_MISSED_GAPDOWN_MARKET_EXIT",
+        "ORDER_SYSTEM_FAILURE_MARKET_EXIT",
+    }
+
+    while True:
+        exit_reason, opt_price, exit_state = monitor_with_websocket(
+            contract_symbol, entry_price, tp_price, sl_price,
             context_label=f"MANUAL {underlying} {signal}",
             signal=signal,
             underlying_symbol=underlying,
             buy_order_id=buy_order_id,
             buy_entry_order_id=buy_order_id,
-            initial_exit_state=exit_state if exit_state else None,
             tc=tc, qty=qty,
         )
+        if exit_reason is None:
+            exit_reason, opt_price, exit_state = monitor_with_polling(
+                odc, contract_symbol, entry_price, tp_price, sl_price,
+                context_label=f"MANUAL {underlying} {signal}",
+                signal=signal,
+                underlying_symbol=underlying,
+                buy_order_id=buy_order_id,
+                buy_entry_order_id=buy_order_id,
+                initial_exit_state=exit_state if exit_state else None,
+                tc=tc, qty=qty,
+            )
 
-    exit_reason = exit_reason or "FORCED_EXIT_NO_SIGNAL"
-    exit_signal_time_iso = datetime.now(CDT).isoformat(timespec="seconds")
+        exit_reason = exit_reason or "FORCED_EXIT_NO_SIGNAL"
+        exit_signal_time_iso = datetime.now(CDT).isoformat(timespec="seconds")
 
-    # 2. Sell — try close_position, then market sell
-    sell_price = None
-    sell_order_id = None
-    sell_filled_time_iso = None
+        if exit_reason == "TAKE_PROFIT_EXIT" and exit_state.get("tp_order_filled"):
+            sell_price = float(exit_state.get("tp_order_fill_price") or opt_price or 0)
+            sell_order_id = exit_state.get("tp_order_id_filled") or ""
+            sell_filled_time_iso = datetime.now(CDT).isoformat(timespec="seconds")
+            mark_selling(buy_order_id, sell_order_id)
+            close_position(buy_order_id)
+            print(f"[MT:{underlying}] TAKE_PROFIT_EXIT via Alpaca TP limit order at {sell_price:.4f}")
+            break
 
-    # ── Exit order already filled by Alpaca — use pre-filled data ──
-    if exit_reason == "QUICK_PROFIT_EXIT" and exit_state.get("qp_order_filled"):
-        sell_price = float(exit_state.get("qp_order_fill_price") or opt_price or 0)
-        sell_order_id = exit_state.get("qp_order_id_filled") or ""
-        sell_filled_time_iso = datetime.now(CDT).isoformat(timespec="seconds")
-        mark_selling(buy_order_id, sell_order_id)
-        close_position(buy_order_id)
-        print(f"[MT:{underlying}] QUICK_PROFIT_EXIT via Alpaca QP limit order at {sell_price:.4f}")
-    elif exit_reason in ("STOP_LOSS_EXIT", "TRAILING_STOP_EXIT") and exit_state.get("sl_order_filled"):
-        sell_price = float(exit_state.get("sl_order_fill_price") or opt_price or 0)
-        sell_order_id = exit_state.get("sl_order_id_filled") or ""
-        sell_filled_time_iso = datetime.now(CDT).isoformat(timespec="seconds")
-        mark_selling(buy_order_id, sell_order_id)
-        close_position(buy_order_id)
-        print(f"[MT:{underlying}] {exit_reason} via Alpaca SL stop-limit order at {sell_price:.4f}")
-    else:
-        for _attempt in range(3):
-            try:
-                response = tc.close_position(contract_symbol)
-                order_id = str(getattr(response, "id", ""))
-                sell_order_id = order_id
-                mark_selling(buy_order_id, order_id)
-                filled = wait_for_fill(tc, order_id, FILL_WAIT_SEC)
-                if filled.status == OrderStatus.FILLED:
-                    sell_price = float(filled.filled_avg_price or opt_price or 0)
-                    sell_filled_time_iso = (
-                        _to_iso(getattr(filled, "filled_at", None))
-                        or datetime.now(CDT).isoformat(timespec="seconds")
-                    )
-                    break
-            except Exception as ex:
-                ex_str = str(ex)
-                if "position does not exist" in ex_str.lower() or "404" in ex_str:
-                    close_position(buy_order_id)
-                    print(f"[MT:{underlying}] Position already closed externally")
-                    return
-                print(f"[MT:{underlying}] Close attempt {_attempt+1}/3: {ex}")
-                time.sleep(5)
+        if exit_reason == "STOP_LOSS_EXIT" and exit_state.get("sl_order_filled"):
+            sell_price = float(exit_state.get("sl_order_fill_price") or opt_price or 0)
+            sell_order_id = exit_state.get("sl_order_id_filled") or ""
+            sell_filled_time_iso = datetime.now(CDT).isoformat(timespec="seconds")
+            mark_selling(buy_order_id, sell_order_id)
+            close_position(buy_order_id)
+            print(f"[MT:{underlying}] {exit_reason} via Alpaca SL stop-limit order at {sell_price:.4f}")
+            break
 
-    if sell_price is None:
-        try:
-            sell_order = place_market_order(tc, contract_symbol, qty, OrderSide.SELL, allow_limit=False)
+        if exit_reason in market_fallback_reasons:
+            print(f"[MT:{underlying}] {exit_reason} -> forcing MARKET sell")
+            sell_order = place_market_order(
+                tc,
+                contract_symbol,
+                qty,
+                OrderSide.SELL,
+                reference_price=opt_price,
+                allow_limit=False,
+            )
             sell_order_id = str(sell_order.id)
             mark_selling(buy_order_id, sell_order_id)
             filled_sell = wait_for_fill(tc, sell_order_id, FILL_WAIT_SEC)
-            if filled_sell.status == OrderStatus.FILLED:
-                sell_price = float(filled_sell.filled_avg_price or opt_price or 0)
-                sell_filled_time_iso = (
-                    _to_iso(getattr(filled_sell, "filled_at", None))
-                    or datetime.now(CDT).isoformat(timespec="seconds")
+            if filled_sell.status != OrderStatus.FILLED:
+                print(
+                    f"[MT:{underlying}] MARKET fallback sell not filled "
+                    f"(status={filled_sell.status}) for {contract_symbol}. Re-monitoring."
                 )
-        except Exception as ex:
-            print(f"[MT:{underlying}] Market sell failed: {ex}")
+                time.sleep(CHECK_INTERVAL_SEC)
+                continue
+
+            sell_price = float(filled_sell.filled_avg_price or opt_price or 0)
+            sell_filled_time_iso = (
+                _to_iso(getattr(filled_sell, "filled_at", None))
+                or datetime.now(CDT).isoformat(timespec="seconds")
+            )
+            close_position(buy_order_id)
+            break
+
+        print(
+            f"[MT:{underlying}] Waiting for broker TP/SL child fill "
+            f"(exit_reason={exit_reason})"
+        )
+        time.sleep(CHECK_INTERVAL_SEC)
 
     close_position(buy_order_id)
 
@@ -3405,7 +3303,7 @@ def manual_trade_buy(body: ManualTradeBuyBody) -> dict[str, Any]:
                 if entry_price and entry_price > 0 else None
             ),
             stop_loss_price=(
-                max(0.01, round(entry_price * (1 + BRACKET_QP_PLACEHOLDER_PCT / 100.0), 4))
+                max(0.01, round(entry_price * (1 - STOP_LOSS_PCT), 4))
                 if entry_price and entry_price > 0 else None
             ),
         )
@@ -3564,9 +3462,13 @@ def get_options_log(
         q["symbol"] = symbol.strip().upper()
     if result:
         q["result"] = result.strip().upper()
-    # Exclude MANUAL types — those are served exclusively by /api/manual-trades
-    # to avoid double-counting in frontend when both endpoints are combined.
-    q["trade_type"] = {"$nin": ["MANUAL", "MANUAL_LIQUIDATE"]}
+    # Exclude MANUAL types and require trade_type to exist.
+    # This prevents legacy/malformed rows (missing trade_type) from being
+    # mislabeled as AIT in the frontend merged history view.
+    q["trade_type"] = {
+        "$exists": True,
+        "$nin": ["MANUAL", "MANUAL_LIQUIDATE"],
+    }
 
     rows = list(_options_log_col.find(q).sort("created_at", -1).limit(limit))
     trades = []

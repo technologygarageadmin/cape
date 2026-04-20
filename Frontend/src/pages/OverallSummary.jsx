@@ -719,16 +719,18 @@ export default function OverallSummary() {
         const d = await aitRes.value.json()
         // /api/options-log excludes MANUAL types by backend design.
         const all = (d.trades || []).map(t => {
-          const tt = String(t.tradeType || '').toUpperCase()
+          const tt = String(t.tradeType || t.trade_type || '').toUpperCase()
           const contractName = t.contractName || t.contract_name || t.symbol
           const optionType = normalizeOptionType(t.optionType || t.option_type, t.direction, contractName, t.symbol)
           const tradeTypeTag = tt === 'STRADDLE'
             ? 'STRADDLE'
+            : tt === 'AIT'
+              ? 'AIT'
             : tt === 'MONITOR_EXIT'
               ? 'MONITOR'
               : tt === 'RECOVERY'
                   ? 'RECOVERY'
-                  : 'AIT'
+                  : 'UNKNOWN'
           const entryReasonRaw = tt === 'STRADDLE' ? 'STRADDLE' : tt === 'AIT' ? 'AIT' : null
           return { ...t, contractName, optionType, tradeTypeTag, entryReason_raw: entryReasonRaw }
         })
@@ -1602,7 +1604,7 @@ export default function OverallSummary() {
                           <div style={{ display: 'flex', alignItems: 'center', gap: '5px', flexWrap: 'wrap', marginBottom: '8px' }}>
                             {/* Trade type tag */}
                             {(() => {
-                              const tag = String(t.tradeTypeTag || 'AIT').toUpperCase()
+                              const tag = String(t.tradeTypeTag || 'UNKNOWN').toUpperCase()
                               const colors = tag === 'AIT'
                                 ? ['rgba(22,163,74,0.12)', '#166534']
                                 : tag === 'STRADDLE'

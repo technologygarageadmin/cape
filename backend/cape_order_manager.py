@@ -205,6 +205,8 @@ class CapeOrderManager:
             if state.is_in_profit:
                 result = self._profit_mode(state)
             else:
+                # Hard-disable QP in loss mode; only loss-mode SL tightening applies.
+                state.qp_value = None
                 result = self._loss_mode(state)
             
             # Add tick number and state to result
@@ -235,8 +237,8 @@ class CapeOrderManager:
         # Optional: apply trailing TP after confirmation
         # cape_tp = state.current_price - (self.trailing_tp_offset * state.current_price / 100.0)
         
-        # Final SL decision: max(existing SL, calculated SL, QP)
-        new_sl = max(state.current_sl, cape_sl, qp_value)
+        # Final SL decision: QP is primary, trailing SL is backup, never lower existing SL.
+        new_sl = max(state.current_sl, qp_value, cape_sl)
         state.cape_sl = cape_sl
         state.cape_tp = cape_tp
         
