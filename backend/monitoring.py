@@ -500,7 +500,7 @@ def _detect_market_fallback_reason(tc, exit_state: dict, sellable_price: float) 
     """Return fallback reason when market sell must be forced.
 
     Case 1: SL missed in a gap-down (price below SL limit after trigger).
-    Case 2: Order-system failure (missing/rejected/cancelled TP/SL children).
+    Case 2: Order-system failure ONLY when SL should have triggered but still does not fill.
     """
     if tc is None or bool(exit_state.get("is_closing", False)):
         return None, None
@@ -508,27 +508,14 @@ def _detect_market_fallback_reason(tc, exit_state: dict, sellable_price: float) 
     tp_ids = list(exit_state.get("tp_order_ids") or [])
     sl_ids = list(exit_state.get("sl_order_ids") or [])
 
-    # No protection orders live while position is still open => order-system failure.
-    if (
-        not tp_ids
-        and not sl_ids
-        and not bool(exit_state.get("tp_order_filled", False))
-        and not bool(exit_state.get("sl_order_filled", False))
-    ):
-        return "ORDER_SYSTEM_FAILURE_MARKET_EXIT", "missing_tp_and_sl_orders"
-
     fetched_any = False
     failure_tokens = ("rejected", "expired", "canceled", "cancelled")
 
-    for oid in tp_ids:
-        try:
-            order = tc.get_order_by_id(oid)
-            fetched_any = True
-        except Exception:
-            continue
-        status = str(getattr(order, "status", "") or "").lower()
-        if any(tok in status for tok in failure_tokens):
-            return "ORDER_SYSTEM_FAILURE_MARKET_EXIT", f"tp_order_status={status}:{oid}"
+    # Only SL governs market fallback. TP status alone must not trigger fallback.
+    _ = tp_ids
+
+    trigger_grace_sec = 2.0
+    triggered_but_unfilled = False
 
     for oid in sl_ids:
         try:
@@ -554,9 +541,41 @@ def _detect_market_fallback_reason(tc, exit_state: dict, sellable_price: float) 
             )
             return "SL_MISSED_GAPDOWN_MARKET_EXIT", detail
 
-    # If broker did not return state for any tracked order ids, treat as system failure.
-    if (tp_ids or sl_ids) and not fetched_any:
-        return "ORDER_SYSTEM_FAILURE_MARKET_EXIT", "tracked_orders_not_confirmed_by_broker"
+        # SL should be active now (price reached/under stop) but did not fill.
+        if stop_price > 0 and sellable_price <= stop_price:
+            triggered_but_unfilled = True
+            key = f"sl_trigger_seen_ts:{oid}"
+            first_seen = float(exit_state.get(key, 0.0) or 0.0)
+            now_ts = time.time()
+            if first_seen <= 0.0:
+                exit_state[key] = now_ts
+                continue
+            if (now_ts - first_seen) >= trigger_grace_sec:
+                # If SL is triggered but order remains non-filled after grace,
+                # treat as order-system failure and force market exit.
+                if any(tok in status for tok in failure_tokens):
+                    return "ORDER_SYSTEM_FAILURE_MARKET_EXIT", f"sl_order_status={status}:{oid}"
+                if "filled" not in status:
+                    detail = (
+                        f"sl_triggered_not_filled:oid={oid}:sellable={sellable_price:.4f}:"
+                        f"stop={stop_price:.4f}:limit={limit_price:.4f}:status={status}:"
+                        f"waited={now_ts-first_seen:.2f}s"
+                    )
+                    return "ORDER_SYSTEM_FAILURE_MARKET_EXIT", detail
+
+    # Clear stale trigger timers once price is above all tracked SL stops.
+    if not triggered_but_unfilled:
+        for k in [k for k in list(exit_state.keys()) if str(k).startswith("sl_trigger_seen_ts:")]:
+            exit_state.pop(k, None)
+
+    # If SL ids exist but broker cannot confirm any of them while in triggered zone,
+    # then and only then mark as order-system failure.
+    if sl_ids and not fetched_any:
+        sl_dynamic_pct = float(exit_state.get("sl_dynamic_pct", exit_state.get("sl_static_pct", 0.0)) or 0.0)
+        fill_price = float(exit_state.get("fill_price", 0.0) or 0.0)
+        sl_trigger_price = fill_price * (1.0 + sl_dynamic_pct / 100.0) if fill_price > 0 else 0.0
+        if sl_trigger_price > 0 and sellable_price <= sl_trigger_price:
+            return "ORDER_SYSTEM_FAILURE_MARKET_EXIT", "sl_orders_not_confirmed_by_broker_after_trigger"
 
     return None, None
 

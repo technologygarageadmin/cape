@@ -764,7 +764,7 @@ function PositionCard({ pos }) {
                   <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.68rem', minWidth: '980px' }}>
                     <thead>
                       <tr style={{ background: '#fdfaf4', position: 'sticky', top: 0, zIndex: 1 }}>
-                        {['Time', 'Source', 'Price', 'PnL%', 'Peak%', 'TP', 'SL', 'SL Update', 'SL Order'].map((h) => (
+                        {['Time', 'Source', 'Price', 'PnL%', 'Peak%', 'Peak Price', 'TP', 'SL', 'SL Update', 'SL Order'].map((h) => (
                           <th key={h} style={{ padding: '0.32rem 0.45rem', textAlign: 'left', color: '#777', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.04em', borderBottom: '1px solid rgba(0,0,0,0.08)' }}>{h}</th>
                         ))}
                       </tr>
@@ -772,6 +772,11 @@ function PositionCard({ pos }) {
                     <tbody>
                       {timeline.slice(0, 250).map((tick, idx) => {
                         const isOrder = tick.source === 'order_placed' || tick.source === 'order_replaced'
+                        const fillPx = Number(tick.fill_price)
+                        const peakPct = Number(tick.max_pnl_pct)
+                        const peakPrice = Number.isFinite(fillPx) && Number.isFinite(peakPct)
+                          ? fillPx * (1 + peakPct / 100)
+                          : null
                         return (
                           <tr key={idx} style={{ borderBottom: '1px solid rgba(0,0,0,0.04)', background: idx % 2 === 0 ? '#fff' : '#fcfcfc' }}>
                             <td style={{ padding: '0.3rem 0.45rem', fontFamily: 'monospace', color: '#555' }}>{fmtTickTime(tick.ts)}</td>
@@ -779,6 +784,7 @@ function PositionCard({ pos }) {
                             <td style={{ padding: '0.3rem 0.45rem', fontFamily: 'monospace' }}>{tick.sellable_price != null ? `$${fmtNum4(tick.sellable_price)}` : '—'}</td>
                             <td style={{ padding: '0.3rem 0.45rem', fontFamily: 'monospace', color: parseFloat(tick.pnl_pct || 0) >= 0 ? '#16a34a' : '#dc2626' }}>{fmtSignedPct(tick.pnl_pct)}</td>
                             <td style={{ padding: '0.3rem 0.45rem', fontFamily: 'monospace', color: '#555' }}>{fmtSignedPct(tick.max_pnl_pct)}</td>
+                            <td style={{ padding: '0.3rem 0.45rem', fontFamily: 'monospace', color: '#555' }}>{peakPrice != null ? `$${fmtNum4(peakPrice)}` : '—'}</td>
                             <td style={{ padding: '0.3rem 0.45rem', fontFamily: 'monospace', color: '#555' }}>{tick.tp_action || 'NO_CHANGE'}</td>
                             <td style={{ padding: '0.3rem 0.45rem', fontFamily: 'monospace', color: tick.sl_action === 'UPDATED' ? '#dc2626' : '#555', fontWeight: tick.sl_action === 'UPDATED' ? 700 : 500 }}>{tick.sl_action || 'NO_CHANGE'}</td>
                             <td style={{ padding: '0.3rem 0.45rem', fontFamily: 'monospace', color: '#444', whiteSpace: 'nowrap' }}>

@@ -20,6 +20,8 @@ const MODE_CONFIG = {
 const STATUS_CONFIG = {
   CALL_READY:   { color: '#22c55e', bg: 'rgba(34,197,94,0.12)',  text: 'CALL READY!',   pulse: true },
   PUT_READY:    { color: '#ef4444', bg: 'rgba(239,68,68,0.12)',  text: 'PUT READY!',    pulse: true },
+  CALL_BLOCKED: { color: '#f59e0b', bg: 'rgba(245,158,11,0.12)', text: 'CALL BLOCKED',  pulse: false },
+  PUT_BLOCKED:  { color: '#f59e0b', bg: 'rgba(245,158,11,0.12)', text: 'PUT BLOCKED',   pulse: false },
   CALL_WARMING: { color: '#22c55e', bg: 'rgba(34,197,94,0.08)',  text: 'CALL Warming',  pulse: false },
   PUT_WARMING:  { color: '#ef4444', bg: 'rgba(239,68,68,0.08)',  text: 'PUT Warming',   pulse: false },
   BUILDING:     { color: '#f59e0b', bg: 'rgba(245,158,11,0.08)', text: 'Building',      pulse: false },
@@ -102,15 +104,22 @@ function FilterChecklist({ filters, direction }) {
       {order.map(key => {
         const f = filters[key]
         if (!f) return null
+        const isDisabled = f.enabled === false
         return (
           <div key={key} style={{
             display: 'flex', alignItems: 'center', gap: '0.5rem',
             padding: '0.35rem 0.6rem',
             borderRadius: '8px',
-            background: f.passed ? (direction === 'call' ? 'rgba(34,197,94,0.06)' : 'rgba(239,68,68,0.06)') : 'rgba(0,0,0,0.02)',
+            background: isDisabled
+              ? 'rgba(148,163,184,0.10)'
+              : f.passed
+                ? (direction === 'call' ? 'rgba(34,197,94,0.06)' : 'rgba(239,68,68,0.06)')
+                : 'rgba(0,0,0,0.02)',
             transition: 'all 0.3s ease',
           }}>
-            {f.passed
+            {isDisabled
+              ? <Power size={13} color="#64748b" />
+              : f.passed
               ? <CheckCircle size={13} color={direction === 'call' ? '#22c55e' : '#ef4444'} />
               : <XCircle size={13} color="#ccc" />
             }
@@ -124,14 +133,18 @@ function FilterChecklist({ filters, direction }) {
               </span>
             </span>
             <span style={{
-              fontSize: '0.7rem', color: f.passed ? '#333' : '#999',
+              fontSize: '0.7rem', color: isDisabled ? '#64748b' : (f.passed ? '#333' : '#999'),
               flex: 1,
             }}>{f.note}</span>
             <span style={{
               fontSize: '0.68rem', fontWeight: 700,
-              color: f.pts > 0 ? (direction === 'call' ? '#22c55e' : '#ef4444') : '#ccc',
+              color: isDisabled
+                ? '#64748b'
+                : f.pts > 0
+                  ? (direction === 'call' ? '#22c55e' : '#ef4444')
+                  : '#ccc',
               minWidth: '30px', textAlign: 'right',
-            }}>+{f.pts}</span>
+            }}>{isDisabled ? 'OFF' : `+${f.pts}`}</span>
           </div>
         )
       })}
@@ -336,6 +349,15 @@ function SymbolCard({ data, onModeChange }) {
               color: data.ema_regime === 'BULLISH' ? '#22c55e' : '#ef4444',
             }}>
               EMA: {data.ema_regime}
+            </span>
+          )}
+          {data.execution_blocked && data.execution_block_reason && (
+            <span style={{
+              fontSize: '0.62rem', fontWeight: 700,
+              color: '#d97706',
+              textAlign: 'right',
+            }}>
+              {data.execution_block_reason}
             </span>
           )}
           {!isOff && (

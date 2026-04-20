@@ -3701,6 +3701,11 @@ def get_signal_readiness() -> dict[str, Any]:
         ENTRY_VOLUME_CONFIRMATION_ENABLED, ENTRY_VOLUME_MIN_RATIO,
         ENTRY_RSI_EXTREME_FILTER_ENABLED, ENTRY_RSI_CALL_MAX, ENTRY_RSI_PUT_MIN,
         ENTRY_RSI_STREAK_ENABLED, ENTRY_RSI_MIN_STREAK,
+        ENTRY_EMA_TRIPLE_STACK_ENABLED,
+        ENTRY_VWAP_FILTER_ENABLED,
+        ENTRY_PRICE_STRUCTURE_ENABLED,
+        ENTRY_TIME_WINDOW_ENABLED,
+        ENTRY_TIME_WINDOWS,
     )
 
     all_modes = get_all_modes()
@@ -3721,6 +3726,9 @@ def get_signal_readiness() -> dict[str, Any]:
             "price": None,
             "bar_time": None,
             "status": "OFF" if mode == "off" else "SCANNING",
+            "execution_blocked": False,
+            "execution_block_reason": None,
+            "ait_entry_enabled": bool(AIT_ENTRY_ENABLED),
             "error": None,
         }
 
@@ -3765,12 +3773,24 @@ def get_signal_readiness() -> dict[str, Any]:
         up_streak = int(rsi_result.get("up_streak", 0))
         down_streak = int(rsi_result.get("down_streak", 0))
         rsi_ma_gap = abs(latest_rsi - rsi_ma)
+        ema_third = float(rsi_result.get("ema_third", 0))
+        ema_triple_bull = bool(rsi_result.get("ema_triple_bull", False))
+        ema_triple_bear = bool(rsi_result.get("ema_triple_bear", False))
+        vwap = rsi_result.get("vwap")
+        price_above_vwap = rsi_result.get("price_above_vwap")
+        price_structure = rsi_result.get("price_structure", "NONE")
+        price_structure_bullish = bool(rsi_result.get("price_structure_bullish", False))
+        price_structure_bearish = bool(rsi_result.get("price_structure_bearish", False))
+        price_structure_neutral = bool(rsi_result.get("price_structure_neutral", False))
 
         item["rsi"] = round(latest_rsi, 2)
         item["rsi_ma"] = round(rsi_ma, 2)
         item["rsi_gap"] = round(latest_rsi - rsi_ma, 2)
         item["ema_fast"] = round(ema_fast, 4)
         item["ema_slow"] = round(ema_slow, 4)
+        item["ema_third"] = round(ema_third, 4)
+        item["ema_triple_bull"] = ema_triple_bull
+        item["ema_triple_bear"] = ema_triple_bear
         item["ema_regime"] = "BULLISH" if ema_fast_above else "BEARISH"
         item["trend"] = base_trend
         item["price"] = round(close_price, 2)
@@ -3786,12 +3806,105 @@ def get_signal_readiness() -> dict[str, Any]:
         item["down_streak"] = down_streak
         item["rsi_delta"] = round(rsi_delta, 2)
         item["volume_ratio"] = round(volume_ratio, 2)
+        item["vwap"] = round(float(vwap), 4) if isinstance(vwap, (int, float)) else None
+        item["price_above_vwap"] = price_above_vwap
+        item["price_structure"] = price_structure
+        item["price_structure_bullish"] = price_structure_bullish
+        item["price_structure_bearish"] = price_structure_bearish
+        item["price_structure_neutral"] = price_structure_neutral
+
+        now_et = datetime.now(tz=ZoneInfo("America/New_York"))
+        now_mins = now_et.hour * 60 + now_et.minute
+        in_trade_window = any(start <= now_mins < end for start, end in ENTRY_TIME_WINDOWS)
+        if not ENTRY_TIME_WINDOW_ENABLED:
+            in_trade_window = True
+        item["in_trade_window"] = in_trade_window
+
+        filter_order = [
+            "time_window",
+            "rsi_cross",
+            "rsi_gap",
+            "ema_regime",
+            "ema_triple",
+            "rsi_level",
+            "pullback",
+            "momentum",
+            "volume",
+            "extreme",
+            "streak",
+            "candle",
+            "vwap",
+            "price_structure",
+        ]
+        filter_weights = {
+            "time_window": 5,
+            "rsi_cross": 20,
+            "rsi_gap": 15,
+            "ema_regime": 12,
+            "ema_triple": 5,
+            "rsi_level": 10,
+            "pullback": 10,
+            "momentum": 10,
+            "volume": 8,
+            "extreme": 5,
+            "streak": 5,
+            "candle": 5,
+            "vwap": 5,
+            "price_structure": 5,
+        }
+        enabled_map = {
+            "time_window": bool(ENTRY_TIME_WINDOW_ENABLED),
+            "rsi_cross": True,
+            "rsi_gap": True,
+            "ema_regime": bool(ENTRY_EMA_CROSS_ENABLED),
+            "ema_triple": bool(ENTRY_EMA_TRIPLE_STACK_ENABLED),
+            "rsi_level": bool(ENTRY_RSI_THRESHOLD_ENABLED),
+            "pullback": bool(ENTRY_PULLBACK_ENABLED),
+            "momentum": bool(ENTRY_RSI_MOMENTUM_ENABLED),
+            "volume": bool(ENTRY_VOLUME_CONFIRMATION_ENABLED),
+            "extreme": bool(ENTRY_RSI_EXTREME_FILTER_ENABLED),
+            "streak": bool(ENTRY_RSI_STREAK_ENABLED),
+            "candle": bool(ENTRY_STRONG_CANDLE_ENABLED),
+            "vwap": bool(ENTRY_VWAP_FILTER_ENABLED),
+            "price_structure": bool(ENTRY_PRICE_STRUCTURE_ENABLED),
+        }
+
+        def _normalize_side(filters: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+            normalized: dict[str, Any] = {}
+            for key in filter_order:
+                row = dict(filters.get(key) or {})
+                is_enabled = bool(enabled_map.get(key, True))
+                max_pts = int(filter_weights.get(key, 0))
+                row.setdefault("passed", False)
+                row.setdefault("note", "No data")
+                row.setdefault("pts", 0)
+                row["enabled"] = is_enabled
+                row["max_pts"] = max_pts
+                if not is_enabled:
+                    row["passed"] = False
+                    row["note"] = "Disabled in config"
+                    row["pts"] = 0
+                normalized[key] = row
+
+            enabled_total = sum(filter_weights[k] for k in filter_order if enabled_map.get(k, True))
+            earned = sum(max(0.0, float(normalized[k].get("pts", 0) or 0)) for k in filter_order if enabled_map.get(k, True))
+            score = int(round((earned / enabled_total) * 100.0)) if enabled_total > 0 else 0
+            return max(0, min(100, score)), normalized
         if bar_time_obj:
             item["bar_time"] = bar_time_obj.isoformat(timespec="seconds") if hasattr(bar_time_obj, "isoformat") else str(bar_time_obj)
 
         # ── CALL probability score (0-100) — all 10 filters ──
         call_score = 0
         call_filters = {}
+
+        if ENTRY_TIME_WINDOW_ENABLED:
+            if in_trade_window:
+                call_score += 5
+                call_filters["time_window"] = {"passed": True, "note": "Inside configured trade window", "pts": 5}
+            else:
+                call_filters["time_window"] = {"passed": False, "note": "Outside configured trade window", "pts": 0}
+        else:
+            call_filters["time_window"] = {"passed": False, "note": "Disabled in config", "pts": 0}
 
         # 1. RSI MA cross (the trigger) — 20 pts
         if cross_up or prev_cross_up:
@@ -3924,12 +4037,56 @@ def get_signal_readiness() -> dict[str, Any]:
             call_score += 5
             call_filters["candle"] = {"passed": True, "note": "Candle filter disabled", "pts": 5}
 
-        item["call_score"] = min(100, max(0, call_score))
-        item["call_filters"] = call_filters
+        # 11. EMA triple-stack — 5 pts
+        if ENTRY_EMA_TRIPLE_STACK_ENABLED:
+            if ema_triple_bull:
+                call_score += 5
+                call_filters["ema_triple"] = {"passed": True, "note": "EMA9 > EMA21 > EMA55", "pts": 5}
+            else:
+                call_filters["ema_triple"] = {"passed": False, "note": "Triple stack not bullish", "pts": 0}
+        else:
+            call_filters["ema_triple"] = {"passed": False, "note": "Disabled in config", "pts": 0}
+
+        # 12. VWAP alignment — 5 pts
+        if ENTRY_VWAP_FILTER_ENABLED:
+            if price_above_vwap is True:
+                call_score += 5
+                call_filters["vwap"] = {"passed": True, "note": "Price above VWAP", "pts": 5}
+            elif price_above_vwap is False:
+                call_filters["vwap"] = {"passed": False, "note": "Price below VWAP", "pts": 0}
+            else:
+                call_filters["vwap"] = {"passed": False, "note": "VWAP unavailable", "pts": 0}
+        else:
+            call_filters["vwap"] = {"passed": False, "note": "Disabled in config", "pts": 0}
+
+        # 13. Price structure — 5 pts
+        if ENTRY_PRICE_STRUCTURE_ENABLED:
+            if price_structure_bullish:
+                call_score += 5
+                call_filters["price_structure"] = {"passed": True, "note": f"Bullish pattern ({price_structure})", "pts": 5}
+            elif price_structure_bearish:
+                call_filters["price_structure"] = {"passed": False, "note": f"Bearish pattern ({price_structure})", "pts": 0}
+            elif price_structure_neutral:
+                call_filters["price_structure"] = {"passed": False, "note": f"Neutral pattern ({price_structure})", "pts": 0}
+            else:
+                call_filters["price_structure"] = {"passed": False, "note": "No clear structure", "pts": 0}
+        else:
+            call_filters["price_structure"] = {"passed": False, "note": "Disabled in config", "pts": 0}
+
+        item["call_score"], item["call_filters"] = _normalize_side(call_filters)
 
         # ── PUT probability score (0-100) — all 10 filters ──
         put_score = 0
         put_filters = {}
+
+        if ENTRY_TIME_WINDOW_ENABLED:
+            if in_trade_window:
+                put_score += 5
+                put_filters["time_window"] = {"passed": True, "note": "Inside configured trade window", "pts": 5}
+            else:
+                put_filters["time_window"] = {"passed": False, "note": "Outside configured trade window", "pts": 0}
+        else:
+            put_filters["time_window"] = {"passed": False, "note": "Disabled in config", "pts": 0}
 
         # 1. RSI MA cross down — 20 pts
         if cross_down or prev_cross_down:
@@ -4062,16 +4219,81 @@ def get_signal_readiness() -> dict[str, Any]:
             put_score += 5
             put_filters["candle"] = {"passed": True, "note": "Candle filter disabled", "pts": 5}
 
-        item["put_score"] = min(100, max(0, put_score))
-        item["put_filters"] = put_filters
+        # 11. EMA triple-stack — 5 pts
+        if ENTRY_EMA_TRIPLE_STACK_ENABLED:
+            if ema_triple_bear:
+                put_score += 5
+                put_filters["ema_triple"] = {"passed": True, "note": "EMA9 < EMA21 < EMA55", "pts": 5}
+            else:
+                put_filters["ema_triple"] = {"passed": False, "note": "Triple stack not bearish", "pts": 0}
+        else:
+            put_filters["ema_triple"] = {"passed": False, "note": "Disabled in config", "pts": 0}
+
+        # 12. VWAP alignment — 5 pts
+        if ENTRY_VWAP_FILTER_ENABLED:
+            if price_above_vwap is False:
+                put_score += 5
+                put_filters["vwap"] = {"passed": True, "note": "Price below VWAP", "pts": 5}
+            elif price_above_vwap is True:
+                put_filters["vwap"] = {"passed": False, "note": "Price above VWAP", "pts": 0}
+            else:
+                put_filters["vwap"] = {"passed": False, "note": "VWAP unavailable", "pts": 0}
+        else:
+            put_filters["vwap"] = {"passed": False, "note": "Disabled in config", "pts": 0}
+
+        # 13. Price structure — 5 pts
+        if ENTRY_PRICE_STRUCTURE_ENABLED:
+            if price_structure_bearish:
+                put_score += 5
+                put_filters["price_structure"] = {"passed": True, "note": f"Bearish pattern ({price_structure})", "pts": 5}
+            elif price_structure_bullish:
+                put_filters["price_structure"] = {"passed": False, "note": f"Bullish pattern ({price_structure})", "pts": 0}
+            elif price_structure_neutral:
+                put_filters["price_structure"] = {"passed": False, "note": f"Neutral pattern ({price_structure})", "pts": 0}
+            else:
+                put_filters["price_structure"] = {"passed": False, "note": "No clear structure", "pts": 0}
+        else:
+            put_filters["price_structure"] = {"passed": False, "note": "Disabled in config", "pts": 0}
+
+        item["put_score"], item["put_filters"] = _normalize_side(put_filters)
+
+        # Readiness parity with backend entry logic:
+        # If determine_signal would enter now, force that side to 100.
+        signal_now, _, _, _ = determine_signal(rsi_result, close_price)
+        item["entry_signal"] = signal_now
+        if signal_now == "CALL":
+            item["call_score"] = 100
+            item["put_score"] = min(item["put_score"], 95)
+        elif signal_now == "PUT":
+            item["put_score"] = 100
+            item["call_score"] = min(item["call_score"], 95)
+
+        def _entry_block_reason() -> str | None:
+            if mode != "auto":
+                return "Symbol mode is not AIT"
+            if not AIT_ENABLED:
+                return "AIT disabled in config"
+            if not AIT_ENTRY_ENABLED:
+                return "AIT entry disabled (observe-only mode)"
+            if not _is_mkt_open_now():
+                return "Market closed"
+            return None
+
+        block_reason = _entry_block_reason()
+        item["execution_block_reason"] = block_reason
+        item["execution_blocked"] = bool(block_reason and signal_now in ("CALL", "PUT"))
 
         # Determine dominant signal & status
         cs = item["call_score"]
         ps = item["put_score"]
-        if cs == 100:
+        if signal_now == "CALL" and not block_reason:
             item["status"] = "CALL_READY"
-        elif ps == 100:
+        elif signal_now == "PUT" and not block_reason:
             item["status"] = "PUT_READY"
+        elif signal_now == "CALL" and block_reason:
+            item["status"] = "CALL_BLOCKED"
+        elif signal_now == "PUT" and block_reason:
+            item["status"] = "PUT_BLOCKED"
         elif cs >= 70:
             item["status"] = "CALL_WARMING"
         elif ps >= 70:
