@@ -3170,32 +3170,50 @@ def _manual_trade_monitor_thread(
 
         if exit_reason in market_fallback_reasons:
             print(f"[MT:{underlying}] {exit_reason} -> forcing MARKET sell")
-            sell_order = place_market_order(
-                tc,
-                contract_symbol,
-                qty,
-                OrderSide.SELL,
-                reference_price=opt_price,
-                allow_limit=False,
-            )
-            sell_order_id = str(sell_order.id)
-            mark_selling(buy_order_id, sell_order_id)
-            filled_sell = wait_for_fill(tc, sell_order_id, FILL_WAIT_SEC)
-            if filled_sell.status != OrderStatus.FILLED:
+            try:
+                close_resp = tc.close_position(contract_symbol)
+                sell_order_id = str(getattr(close_resp, "id", "") or "")
+                if sell_order_id:
+                    mark_selling(buy_order_id, sell_order_id)
+                    filled_sell = wait_for_fill(tc, sell_order_id, FILL_WAIT_SEC)
+                    if filled_sell.status != OrderStatus.FILLED:
+                        print(
+                            f"[MT:{underlying}] MARKET fallback close_position not filled "
+                            f"(status={filled_sell.status}) for {contract_symbol}. Re-monitoring."
+                        )
+                        time.sleep(CHECK_INTERVAL_SEC)
+                        continue
+
+                    sell_price = float(filled_sell.filled_avg_price or opt_price or 0)
+                    sell_filled_time_iso = (
+                        _to_iso(getattr(filled_sell, "filled_at", None))
+                        or datetime.now(CDT).isoformat(timespec="seconds")
+                    )
+                    close_position(buy_order_id)
+                    break
+
+                # Defensive: close_position may return no order object in edge cases.
                 print(
-                    f"[MT:{underlying}] MARKET fallback sell not filled "
-                    f"(status={filled_sell.status}) for {contract_symbol}. Re-monitoring."
+                    f"[MT:{underlying}] close_position returned no order id for {contract_symbol}. "
+                    "Treating as already closed."
+                )
+                close_position(buy_order_id)
+                return
+            except Exception as ex:
+                ex_str = str(ex).lower()
+                if "position does not exist" in ex_str or "404" in ex_str:
+                    print(
+                        f"[MT:{underlying}] Position already closed externally during fallback "
+                        f"for {contract_symbol}."
+                    )
+                    close_position(buy_order_id)
+                    return
+                print(
+                    f"[MT:{underlying}] close_position fallback failed for {contract_symbol}: {ex}. "
+                    "Re-monitoring."
                 )
                 time.sleep(CHECK_INTERVAL_SEC)
                 continue
-
-            sell_price = float(filled_sell.filled_avg_price or opt_price or 0)
-            sell_filled_time_iso = (
-                _to_iso(getattr(filled_sell, "filled_at", None))
-                or datetime.now(CDT).isoformat(timespec="seconds")
-            )
-            close_position(buy_order_id)
-            break
 
         print(
             f"[MT:{underlying}] Waiting for broker TP/SL child fill "

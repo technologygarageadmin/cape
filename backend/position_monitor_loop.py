@@ -138,6 +138,20 @@ def _parse_option(symbol: str) -> tuple[str | None, str | None]:
     return underlying, signal
 
 
+def _count_open_orders_for_symbol(tc: TradingClient, symbol: str) -> int:
+    """Return number of open broker orders for this symbol (best-effort)."""
+    try:
+        from alpaca.trading.requests import GetOrdersRequest
+        from alpaca.trading.enums import QueryOrderStatus
+
+        open_orders = tc.get_orders(
+            filter=GetOrdersRequest(status=QueryOrderStatus.OPEN, symbols=[symbol])
+        )
+        return len(open_orders or [])
+    except Exception:
+        return 0
+
+
 def _cancel_pending_orders_for_symbol(tc: TradingClient, symbol: str) -> int:
     """Cancel all open/pending orders for a given symbol. Returns count cancelled."""
     cancelled = 0
@@ -396,8 +410,34 @@ def run_monitor_all_positions() -> None:
                     continue
 
                 entry_price = float(getattr(pos, "avg_entry_price", 0.0) or 0.0)
-                qty = int(abs(float(getattr(pos, "qty", 0) or 0)))
+                qty_raw = float(getattr(pos, "qty", 0) or 0)
+                qty = int(abs(qty_raw))
                 if entry_price <= 0 or qty <= 0:
+                    continue
+
+                # Generic monitor is long-only. If an accidental short appears,
+                # flatten it immediately instead of applying long TP/SL logic.
+                if qty_raw < 0:
+                    ref_px = float(getattr(pos, "current_price", 0.0) or 0.0)
+                    info(
+                        f"[MONITOR] {symbol} detected unexpected SHORT qty={qty_raw}. "
+                        f"Forcing immediate cleanup close."
+                    )
+                    ok, _ = close_position(tc, symbol, qty, reference_price=ref_px if ref_px > 0 else None)
+                    if ok:
+                        info(f"[MONITOR] {symbol} short cleanup close completed")
+                    else:
+                        info(f"[MONITOR] {symbol} short cleanup close failed; will retry")
+                    continue
+
+                # If broker child orders already exist for this symbol, a dedicated
+                # monitor (AIT/MT/recovery) likely owns it. Skip generic attach.
+                open_order_count = _count_open_orders_for_symbol(tc, symbol)
+                if open_order_count > 0:
+                    info(
+                        f"[MONITOR] {symbol} has {open_order_count} open order(s) — "
+                        "skipping generic monitor attach"
+                    )
                     continue
 
                 if symbol not in active or not active[symbol].is_alive():
