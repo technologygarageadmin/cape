@@ -86,6 +86,29 @@ const isMarketOpen = () => {
 const fmt = (v) => v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
 const fmtVol = (v) => v >= 1_000_000 ? (v / 1_000_000).toFixed(2) + 'M' : v >= 1_000 ? (v / 1_000).toFixed(1) + 'K' : v
 const fmtPctSigned = (v) => `${v >= 0 ? '+' : ''}${Number(v || 0).toFixed(2)}%`
+const toNum = (v) => {
+  const n = Number(v)
+  return Number.isFinite(n) ? n : null
+}
+const fmtMoneyMaybe = (v) => {
+  const n = toNum(v)
+  return n == null ? '—' : `$${fmt(n)}`
+}
+const fmtPctMaybe = (v) => {
+  const n = toNum(v)
+  return n == null ? '—' : `${n >= 0 ? '+' : ''}${n.toFixed(2)}%`
+}
+const fmtTickTime = (value) => {
+  if (!value) return '—'
+  const d = new Date(value)
+  if (Number.isNaN(d.getTime())) return String(value)
+  return d.toLocaleTimeString('en-US', {
+    timeZone: 'America/Chicago',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  })
+}
 
 export default function TradingView() {
   const [selected, setSelected]       = useState(() => STOCK_SYMBOLS.find(s => s.symbol === 'TSLA') ?? STOCK_SYMBOLS[0])
@@ -596,9 +619,40 @@ export default function TradingView() {
       } catch (_) {}
     }
     fetchRegistry()
-    const id = setInterval(fetchRegistry, 5_000)
+    const id = setInterval(fetchRegistry, 2_000)
     return () => clearInterval(id)
   }, [])
+
+  // Resolve one canonical live price per contract so all widgets show the same number.
+  const resolveContractLivePrice = (contractSymbol, fallbackPrice = 0) => {
+    const contract = String(contractSymbol || '')
+    if (!contract) return Number(fallbackPrice) || 0
+
+    const registryPos = registryPositions.find(lp =>
+      String(lp.contract_symbol || lp.symbol || '') === contract
+    )
+    const registryPrice = toNum(registryPos?.live?.current_price)
+    if (registryPrice != null && registryPrice > 0) return registryPrice
+
+    if (manualPosition?.contractSymbol && String(manualPosition.contractSymbol) === contract) {
+      const manualLivePrice = toNum(contractPrice)
+      if (manualLivePrice != null && manualLivePrice > 0) return manualLivePrice
+    }
+
+    const alpacaPos = livePositions.find(p => String(p.symbol || '') === contract)
+    const alpacaPrice = toNum(alpacaPos?.current_price)
+    if (alpacaPrice != null && alpacaPrice > 0) return alpacaPrice
+
+    return Number(fallbackPrice) || 0
+  }
+
+  useEffect(() => {
+    if (!manualPosition?.contractSymbol) return
+    const syncedPrice = resolveContractLivePrice(manualPosition.contractSymbol, contractPrice)
+    if (syncedPrice > 0 && Math.abs(syncedPrice - Number(contractPrice || 0)) > 0.0001) {
+      setContractPrice(syncedPrice)
+    }
+  }, [manualPosition?.contractSymbol, registryPositions, livePositions, contractPrice]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Polling: append new bars as they arrive (no full re-fetch) ────────────
   useEffect(() => {
@@ -1488,11 +1542,134 @@ export default function TradingView() {
           />
         </div>
 
+        {/* ── Live Tick Stream for selected symbol ── */}
+        {(() => {
+          const symbolLive = registryPositions.filter(lp => {
+            const contract = String(lp.contract_symbol || lp.symbol || '')
+            return contract.startsWith(selected.symbol)
+          })
+          if (symbolLive.length === 0) return null
+
+          const activePos =
+            (manualPosition?.contractSymbol
+              ? symbolLive.find(lp => String(lp.contract_symbol || lp.symbol || '') === String(manualPosition.contractSymbol))
+              : null) || symbolLive[0]
+
+          const live = activePos?.live || {}
+          const contract = String(activePos?.contract_symbol || activePos?.symbol || '')
+          const timeline = Array.isArray(live.timeline) ? live.timeline : []
+          if (timeline.length === 0) return null
+
+          const recentTicks = timeline.slice(-180)
+          const fillPx = toNum(live.fill_price ?? activePos?.fill_price)
+
+          return (
+            <div style={{
+              background: '#fff',
+              border: '1px solid rgba(201,162,39,0.18)',
+              borderRadius: '14px',
+              overflow: 'hidden',
+              boxShadow: '0 2px 12px rgba(0,0,0,0.04)',
+            }}>
+              <div style={{
+                display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                padding: '0.78rem 1.1rem', borderBottom: '1px solid rgba(201,162,39,0.1)',
+                background: 'rgba(201,162,39,0.03)', flexWrap: 'wrap', gap: '0.4rem',
+              }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.45rem' }}>
+                  <Activity size={13} color={GOLD_DEEP} />
+                  <span style={{ fontSize: '0.74rem', fontWeight: 800, color: '#111', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+                    Live Tick Stream
+                  </span>
+                </div>
+                <span style={{ fontSize: '0.66rem', fontWeight: 700, color: '#9ca3af' }}>
+                  {contract} · {recentTicks.length} ticks
+                </span>
+              </div>
+
+              <div style={{ overflowX: 'auto', overflowY: 'auto', maxHeight: '240px' }}>
+                <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: '1120px', fontSize: '0.67rem' }}>
+                  <thead>
+                    <tr style={{ background: '#fdfaf4', position: 'sticky', top: 0, zIndex: 1 }}>
+                      {['Time', 'Src', 'Sellable', 'Bid', 'Mid', 'PnL%', 'QP LMT', 'QP DYN%', 'Trailing SL Dyn', 'Peak', 'Peak Px', 'TP', 'SL Action', 'SL Update', 'Armed', 'Orders'].map((h) => (
+                        <th key={h} style={{ padding: '0.3rem 0.38rem', textAlign: 'left', color: '#888', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.04em', borderBottom: '1px solid rgba(0,0,0,0.08)', whiteSpace: 'nowrap' }}>
+                          {h}
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {recentTicks.map((tick, idx) => {
+                      const isOrder = tick.source === 'order_placed' || tick.source === 'order_replaced'
+                      const isSell = tick.source === 'sell'
+                      const src = String(isSell ? (tick.exit_reason || 'sell') : (tick.source || 'tick')).toUpperCase()
+                      const peakPct = toNum(tick.max_pnl_pct)
+                      const peakPx = fillPx != null && peakPct != null ? fillPx * (1 + peakPct / 100) : null
+                      const rowBg = isSell
+                        ? 'rgba(239,68,68,0.08)'
+                        : isOrder
+                          ? 'rgba(217,119,6,0.06)'
+                          : idx % 2 === 0
+                            ? '#fff'
+                            : '#fcfcfc'
+                      const orderBadges = [tick.live_qp ? 'QP' : '', tick.live_sl ? 'SL' : '', tick.live_tsl ? 'TSL' : '']
+                        .filter(Boolean)
+                        .join(', ')
+
+                      return (
+                        <tr key={`${tick.ts || idx}-${idx}`} style={{ borderBottom: '1px solid rgba(0,0,0,0.04)', background: rowBg }}>
+                          <td style={{ padding: '0.26rem 0.38rem', fontFamily: 'monospace', color: '#555', whiteSpace: 'nowrap' }}>{fmtTickTime(tick.ts)}</td>
+                          <td style={{ padding: '0.26rem 0.38rem', fontFamily: 'monospace', color: isSell ? '#ef4444' : '#6b7280', fontWeight: 700, whiteSpace: 'nowrap' }}>{src}</td>
+                          <td style={{ padding: '0.26rem 0.38rem', fontFamily: 'monospace', color: '#111', fontWeight: 700, whiteSpace: 'nowrap' }}>
+                            {!isOrder ? fmtMoneyMaybe(tick.sellable_price) : (tick.fill_price != null ? fmtMoneyMaybe(tick.fill_price) : fmtMoneyMaybe(tick.limit_price))}
+                          </td>
+                          <td style={{ padding: '0.26rem 0.38rem', fontFamily: 'monospace', color: '#666', whiteSpace: 'nowrap' }}>
+                            {!isOrder ? fmtMoneyMaybe(tick.bid_price) : (tick.stop_price != null ? `stop ${fmtMoneyMaybe(tick.stop_price)}` : '—')}
+                          </td>
+                          <td style={{ padding: '0.26rem 0.38rem', fontFamily: 'monospace', color: '#666', whiteSpace: 'nowrap' }}>
+                            {!isOrder ? fmtMoneyMaybe(tick.mid_price) : (tick.limit_price != null ? `lmt ${fmtMoneyMaybe(tick.limit_price)}` : '—')}
+                          </td>
+                          <td style={{ padding: '0.26rem 0.38rem', fontFamily: 'monospace', color: Number(tick.pnl_pct ?? tick.pct ?? 0) >= 0 ? '#16a34a' : '#dc2626', fontWeight: 700, whiteSpace: 'nowrap' }}>
+                            {fmtPctMaybe(tick.pnl_pct ?? tick.pct)}
+                          </td>
+                          <td style={{ padding: '0.26rem 0.38rem', fontFamily: 'monospace', color: '#d97706', whiteSpace: 'nowrap' }}>{fmtMoneyMaybe(tick.qp_limit_price)}</td>
+                          <td style={{ padding: '0.26rem 0.38rem', fontFamily: 'monospace', color: '#d97706', whiteSpace: 'nowrap' }}>{fmtPctMaybe(tick.qp_dynamic_pct)}</td>
+                          <td style={{ padding: '0.26rem 0.38rem', fontFamily: 'monospace', color: '#ef4444', whiteSpace: 'nowrap' }}>{fmtPctMaybe(tick.sl_dynamic_pct)}</td>
+                          <td style={{ padding: '0.26rem 0.38rem', fontFamily: 'monospace', color: '#6366f1', whiteSpace: 'nowrap' }}>{fmtPctMaybe(tick.max_pnl_pct)}</td>
+                          <td style={{ padding: '0.26rem 0.38rem', fontFamily: 'monospace', color: '#6366f1', whiteSpace: 'nowrap' }}>{peakPx != null ? fmtMoneyMaybe(peakPx) : '—'}</td>
+                          <td style={{ padding: '0.26rem 0.38rem', fontFamily: 'monospace', color: '#666', whiteSpace: 'nowrap' }}>{tick.tp_action || 'NO_CHANGE'}</td>
+                          <td style={{ padding: '0.26rem 0.38rem', fontFamily: 'monospace', color: tick.sl_action === 'UPDATED' ? '#dc2626' : '#666', fontWeight: 700, whiteSpace: 'nowrap' }}>
+                            {isOrder ? String(tick.order_type || 'ORDER').toUpperCase() : (tick.sl_action || 'NO_CHANGE')}
+                          </td>
+                          <td style={{ padding: '0.26rem 0.38rem', fontFamily: 'monospace', color: '#555', whiteSpace: 'nowrap' }}>
+                            {isOrder
+                              ? `${String(tick.status || 'live').toUpperCase()}${tick.order_id ? ` · ${String(tick.order_id).slice(0, 8)}…` : ''}`
+                              : tick.sl_action === 'UPDATED'
+                                ? `${fmtMoneyMaybe(tick.sl_prev_price)} -> ${fmtMoneyMaybe(tick.sl_new_price)}`
+                                : 'No change'}
+                          </td>
+                          <td style={{ padding: '0.26rem 0.38rem', textAlign: 'center', color: '#d97706', fontWeight: 800 }}>{tick.qp_armed ? '✓' : '—'}</td>
+                          <td style={{ padding: '0.26rem 0.38rem', fontFamily: 'monospace', color: '#666', whiteSpace: 'nowrap' }}>
+                            {isOrder ? (String(tick.order_count || '').trim() ? `#${tick.order_count}` : '—') : (orderBadges || '—')}
+                          </td>
+                        </tr>
+                      )
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )
+        })()}
+
         {/* ── Live Open Positions for selected symbol ── */}
         {(() => {
           const basePositions = livePositions.filter(p =>
             p.symbol && p.symbol.startsWith(selected.symbol)
           )
+          const manualLivePrice = manualPosition?.contractSymbol
+            ? resolveContractLivePrice(manualPosition.contractSymbol, manualPosition.fillPrice)
+            : 0
           const optimisticManual =
             manualPosition?.contractSymbol &&
             String(manualPosition.contractSymbol).startsWith(selected.symbol) &&
@@ -1503,10 +1680,10 @@ export default function TradingView() {
                   side: 'long',
                   entry_time: new Date().toISOString(),
                   avg_entry_price: Number(manualPosition.fillPrice) || 0,
-                  current_price: Number(contractPrice) || Number(manualPosition.fillPrice) || 0,
-                  unrealized_pl: ((Number(contractPrice) || Number(manualPosition.fillPrice) || 0) - (Number(manualPosition.fillPrice) || 0)) * ((Number(manualPosition.qty) || 1) * 100),
+                  current_price: Number(manualLivePrice) || Number(manualPosition.fillPrice) || 0,
+                  unrealized_pl: ((Number(manualLivePrice) || Number(manualPosition.fillPrice) || 0) - (Number(manualPosition.fillPrice) || 0)) * ((Number(manualPosition.qty) || 1) * 100),
                   unrealized_plpc: (Number(manualPosition.fillPrice) || 0) > 0
-                    ? (((Number(contractPrice) || Number(manualPosition.fillPrice) || 0) - (Number(manualPosition.fillPrice) || 0)) / (Number(manualPosition.fillPrice) || 1))
+                    ? (((Number(manualLivePrice) || Number(manualPosition.fillPrice) || 0) - (Number(manualPosition.fillPrice) || 0)) / (Number(manualPosition.fillPrice) || 1))
                     : 0,
                 }]
               : []
@@ -1535,7 +1712,7 @@ export default function TradingView() {
                     {symPositions.length}
                   </span>
                 </div>
-                <span style={{ fontSize: '0.7rem', color: '#bbb', fontWeight: 600 }}>Live · sync every 5 s</span>
+                <span style={{ fontSize: '0.7rem', color: '#bbb', fontWeight: 600 }}>Live · sync every 2 s</span>
               </div>
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))', gap: '0.85rem', padding: '1rem 1.5rem' }}>
                 {symPositions.map((p, i) => {
@@ -1545,7 +1722,10 @@ export default function TradingView() {
                   const live = livePos?.live || null
                   const qtyNum = Number(live?.qty ?? p.qty) || 0
                   const entryPrice = Number(live?.fill_price ?? p.avg_entry_price) || 0
-                  const currentPrice = Number(live?.current_price ?? p.current_price) || 0
+                  const currentPrice = resolveContractLivePrice(
+                    p.symbol,
+                    Number(live?.current_price ?? p.current_price) || 0
+                  )
                   const livePnlPct = Number(live?.pnl_pct)
                   const livePnlDollar = Number(live?.pnl_dollar)
                   const uPlPct = Number.isFinite(livePnlPct)
@@ -2203,15 +2383,27 @@ export default function TradingView() {
 
           {/* Contract Tracker */}
           {(() => {
-            // Fall back to livePositions for the selected symbol when no manualPosition is active
+            const registryPos = registryPositions.find(lp =>
+              String(lp.contract_symbol || lp.symbol || '').startsWith(selected.symbol)
+            )
             const livePos = livePositions.find(p => p.symbol?.startsWith(selected.symbol))
-            const trackedPos = manualPosition || (livePos ? {
-              contractSymbol: livePos.symbol,
-              fillPrice: Number(livePos.avg_entry_price) || 0,
-              qty: Number(livePos.qty) || 1,
+            const fallbackPos = registryPos || livePos
+
+            const trackedPos = manualPosition || (fallbackPos ? {
+              contractSymbol: fallbackPos.contract_symbol || fallbackPos.symbol,
+              fillPrice: Number(fallbackPos.fill_price ?? fallbackPos.avg_entry_price) || 0,
+              qty: Number(fallbackPos.qty) || 1,
             } : null)
-            const trackedPrice = manualPosition ? contractPrice : (livePos ? Number(livePos.current_price) || 0 : 0)
-            const trackedPnl = trackedPos ? (trackedPrice - trackedPos.fillPrice) * trackedPos.qty * 100 : 0
+
+            const trackedPrice = trackedPos
+              ? resolveContractLivePrice(
+                  trackedPos.contractSymbol,
+                  Number(registryPos?.live?.current_price ?? livePos?.current_price) || Number(trackedPos.fillPrice) || 0
+                )
+              : 0
+            const trackedPnl = trackedPos
+              ? (trackedPrice - Number(trackedPos.fillPrice || 0)) * (Number(trackedPos.qty || 1) * 100)
+              : 0
 
             return (
           <div style={{ background: '#fff', border: '1px solid rgba(201,162,39,0.15)', borderRadius: '14px', padding: '1.25rem', boxShadow: '0 2px 12px rgba(0,0,0,0.04)' }}>
@@ -2261,6 +2453,94 @@ export default function TradingView() {
               </div>
             ))}
           </div>
+            )
+          })()}
+
+          {/* Right panel compact tick log */}
+          {(() => {
+            const symbolLive = registryPositions.filter(lp => {
+              const contract = String(lp.contract_symbol || lp.symbol || '')
+              return contract.startsWith(selected.symbol)
+            })
+            if (symbolLive.length === 0) return null
+
+            const activePos =
+              (manualPosition?.contractSymbol
+                ? symbolLive.find(lp => String(lp.contract_symbol || lp.symbol || '') === String(manualPosition.contractSymbol))
+                : null) || symbolLive[0]
+
+            const live = activePos?.live || {}
+            const contract = String(activePos?.contract_symbol || activePos?.symbol || '')
+            const timeline = Array.isArray(live.timeline) ? live.timeline : []
+            if (timeline.length === 0) return null
+
+            const fillPx = toNum(live.fill_price ?? activePos?.fill_price)
+            const ticks = [...timeline].slice(-90).reverse()
+
+            return (
+              <div style={{
+                background: '#fff',
+                border: '1px solid rgba(201,162,39,0.15)',
+                borderRadius: '14px',
+                overflow: 'hidden',
+                boxShadow: '0 2px 12px rgba(0,0,0,0.04)',
+              }}>
+                <div style={{
+                  display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                  padding: '0.72rem 0.9rem', borderBottom: '1px solid rgba(201,162,39,0.1)',
+                  background: 'rgba(201,162,39,0.03)', gap: '0.45rem',
+                }}>
+                  <span style={{ fontSize: '0.68rem', fontWeight: 800, color: '#111', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                    Tick Log
+                  </span>
+                  <span style={{ fontSize: '0.6rem', color: '#9ca3af', fontWeight: 700, maxWidth: '130px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={contract}>
+                    {contract}
+                  </span>
+                </div>
+
+                <div style={{ overflowX: 'auto', overflowY: 'auto', maxHeight: '255px' }}>
+                  <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: '560px', fontSize: '0.62rem' }}>
+                    <thead>
+                      <tr style={{ background: '#fdfaf4', position: 'sticky', top: 0, zIndex: 1 }}>
+                        {['Time', 'Src', 'Price', 'PnL%', 'Peak%', 'Peak Px'].map(h => (
+                          <th key={h} style={{ padding: '0.24rem 0.35rem', textAlign: 'left', fontWeight: 800, color: '#888', borderBottom: '1px solid rgba(0,0,0,0.08)', whiteSpace: 'nowrap', textTransform: 'uppercase', letterSpacing: '0.04em' }}>{h}</th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {ticks.map((tick, idx) => {
+                        const isOrder = tick.source === 'order_placed' || tick.source === 'order_replaced'
+                        const isSell = tick.source === 'sell'
+                        const src = String(isSell ? (tick.exit_reason || 'sell') : (tick.source || 'tick')).toUpperCase()
+                        const price = !isOrder
+                          ? (tick.sellable_price ?? tick.mid_price ?? tick.bid_price)
+                          : (tick.fill_price ?? tick.limit_price)
+                        const pnlRaw = tick.pnl_pct ?? tick.pct
+                        const peakPct = toNum(tick.max_pnl_pct)
+                        const peakPx = fillPx != null && peakPct != null ? fillPx * (1 + peakPct / 100) : null
+                        const rowBg = isSell
+                          ? 'rgba(239,68,68,0.08)'
+                          : isOrder
+                            ? 'rgba(217,119,6,0.06)'
+                            : idx % 2 === 0
+                              ? '#fff'
+                              : '#fcfcfc'
+
+                        return (
+                          <tr key={`${tick.ts || idx}-${idx}`} style={{ background: rowBg, borderBottom: '1px solid rgba(0,0,0,0.04)' }}>
+                            <td style={{ padding: '0.22rem 0.35rem', fontFamily: 'monospace', color: '#555', whiteSpace: 'nowrap' }}>{fmtTickTime(tick.ts)}</td>
+                            <td style={{ padding: '0.22rem 0.35rem', fontFamily: 'monospace', color: isSell ? '#ef4444' : '#6b7280', fontWeight: 700, whiteSpace: 'nowrap' }}>{src}</td>
+                            <td style={{ padding: '0.22rem 0.35rem', fontFamily: 'monospace', color: '#111', fontWeight: 700, whiteSpace: 'nowrap' }}>{fmtMoneyMaybe(price)}</td>
+                            <td style={{ padding: '0.22rem 0.35rem', fontFamily: 'monospace', color: Number(pnlRaw ?? 0) >= 0 ? '#16a34a' : '#dc2626', fontWeight: 700, whiteSpace: 'nowrap' }}>{fmtPctMaybe(pnlRaw)}</td>
+                            <td style={{ padding: '0.22rem 0.35rem', fontFamily: 'monospace', color: '#6366f1', whiteSpace: 'nowrap' }}>{fmtPctMaybe(tick.max_pnl_pct)}</td>
+                            <td style={{ padding: '0.22rem 0.35rem', fontFamily: 'monospace', color: '#6366f1', whiteSpace: 'nowrap' }}>{peakPx != null ? fmtMoneyMaybe(peakPx) : '—'}</td>
+                          </tr>
+                        )
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
             )
           })()}
         </div>

@@ -14,14 +14,14 @@ from alpaca_helpers import (
 )
 from config import (
     API_KEY,
+    CAPE_MAX_TIGHTEN_PCT,
+    CAPE_QP_OFFSET,
     EXIT_BRACKET_QP_ENABLED,
     EXIT_ALLOW_POSITIVE_PNL_IN_ENTRY_CANDLE,
     EXIT_BAD_ENTRY_ENABLED,
     EXIT_BAD_ENTRY_EXIT_THRESHOLD_PCT,
     EXIT_BAD_ENTRY_MAX_PEAK_PCT,
     EXIT_BAD_ENTRY_WINDOW_SEC,
-    EXIT_BREAKEVEN_ENABLED,
-    EXIT_BREAKEVEN_TRIGGER_PCT,
     EXIT_MAX_HOLD_ENABLED,
     EXIT_MAX_HOLD_SEC,
     EXIT_MAX_HOLD_PNL_THRESHOLD_PCT,
@@ -606,7 +606,6 @@ def _update_dynamic_thresholds(
 
     max_pnl_pct = float(exit_state.get("max_pnl_pct", 0.0))
     sl_static_pct = float(exit_state.get("sl_static_pct", 0.0))
-    qp_gap_pct = float(exit_state.get("qp_gap_pct", 0.0))
     tp_pct = float(exit_state.get("tp_pct", 0.0))
     prev_sl_pct = float(exit_state.get("sl_dynamic_pct", sl_static_pct))
 
@@ -627,57 +626,82 @@ def _update_dynamic_thresholds(
         "sl_update_reason": None,
     }
 
-    # ── Breakeven stop: once peak reaches trigger, floor SL at 0% ──
-    # Prevents giving back all gains on trades that showed real promise.
-    if EXIT_BREAKEVEN_ENABLED and max_pnl_pct >= EXIT_BREAKEVEN_TRIGGER_PCT:
-        sl_floor = 0.0  # breakeven
-        exit_state["sl_dynamic_pct"] = max(float(exit_state.get("sl_dynamic_pct", sl_static_pct)), sl_floor)
+    def _price_to_pct(price: float | None) -> float | None:
+        if fill_price <= 0 or price is None:
+            return None
+        return ((float(price) / fill_price) - 1.0) * 100.0
 
-    # ── Scaled trailing SL ──
-    # Trail tightens as profit grows: 60% at <3%, 50% at 3-5%, 40% at 5-7%, 35% at 7%+
-    # Tighter low-peak trail (60%) keeps more profit on small moves that tend to reverse.
-    if max_pnl_pct > 0:
-        if max_pnl_pct >= 7.0:
-            trail_ratio = 0.35
-        elif max_pnl_pct >= 5.0:
-            trail_ratio = 0.40
-        elif max_pnl_pct >= 3.0:
-            trail_ratio = 0.50
+    existing_sl_pct = float(exit_state.get("sl_dynamic_pct", sl_static_pct))
+    existing_sl_price = _pct_to_price(existing_sl_pct)
+
+    mode = "LOSS"
+    qp_price = None
+    sl_candidate_price = existing_sl_price
+
+    if fill_price > 0 and current_price is not None:
+        live_price = float(current_price)
+        if live_price > fill_price:
+            # PROFIT MODE: QP is the SL driver (fast trailing).
+            mode = "PROFIT"
+            qp_price = round(live_price - CAPE_QP_OFFSET, 2)
+            sl_candidate_price = max(existing_sl_price, qp_price)
+
+            qp_candidate_pct = _price_to_pct(qp_price)
+            if qp_candidate_pct is not None:
+                exit_state["qp_dynamic_pct"] = qp_candidate_pct
+                if qp_candidate_pct > 0.0 and not bool(exit_state.get("qp_armed", False)):
+                    exit_state["qp_armed"] = True
+                    exit_state["qp_arm_time"] = tick_ts or _iso_now_utc()
+                    exit_state["qp_arm_price"] = round(live_price, 4)
+                    exit_state["qp_arm_pnl_pct"] = round(float(pnl_pct), 4)
+                    exit_state["qp_arm_peak_pct"] = round(float(max_pnl_pct), 4)
         else:
-            trail_ratio = 0.60
-        trail_pct = max(sl_static_pct, -(max_pnl_pct * trail_ratio))
-        candidate_sl = max_pnl_pct + trail_pct
-        exit_state["sl_dynamic_pct"] = max(float(exit_state.get("sl_dynamic_pct", sl_static_pct)), candidate_sl)
+            # LOSS MODE: disable QP and tighten SL only.
+            exit_state["qp_dynamic_pct"] = 0.0
+            drawdown_pct = max(0.0, ((fill_price - live_price) / fill_price) * 100.0)
+            tighten_pct = min(drawdown_pct, CAPE_MAX_TIGHTEN_PCT)
+            cape_sl_loss_pct = min(0.0, sl_static_pct + tighten_pct)
+            cape_sl_loss_price = _pct_to_price(cape_sl_loss_pct)
+            if cape_sl_loss_price is not None:
+                sl_candidate_price = max(existing_sl_price, cape_sl_loss_price)
 
-    # Ratchet quick-profit lock upward — never reduced.
-    # qp_dynamic = peak - gap, so if peak = 2.35% and gap = 0.25%, QP = 2.10%.
-    # QP is used only as an SL floor; it does not place its own exit order.
-    candidate_qp = max_pnl_pct - qp_gap_pct
-    # Only ratchet up, never down. Ignore negative candidates (too early).
-    if candidate_qp > float(exit_state.get("qp_dynamic_pct", 0.0)):
-        exit_state["qp_dynamic_pct"] = candidate_qp
-        current_sl = float(exit_state.get("sl_dynamic_pct", sl_static_pct))
-        exit_state["sl_dynamic_pct"] = max(current_sl, candidate_qp)
-
-    # Capture first arm event with the actual arm price and pnl.
-    if candidate_qp > 0.0 and not bool(exit_state.get("qp_armed", False)):
-        exit_state["qp_armed"] = True
-        exit_state["qp_arm_time"] = tick_ts or _iso_now_utc()
-        exit_state["qp_arm_price"] = round(float(current_price), 4) if current_price is not None else None
-        exit_state["qp_arm_pnl_pct"] = round(float(pnl_pct), 4)
-        exit_state["qp_arm_peak_pct"] = round(float(max_pnl_pct), 4)
+    if sl_candidate_price is not None:
+        sl_candidate_pct = _price_to_pct(sl_candidate_price)
+        if sl_candidate_pct is not None:
+            exit_state["sl_dynamic_pct"] = max(existing_sl_pct, sl_candidate_pct)
 
     current_sl_pct = float(exit_state.get("sl_dynamic_pct", sl_static_pct))
-    if current_sl_pct > prev_sl_pct:
+    profit_sl_moved = (
+        mode == "PROFIT"
+        and qp_price is not None
+        and existing_sl_price is not None
+        and qp_price > existing_sl_price
+    )
+    loss_sl_moved = mode != "PROFIT" and current_sl_pct > prev_sl_pct
+    if profit_sl_moved or loss_sl_moved:
         tick_actions["sl_action"] = "UPDATED"
         tick_actions["sl_new_pct"] = round(current_sl_pct, 4)
         tick_actions["sl_new_price"] = _pct_to_price(current_sl_pct)
-        tick_actions["sl_update_reason"] = "QP_OR_TRAILING_PUSH"
+        if mode == "PROFIT":
+            tick_actions["sl_update_reason"] = "QP_PRIMARY_PUSH"
+        else:
+            tick_actions["sl_update_reason"] = "LOSS_TIGHTEN_PUSH"
 
     # ── SL stop-limit order: keep exactly one live order at current dynamic SL ──
     sl_last_placed = exit_state.get("sl_last_placed_pct")
+    sl_last_placed_price = (
+        _pct_to_price(float(sl_last_placed))
+        if sl_last_placed is not None
+        else None
+    )
+    profit_sl_replace = (
+        mode == "PROFIT"
+        and qp_price is not None
+        and sl_last_placed_price is not None
+        and qp_price > sl_last_placed_price
+    )
     sl_order_result = None
-    if sl_last_placed is None or current_sl_pct > float(sl_last_placed):
+    if sl_last_placed is None or profit_sl_replace or (mode != "PROFIT" and current_sl_pct > float(sl_last_placed)):
         sl_order_result = _place_sl_stop_order(tc, exit_state, contract_symbol, qty)
 
     if tick_actions["sl_action"] == "UPDATED":
