@@ -1,5 +1,6 @@
 import time
 import threading
+import re
 from datetime import datetime, timezone
 from alpaca.trading.enums import OrderClass, OrderSide, OrderStatus, TimeInForce
 from alpaca.trading.requests import LimitOrderRequest, MarketOrderRequest, ReplaceOrderRequest, StopLimitOrderRequest, StopLossRequest, TakeProfitRequest
@@ -12,6 +13,22 @@ from config import (
     SL_STOP_ORDERS_ENABLED,
 )
 from logger import debug, info
+
+try:
+    from alpaca.trading.enums import PositionIntent
+except Exception:  # pragma: no cover
+    PositionIntent = None  # type: ignore
+
+_OPTION_CONTRACT_RE = re.compile(r"^[A-Z]{1,6}\d{6}[CP]\d{8}$")
+
+
+def _is_option_contract_symbol(sym: str | None) -> bool:
+    s = str(sym or "").strip().upper()
+    return bool(s and _OPTION_CONTRACT_RE.match(s))
+
+# Cache whether bracket/complex orders are supported for options in this environment.
+# None = unknown, True = supported, False = not supported (avoid retrying)
+_bracket_options_supported: bool | None = None
 
 # ---------------------------------------------------------------------------
 # Position registry — tracks every open lot by its Alpaca buy_order_id.
@@ -224,8 +241,9 @@ def upsert_broker_safety_sl(
     if trading_client is None or not contract_symbol or fill_price <= 0:
         return None
 
-    stop_price = round(float(fill_price) * (1.0 + float(sl_dynamic_pct) / 100.0), 4)
-    limit_price = round(stop_price * (1.0 - SL_STOP_LIMIT_BUFFER_PCT / 100.0), 4)
+    # Round prices to 2 decimals for broker order payloads (Alpaca requires 2-decimal limit prices)
+    stop_price = round(float(fill_price) * (1.0 + float(sl_dynamic_pct) / 100.0), 2)
+    limit_price = round(stop_price * (1.0 - SL_STOP_LIMIT_BUFFER_PCT / 100.0), 2)
 
     with _live_exit_lock:
         live = _live_exit_states.get(buy_order_id)
@@ -252,16 +270,50 @@ def upsert_broker_safety_sl(
             return existing_order_id
     else:
         try:
+            # Ensure qty is valid; derive fallback quantity from open positions if possible.
+            try:
+                qty_int = int(qty or 0)
+            except Exception:
+                qty_int = 0
+
+            if qty_int <= 0:
+                try:
+                    from order_execution import get_open_positions
+                    pos_qty = 0
+                    for p in get_open_positions():
+                        if str(p.get("contract_symbol") or "") == str(contract_symbol):
+                            try:
+                                pos_qty = int(p.get("qty", 0) or 0)
+                                break
+                            except Exception:
+                                continue
+                    if pos_qty > 0:
+                        qty_int = pos_qty
+                except Exception:
+                    pass
+
+            if qty_int <= 0:
+                qty_int = 1
+                info(f"[REGISTRY] Safety SL qty invalid ({qty}) — falling back to qty=1 for {contract_symbol}")
+
             # Use stop-market (StopLossRequest) to reduce gap-down miss risk.
-            order = trading_client.submit_order(
-                StopLossRequest(
-                    symbol=contract_symbol,
-                    qty=qty,
-                    side=OrderSide.SELL,
-                    time_in_force=TimeInForce.DAY,
-                    stop_price=stop_price,
-                )
+            extra_intent: dict = {}
+            if PositionIntent is not None and _is_option_contract_symbol(contract_symbol):
+                extra_intent["position_intent"] = PositionIntent.SELL_TO_CLOSE
+
+            req = StopLossRequest(
+                symbol=contract_symbol,
+                qty=qty_int,
+                side=OrderSide.SELL,
+                time_in_force=TimeInForce.DAY,
+                stop_price=stop_price,
+                **extra_intent,
             )
+            try:
+                info(f"[REGISTRY] Submitting Safety StopLossRequest payload: {req.__dict__}")
+            except Exception:
+                pass
+            order = trading_client.submit_order(req)
             new_order_id = str(getattr(order, "id", "") or "")
         except Exception as ex:
             info(f"[REGISTRY] Safety SL submit failed for {buy_order_id}: {ex}")
@@ -269,16 +321,20 @@ def upsert_broker_safety_sl(
             err = str(ex or "").lower()
             if "qty or notional" in err or "qty or notional is required" in err:
                 try:
-                    notional = round(float(stop_price) * 100.0 * float(qty), 2)
-                    order = trading_client.submit_order(
-                        StopLossRequest(
-                            symbol=contract_symbol,
-                            notional=notional,
-                            side=OrderSide.SELL,
-                            time_in_force=TimeInForce.DAY,
-                            stop_price=stop_price,
-                        )
+                    notional = round(float(stop_price) * 100.0 * float(qty_int), 2)
+                    req2 = StopLossRequest(
+                        symbol=contract_symbol,
+                        notional=notional,
+                        side=OrderSide.SELL,
+                        time_in_force=TimeInForce.DAY,
+                        stop_price=stop_price,
+                        **extra_intent,
                     )
+                    try:
+                        info(f"[REGISTRY] Submitting Safety StopLossRequest (notional fallback): {req2.__dict__}")
+                    except Exception:
+                        pass
+                    order = trading_client.submit_order(req2)
                     new_order_id = str(getattr(order, "id", "") or "")
                 except Exception as ex2:
                     info(f"[REGISTRY] Safety SL notional fallback failed for {buy_order_id}: {ex2}")
@@ -330,6 +386,11 @@ def place_market_order(
     stop_loss_price: float | None = None,
 ):
     tif = _resolve_time_in_force()
+    # Determine whether to attempt bracket orders. If we previously detected
+    # that options do not support complex/bracket orders in this environment,
+    # skip attempting bracket orders for option contracts to avoid repeated
+    # rejections from the broker.
+    global _bracket_options_supported
     use_bracket = bool(
         use_bracket
         and str(side).upper().endswith("BUY")
@@ -338,6 +399,9 @@ def place_market_order(
         and take_profit_price > 0
         and stop_loss_price > 0
     )
+
+    if _is_option_contract_symbol(contract_symbol) and _bracket_options_supported is False:
+        use_bracket = False
 
     def _supports_complex_orders_error(ex: Exception) -> bool:
         message = str(ex).lower()
@@ -349,10 +413,26 @@ def place_market_order(
 
     def _submit(request):
         try:
-            return trading_client.submit_order(request)
+            order = trading_client.submit_order(request)
+            # If we submitted a bracket order successfully for an option contract,
+            # mark that options support complex/bracket orders so future attempts
+            # will skip the fallback path.
+            try:
+                if use_bracket and _is_option_contract_symbol(contract_symbol):
+                    _bracket_options_supported = True
+            except Exception:
+                pass
+            return order
         except Exception as ex:
             if use_bracket and _supports_complex_orders_error(ex):
                 info("Bracket order rejected for options; retrying without complex legs")
+                # mark options as not supporting bracket/complex orders to avoid
+                # trying again for subsequent orders
+                try:
+                    if _is_option_contract_symbol(contract_symbol):
+                        _bracket_options_supported = False
+                except Exception:
+                    pass
                 plain_kwargs = dict(request.__dict__)
                 plain_kwargs.pop("order_class", None)
                 plain_kwargs.pop("take_profit", None)
@@ -364,17 +444,26 @@ def place_market_order(
     if use_bracket:
         bracket_kwargs = {
             "order_class": OrderClass.BRACKET,
-            "take_profit": TakeProfitRequest(limit_price=round(float(take_profit_price), 4)),
-            "stop_loss": StopLossRequest(stop_price=round(float(stop_loss_price), 4)),
+            "take_profit": TakeProfitRequest(limit_price=round(float(take_profit_price), 2)),
+            "stop_loss": StopLossRequest(stop_price=round(float(stop_loss_price), 2)),
         }
+
+    extra_intent: dict = {}
+    if PositionIntent is not None and _is_option_contract_symbol(contract_symbol):
+        # Required so SELL is treated as "sell to close" rather than opening a short option.
+        side_s = str(side).lower()
+        if "sell" in side_s:
+            extra_intent["position_intent"] = PositionIntent.SELL_TO_CLOSE
+        else:
+            extra_intent["position_intent"] = PositionIntent.BUY_TO_OPEN
 
     if force_limit:
         if reference_price and reference_price > 0:
             offset = max(0.0, float(force_limit_offset_pct or 0.0))
             if str(side).upper().endswith("BUY"):
-                limit_price = round(reference_price * (1 + offset), 4)
+                limit_price = round(reference_price * (1 + offset), 2)
             else:
-                limit_price = round(reference_price * (1 - offset), 4)
+                limit_price = round(reference_price * (1 - offset), 2)
 
             return _submit(
                 LimitOrderRequest(
@@ -383,6 +472,7 @@ def place_market_order(
                     side=side,
                     time_in_force=tif,
                     limit_price=limit_price,
+                    **extra_intent,
                     **bracket_kwargs,
                 )
             )
@@ -394,20 +484,21 @@ def place_market_order(
 
     if allow_limit and ENTRY_ORDER_TYPE == "limit" and reference_price and reference_price > 0:
         if str(side).upper().endswith("BUY"):
-            limit_price = round(reference_price * (1 + ENTRY_LIMIT_OFFSET_PCT), 4)
+            limit_price = round(reference_price * (1 + ENTRY_LIMIT_OFFSET_PCT), 2)
         else:
-            limit_price = round(reference_price * (1 - ENTRY_LIMIT_OFFSET_PCT), 4)
+            limit_price = round(reference_price * (1 - ENTRY_LIMIT_OFFSET_PCT), 2)
 
-        return _submit(
-            LimitOrderRequest(
-                symbol=contract_symbol,
-                qty=qty,
-                side=side,
-                time_in_force=tif,
-                limit_price=limit_price,
-                **bracket_kwargs,
+            return _submit(
+                LimitOrderRequest(
+                    symbol=contract_symbol,
+                    qty=qty,
+                    side=side,
+                    time_in_force=tif,
+                    limit_price=limit_price,
+                    **extra_intent,
+                    **bracket_kwargs,
+                )
             )
-        )
 
     if allow_limit and ENTRY_ORDER_TYPE == "limit":
         info(
@@ -421,9 +512,33 @@ def place_market_order(
             qty=qty,
             side=side,
             time_in_force=tif,
+            **extra_intent,
             **bracket_kwargs,
         )
     )
+
+
+def force_market_sell_and_wait(trading_client, contract_symbol, qty):
+    """Immediate market sell fallback used when SL cannot be placed/filled."""
+    try:
+        extra_intent: dict = {}
+        if PositionIntent is not None and _is_option_contract_symbol(contract_symbol):
+            extra_intent["position_intent"] = PositionIntent.SELL_TO_CLOSE
+
+        order = trading_client.submit_order(
+            MarketOrderRequest(
+                symbol=contract_symbol,
+                qty=qty,
+                side=OrderSide.SELL,
+                time_in_force=TimeInForce.DAY,
+                **extra_intent,
+            )
+        )
+        filled = wait_for_fill(trading_client, str(order.id), 10)
+        return filled
+    except Exception as ex:
+        info(f"[REGISTRY] force_market_sell failed for {contract_symbol}: {ex}")
+        return None
 
 def wait_for_fill(trading_client, order_id, timeout_sec):
 

@@ -80,6 +80,7 @@ from config import (
     PAPER_TRADING,
     POST_TRADE_COOLDOWN_BARS,
     QTY,
+    MIN_TRADE_DURATION_SEC,
     SECRET_KEY,
     STOCK_DATA_FEED,
     STOP_LOSS_PCT,
@@ -497,6 +498,11 @@ def execute_startup_straddle(
         try:
             info(f" Startup {leg_name}: monitoring {contract.symbol} for RSI marker SELL")
             if leg_name == "CALL":
+                try:
+                    min_exit_epoch_ts = time.time() + float(MIN_TRADE_DURATION_SEC or 0)
+                except Exception:
+                    min_exit_epoch_ts = None
+
                 exit_reason, current_option_price, _exit_state = monitor_with_websocket(
                     contract.symbol,
                     fill_price,
@@ -507,6 +513,7 @@ def execute_startup_straddle(
                     underlying_symbol=SYMBOL,
                     use_extended_exit_criteria=False,
                     buy_entry_order_id=buy_order_id,
+                    min_exit_epoch_ts=min_exit_epoch_ts,
                     tc=trading_client,
                     qty=QTY,
                 )
@@ -522,7 +529,8 @@ def execute_startup_straddle(
                         signal=leg_name,
                         underlying_symbol=SYMBOL,
                         use_extended_exit_criteria=False,
-                        buy_entry_order_id=buy_order_id,
+                        buy_entry_order_id=buy_entry_order_id,
+                        min_exit_epoch_ts=min_exit_epoch_ts,
                         tc=trading_client,
                         qty=QTY,
                     )
@@ -945,6 +953,11 @@ def main() -> None:
             )
 
             info(" Monitoring for RSI marker SELL...")
+            try:
+                min_exit_epoch_ts = time.time() + float(MIN_TRADE_DURATION_SEC or 0)
+            except Exception:
+                min_exit_epoch_ts = None
+
             exit_reason, current_option_price, _exit_state = monitor_with_websocket(
                 best_contract.symbol,
                 fill_price,
@@ -954,6 +967,7 @@ def main() -> None:
                 signal=signal,
                 underlying_symbol=SYMBOL,
                 buy_entry_order_id=str(buy_order.id),
+                min_exit_epoch_ts=min_exit_epoch_ts,
                 tc=trading_client,
                 qty=QTY,
             )
@@ -968,6 +982,7 @@ def main() -> None:
                     signal=signal,
                     underlying_symbol=SYMBOL,
                     buy_entry_order_id=str(buy_order.id),
+                    min_exit_epoch_ts=min_exit_epoch_ts,
                     tc=trading_client,
                     qty=QTY,
                 )

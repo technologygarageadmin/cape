@@ -162,7 +162,7 @@ from config import (
     EXIT_TAKE_PROFIT_ENABLED, EXIT_STOP_LOSS_ENABLED, PRICE_POLL_SEC,
     AIT_ENABLED, MT_ENABLED,
     AIT_ENTRY_ENABLED, AIT_EXIT_ENABLED,
-    MONGO_COLLECTION_NAME,
+    MONGO_COLLECTION_NAME, MIN_TRADE_DURATION_SEC,
 )
 from market_data import fetch_current_price_1m, fetch_obr, get_option_price, select_best_contract
 from strategy_helpers import determine_signal, get_expiry_date, ny_trading_date
@@ -994,6 +994,7 @@ def _poll_straddle_call_call_day(
             tc=tc,
             contract_symbol=contract_symbol,
             qty=qty,
+            buy_order_id=buy_order_id,
         )
 
         if buy_order_id:
@@ -1073,6 +1074,7 @@ def _poll_straddle_call_call_day(
             tc=tc,
             contract_symbol=contract_symbol,
             qty=qty,
+            buy_order_id=buy_order_id,
         )
 
         if buy_order_id:
@@ -1261,6 +1263,12 @@ def _ait_run_straddle(
         }
         try:
             while True:
+                # Enforce configured minimum trade duration for this leg
+                try:
+                    min_exit_epoch_ts = time.time() + float(MIN_TRADE_DURATION_SEC or 0)
+                except Exception:
+                    min_exit_epoch_ts = None
+
                 exit_reason, opt_price, exit_state = monitor_with_polling(
                     odc, contract.symbol, fill_price, tp_price, sl_price,
                     context_label=f"STRADDLE {symbol} {leg_name}", signal=leg_name,
@@ -1268,6 +1276,7 @@ def _ait_run_straddle(
                     use_extended_exit_criteria=True,
                     buy_order_id=buy_order_id,
                     buy_entry_order_id=buy_order_id,
+                    min_exit_epoch_ts=min_exit_epoch_ts,
                     tc=tc, qty=QTY,
                     initial_exit_state=leg.get("initial_exit_state"),
                 )
@@ -1547,6 +1556,15 @@ def _ait_trade_loop(
                     f"{next_candle_cdt.strftime('%H:%M:%S %Z')}"
                 )
 
+            # Enforce minimum trade duration if configured in `config.py`.
+            try:
+                if MIN_TRADE_DURATION_SEC and float(MIN_TRADE_DURATION_SEC) > 0:
+                    hold_ts = time.time() + float(MIN_TRADE_DURATION_SEC)
+                    if min_exit_epoch_ts is None or hold_ts > float(min_exit_epoch_ts):
+                        min_exit_epoch_ts = hold_ts
+            except Exception:
+                pass
+
             register_position(
                 buy_order_id=rsi_buy_order_id,
                 symbol=symbol,
@@ -1804,6 +1822,35 @@ def _ait_symbol_thread(symbol: str) -> None:
 
 _OPTION_SYM_RE = re.compile(r"^([A-Z]{1,5})(\d{6})([CP])(\d{8})$")
 
+# Startup recovery status exposed to the UI (polled via /api/live-positions).
+# Lets the frontend explicitly show "Recovery: no position" after boot.
+_startup_recovery_lock = threading.Lock()
+_startup_recovery_status: dict[str, Any] = {
+    "ran_at": None,          # ISO timestamp (CDT) when recovery last ran
+    "status": "not_run",     # not_run | running | no_positions | recovered | error
+    "message": None,         # human-friendly message
+    "found": None,           # broker positions found (int) if known
+    "recovered": 0,          # positions registered for monitoring (int)
+}
+
+
+def _set_startup_recovery_status(
+    *,
+    status: str,
+    message: str | None = None,
+    found: int | None = None,
+    recovered: int | None = None,
+) -> None:
+    with _startup_recovery_lock:
+        _startup_recovery_status["ran_at"] = datetime.now(CDT).isoformat()
+        _startup_recovery_status["status"] = status
+        if message is not None:
+            _startup_recovery_status["message"] = message
+        if found is not None:
+            _startup_recovery_status["found"] = int(found)
+        if recovered is not None:
+            _startup_recovery_status["recovered"] = int(recovered)
+
 
 def _parse_option_contract(symbol: str) -> dict | None:
     """Parse Alpaca option symbol → underlying, signal, strike, expiry or None."""
@@ -1875,6 +1922,11 @@ def _recovery_monitor_thread(
         "SL_MISSED_GAPDOWN_MARKET_EXIT",
         "ORDER_SYSTEM_FAILURE_MARKET_EXIT",
     }
+    # Enforce configured minimum trade duration for recovery monitoring
+    try:
+        min_exit_epoch_ts = time.time() + float(MIN_TRADE_DURATION_SEC or 0)
+    except Exception:
+        min_exit_epoch_ts = None
 
     while True:
         if exit_reason is None:
@@ -1886,6 +1938,7 @@ def _recovery_monitor_thread(
                 underlying_symbol=underlying,
                 buy_order_id=buy_order_id,
                 buy_entry_order_id=buy_order_id,
+                min_exit_epoch_ts=min_exit_epoch_ts,
                 tc=tc, qty=qty,
             )
         if exit_reason is None:
@@ -1896,6 +1949,7 @@ def _recovery_monitor_thread(
                 underlying_symbol=underlying,
                 buy_order_id=buy_order_id,
                 buy_entry_order_id=buy_order_id,
+                min_exit_epoch_ts=min_exit_epoch_ts,
                 initial_exit_state=exit_state if exit_state else None,
                 tc=tc, qty=qty,
             )
@@ -2030,15 +2084,20 @@ def _recover_open_positions() -> None:
     Register them in the position registry and start monitor threads so they
     appear in the UI (LivePositions) and get properly exited.
     """
+    _set_startup_recovery_status(status="running", message="Checking for open positions...")
     try:
         positions = trading_client.get_all_positions()
     except Exception as ex:
         print(f"[RECOVERY] Failed to fetch Alpaca positions: {ex}")
+        _set_startup_recovery_status(status="error", message=f"Failed to fetch positions: {ex}")
         return
 
     if not positions:
-        print("[RECOVERY] No open positions found — clean start.")
+        print("[RECOVERY] No position found — clean start.")
+        _set_startup_recovery_status(status="no_positions", message="No position found.", found=0, recovered=0)
         return
+
+    _set_startup_recovery_status(status="running", found=len(positions))
 
     # Try to find original buy order IDs from Alpaca order history
     buy_order_map: dict[str, str] = {}  # contract_symbol → order_id
@@ -2151,6 +2210,26 @@ def _recover_open_positions() -> None:
         buy_order_id = real_order_id or f"RECOVERY-{contract_symbol}-{int(time.time())}"
         entry_time = entry_time_map.get(contract_symbol)
 
+        # Clear any stale open SELL orders (common after restarts) so the new monitor
+        # can place a single fresh protective SL without "held_for_orders" errors.
+        try:
+            from alpaca.trading.requests import GetOrdersRequest
+            from alpaca.trading.enums import QueryOrderStatus
+
+            stale_orders = tc_recovery.get_orders(
+                filter=GetOrdersRequest(status=QueryOrderStatus.OPEN, symbols=[contract_symbol])
+            )
+            for stale_ord in stale_orders or []:
+                try:
+                    tc_recovery.cancel_order_by_id(str(stale_ord.id))
+                    print(f"[RECOVERY] Cancelled stale open order {stale_ord.id} for {contract_symbol}")
+                except Exception:
+                    pass
+            if stale_orders:
+                time.sleep(1)
+        except Exception:
+            pass
+
         # Register in position registry so it shows in LivePositions UI
         tp_price = compute_tp_price(entry_price)
         sl_price = compute_sl_price(entry_price)
@@ -2184,6 +2263,12 @@ def _recover_open_positions() -> None:
         )
 
     print(f"[RECOVERY] {recovered} position(s) recovered and monitoring started.")
+    _set_startup_recovery_status(
+        status="recovered",
+        message=f"Recovered {recovered} position(s).",
+        found=len(positions),
+        recovered=recovered,
+    )
 
 
 def _start_ait_threads() -> None:
@@ -2804,9 +2889,13 @@ def get_live_positions_api() -> dict[str, Any]:
         notes.append(f"Take profit target: {tp_pct:+.1f}%")
         live["threshold_notes"] = notes
 
+    with _startup_recovery_lock:
+        startup_recovery = dict(_startup_recovery_status)
+
     return {
         "count": len(positions),
         "positions": positions,
+        "startup_recovery": startup_recovery,
     }
 
 
@@ -3236,6 +3325,10 @@ def _manual_trade_monitor_thread(
         "SL_MISSED_GAPDOWN_MARKET_EXIT",
         "ORDER_SYSTEM_FAILURE_MARKET_EXIT",
     }
+    try:
+        min_exit_epoch_ts = time.time() + float(MIN_TRADE_DURATION_SEC or 0)
+    except Exception:
+        min_exit_epoch_ts = None
 
     while True:
         exit_reason, opt_price, exit_state = monitor_with_websocket(
@@ -3245,6 +3338,7 @@ def _manual_trade_monitor_thread(
             underlying_symbol=underlying,
             buy_order_id=buy_order_id,
             buy_entry_order_id=buy_order_id,
+            min_exit_epoch_ts=min_exit_epoch_ts,
             tc=tc, qty=qty,
         )
         if exit_reason is None:
@@ -3255,6 +3349,7 @@ def _manual_trade_monitor_thread(
                 underlying_symbol=underlying,
                 buy_order_id=buy_order_id,
                 buy_entry_order_id=buy_order_id,
+                min_exit_epoch_ts=min_exit_epoch_ts,
                 initial_exit_state=exit_state if exit_state else None,
                 tc=tc, qty=qty,
             )

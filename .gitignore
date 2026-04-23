@@ -29,4 +29,7 @@ backend/config.py
 *.sln
 *.sw?
 
+# Secrets
+.env
+.env.*
 

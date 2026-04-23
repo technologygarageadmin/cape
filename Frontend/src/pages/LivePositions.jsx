@@ -898,6 +898,7 @@ function PositionCard({ pos }) {
 
 export default function LivePositions() {
   const [positions, setPositions] = useState([])
+  const [startupRecovery, setStartupRecovery] = useState(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
   const [lastUpdate, setLastUpdate] = useState(null)
@@ -909,6 +910,7 @@ export default function LivePositions() {
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
       const data = await res.json()
       setPositions(data.positions || [])
+      setStartupRecovery(data.startup_recovery || null)
       setLastUpdate(new Date())
       setError(null)
     } catch (err) {
@@ -1011,7 +1013,11 @@ export default function LivePositions() {
             <Activity size={28} color={GOLD} />
           </div>
           <div style={styles.emptyTitle}>No Open Positions</div>
-          <div style={styles.emptyText}>Positions will appear here when the bot enters a trade</div>
+          <div style={styles.emptyText}>
+            {startupRecovery?.status === 'no_positions'
+              ? 'Recovery: no position found on startup.'
+              : 'Positions will appear here when the bot enters a trade'}
+          </div>
         </div>
       ) : (
         <>

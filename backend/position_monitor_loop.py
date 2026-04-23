@@ -25,6 +25,7 @@ from config import (
     TAKE_PROFIT_PCT,
     compute_tp_price,
     compute_sl_price,
+    MIN_TRADE_DURATION_SEC,
 )
 from logger import debug, info
 from monitoring import (
@@ -258,6 +259,11 @@ def monitor_position_loop(tc: TradingClient, odc: OptionHistoricalDataClient, sy
 
     if underlying and signal:
         # Option contract path: full monitor stack (TP/SL, dynamic QP, trailing SL, RSI opposite cross).
+        try:
+            min_exit_epoch_ts = time.time() + float(MIN_TRADE_DURATION_SEC or 0)
+        except Exception:
+            min_exit_epoch_ts = None
+
         exit_reason, exit_price, exit_state = monitor_with_websocket(
             symbol,
             entry_price,
@@ -268,6 +274,7 @@ def monitor_position_loop(tc: TradingClient, odc: OptionHistoricalDataClient, sy
             underlying_symbol=underlying,
             tc=tc,
             qty=qty,
+            min_exit_epoch_ts=min_exit_epoch_ts,
         )
         if exit_reason is None:
             # Pass whatever exit_state WS built (may have partial ticks) as initial state
@@ -284,6 +291,7 @@ def monitor_position_loop(tc: TradingClient, odc: OptionHistoricalDataClient, sy
                 underlying_symbol=underlying,
                 tc=tc,
                 qty=qty,
+                min_exit_epoch_ts=min_exit_epoch_ts,
                 initial_exit_state=ws_partial_state,
             )
     else:

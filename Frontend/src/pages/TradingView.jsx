@@ -825,6 +825,7 @@ export default function TradingView() {
 
   // ── Backend registry positions: poll /api/live-positions for activity panel ──
   const [registryPositions, setRegistryPositions] = useState([])
+  const [startupRecovery, setStartupRecovery] = useState(null)
   useEffect(() => {
     const fetchRegistry = async () => {
       try {
@@ -832,6 +833,7 @@ export default function TradingView() {
         if (!res.ok) return
         const data = await res.json()
         setRegistryPositions(Array.isArray(data?.positions) ? data.positions : [])
+        setStartupRecovery(data?.startup_recovery || null)
       } catch (_) {}
     }
     fetchRegistry()
@@ -1988,7 +1990,27 @@ export default function TradingView() {
             const contract = String(lp.contract_symbol || lp.symbol || '')
             return contract.startsWith(selected.symbol)
           })
-          if (symbolLive.length === 0) return null
+          if (symbolLive.length === 0) {
+            if (startupRecovery?.status === 'no_positions') {
+              return (
+                <div style={{
+                  background: '#fff',
+                  border: '1px solid rgba(148,163,184,0.35)',
+                  borderRadius: '14px',
+                  padding: '0.9rem 1.1rem',
+                  boxShadow: '0 2px 12px rgba(0,0,0,0.04)',
+                }}>
+                  <div style={{ fontSize: '0.72rem', fontWeight: 900, letterSpacing: '0.08em', color: '#475569' }}>
+                    RECOVERY
+                  </div>
+                  <div style={{ marginTop: '0.25rem', fontSize: '0.82rem', color: '#6b7280', fontWeight: 650 }}>
+                    No position found.
+                  </div>
+                </div>
+              )
+            }
+            return null
+          }
 
           const activePos =
             (manualPosition?.contractSymbol
@@ -2056,6 +2078,23 @@ export default function TradingView() {
                       const orderBadges = [tick.live_qp ? 'QP' : '', tick.live_sl ? 'SL' : '', tick.live_tsl ? 'TSL' : '']
                         .filter(Boolean)
                         .join(', ')
+                      // If this is the entry tick and the backend already seeded bracket child
+                      // IDs, show a concise confirmation (TP / SL ids) in the Orders column.
+                      const entryBracketInfo = (!isOrder && tick.source === 'entry' && live && (
+                        (Array.isArray(live.tp_order_ids) && live.tp_order_ids.length > 0) ||
+                        (Array.isArray(live.sl_order_ids) && live.sl_order_ids.length > 0)
+                      ))
+                        ? (() => {
+                          const parts = []
+                          if (Array.isArray(live.tp_order_ids) && live.tp_order_ids.length) {
+                            parts.push(`TP ${live.tp_order_ids.map(id => String(id).slice(0, 8) + '…').join(', ')}`)
+                          }
+                          if (Array.isArray(live.sl_order_ids) && live.sl_order_ids.length) {
+                            parts.push(`SL ${live.sl_order_ids.map(id => String(id).slice(0, 8) + '…').join(', ')}`)
+                          }
+                          return parts.join(' · ')
+                        })()
+                        : null
 
                       return (
                         <tr key={`${tick.ts || idx}-${idx}`} style={{ borderBottom: '1px solid rgba(0,0,0,0.04)', background: rowBg }}>
@@ -2091,7 +2130,9 @@ export default function TradingView() {
                           </td>
                           <td style={{ padding: '0.26rem 0.38rem', textAlign: 'center', color: '#d97706', fontWeight: 800 }}>{tick.qp_armed ? '✓' : '—'}</td>
                           <td style={{ padding: '0.26rem 0.38rem', fontFamily: 'monospace', color: '#666', whiteSpace: 'nowrap' }}>
-                            {isOrder ? (String(tick.order_count || '').trim() ? `#${tick.order_count}` : '—') : (orderBadges || '—')}
+                            {isOrder
+                              ? (String(tick.order_count || '').trim() ? `#${tick.order_count}` : '—')
+                              : (entryBracketInfo || orderBadges || '—')}
                           </td>
                         </tr>
                       )
@@ -2108,6 +2149,37 @@ export default function TradingView() {
           const basePositions = livePositions.filter(p =>
             p.symbol && p.symbol.startsWith(selected.symbol)
           )
+          const registryFallback = registryPositions
+            .filter(lp => {
+              const contract = String(lp.contract_symbol || lp.symbol || '')
+              return contract.startsWith(selected.symbol)
+            })
+            .map(lp => {
+              const contract = String(lp.contract_symbol || lp.symbol || '')
+              const live = lp.live || {}
+              const qty = Number(lp.qty ?? live.qty) || 1
+              const entryPrice = Number(lp.fill_price ?? live.fill_price) || 0
+              const currentPrice = resolveContractLivePrice(
+                contract,
+                Number(live.current_price ?? entryPrice) || 0
+              )
+              const unrealized_pl = entryPrice > 0
+                ? ((currentPrice - entryPrice) * qty * 100)
+                : 0
+              const unrealized_plpc = entryPrice > 0
+                ? ((currentPrice - entryPrice) / entryPrice)
+                : 0
+              return {
+                symbol: contract,
+                qty,
+                side: 'long',
+                entry_time: lp.entry_time || lp.registered_at || new Date().toISOString(),
+                avg_entry_price: entryPrice,
+                current_price: currentPrice,
+                unrealized_pl,
+                unrealized_plpc,
+              }
+            })
           const manualLivePrice = manualPosition?.contractSymbol
             ? resolveContractLivePrice(manualPosition.contractSymbol, manualPosition.fillPrice)
             : 0
@@ -2128,7 +2200,13 @@ export default function TradingView() {
                     : 0,
                 }]
               : []
-          const symPositions = [...optimisticManual, ...basePositions]
+          const seen = new Set()
+          const symPositions = [...optimisticManual, ...basePositions, ...registryFallback].filter(p => {
+            const key = String(p?.symbol || '')
+            if (!key || seen.has(key)) return false
+            seen.add(key)
+            return true
+          })
           if (symPositions.length === 0) return null
           return (
             <div style={{
@@ -2179,28 +2257,42 @@ export default function TradingView() {
                   const isPos = uPl >= 0
                   const side = String(p.side || live?.side || 'long').toLowerCase()
 
-                  const slPctRaw = Number(live?.sl_dynamic_pct ?? live?.sl_static_pct)
+                  const slStaticPctRaw = Number(live?.sl_static_pct)
+                  const slDynamicPctRaw = Number(live?.sl_dynamic_pct ?? live?.sl_static_pct)
                   const tpPctRaw = Number(live?.tp_pct)
                   const qpPctRaw = Number(live?.qp_dynamic_pct ?? live?.qp_floor_pct)
                   const peakPctRaw = Number(live?.max_pnl_pct ?? curPct)
 
-                  const hasSl = Number.isFinite(slPctRaw)
+                  const hasSlStatic = Number.isFinite(slStaticPctRaw)
+                  const hasSlDynamic = Number.isFinite(slDynamicPctRaw)
                   const hasTp = Number.isFinite(tpPctRaw)
                   const hasQp = Number.isFinite(qpPctRaw)
-                  const slPct = hasSl ? slPctRaw : null
+                  const slPct = hasSlDynamic ? slDynamicPctRaw : null // active SL (dynamic)
+                  const safetySlPct = hasSlStatic ? slStaticPctRaw : (hasSlDynamic ? slDynamicPctRaw : null) // initial SL
                   const tpPct = hasTp ? tpPctRaw : null
                   const qpPct = hasQp ? qpPctRaw : null
                   const peakPct = Number.isFinite(peakPctRaw) ? peakPctRaw : curPct
 
-                  const slHit = hasSl ? curPct <= slPct : false
-                  const tpHit = hasTp ? curPct >= tpPct : false
-                  const qpArmed = hasQp ? qpPct > 0 : false
-                  const qpHit = qpArmed ? curPct <= qpPct : false
                   const qpLimitSell = qpPct != null && entryPrice > 0 ? (entryPrice * (1 + qpPct / 100)) : null
+                  const slSellPrice = slPct != null && entryPrice > 0 ? (entryPrice * (1 + slPct / 100)) : null
+                  const safetySlSellPrice = safetySlPct != null && entryPrice > 0 ? (entryPrice * (1 + safetySlPct / 100)) : null
+                  const tpSellPrice = tpPct != null && entryPrice > 0 ? (entryPrice * (1 + tpPct / 100)) : null
 
-                  const slDelta = hasSl ? Math.max(0, curPct - slPct) : null
-                  const tpDelta = hasTp ? Math.max(0, tpPct - curPct) : null
-                  const qpDelta = qpArmed ? Math.max(0, curPct - qpPct) : null
+                  const slHit = safetySlSellPrice != null && currentPrice > 0 ? currentPrice <= safetySlSellPrice : false
+                  const tpHit = tpSellPrice != null && currentPrice > 0 ? currentPrice >= tpSellPrice : false
+                  const qpArmed = hasQp ? qpPct > 0 : false
+                  const qpHit = qpArmed && qpLimitSell != null && currentPrice > 0 ? currentPrice <= qpLimitSell : false
+                  const sellNowPrice = qpArmed && qpLimitSell != null ? qpLimitSell : slSellPrice
+
+                  const slDeltaAbs = safetySlSellPrice != null && currentPrice > 0 ? Math.max(0, currentPrice - safetySlSellPrice) : null
+                  const tpDeltaAbs = tpSellPrice != null && currentPrice > 0 ? Math.max(0, tpSellPrice - currentPrice) : null
+                  const qpDeltaAbs = qpLimitSell != null && currentPrice > 0 ? Math.max(0, currentPrice - qpLimitSell) : null
+                  const peakPx = entryPrice > 0 ? (entryPrice * (1 + peakPct / 100)) : null
+
+                  const safetyDelta = safetySlSellPrice != null && currentPrice > 0 ? (currentPrice - safetySlSellPrice) : null
+                  const safetyDeltaText = safetyDelta == null
+                    ? '—'
+                    : `${safetyDelta >= 0 ? '+' : ''}$${fmt(Math.abs(safetyDelta))} ${safetyDelta >= 0 ? 'above' : 'below'}`
 
                   return (
                     <div key={i} style={{
@@ -2243,9 +2335,9 @@ export default function TradingView() {
 
                         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '0.3rem', marginBottom: '0.45rem' }}>
                           {[
-                            { k: 'SL', v: slPct != null ? fmtPctSigned(slPct) : '—', c: '#ef4444', bg: 'rgba(239,68,68,0.07)' },
-                            { k: 'QP LMT', v: qpPct != null ? fmtPctSigned(qpPct) : '—', c: '#d97706', bg: 'rgba(245,158,11,0.08)' },
-                            { k: 'TP', v: tpPct != null ? fmtPctSigned(tpPct) : '—', c: '#16a34a', bg: 'rgba(22,163,74,0.07)' },
+                            { k: 'SL', v: slSellPrice != null ? `$${fmt(slSellPrice)}` : '—', c: '#ef4444', bg: 'rgba(239,68,68,0.07)' },
+                            { k: 'QP LMT', v: qpLimitSell != null ? `$${fmt(qpLimitSell)}` : '—', c: '#d97706', bg: 'rgba(245,158,11,0.08)' },
+                            { k: 'TP', v: tpSellPrice != null ? `$${fmt(tpSellPrice)}` : '—', c: '#16a34a', bg: 'rgba(22,163,74,0.07)' },
                           ].map(tile => (
                             <div key={tile.k} style={{ textAlign: 'center', borderRadius: '6px', background: tile.bg, padding: '0.25rem 0.15rem' }}>
                               <div style={{ fontSize: '0.56rem', fontWeight: 800, color: '#bbb', letterSpacing: '0.05em' }}>{tile.k}</div>
@@ -2262,17 +2354,33 @@ export default function TradingView() {
                           <span style={{ color: '#92400e' }}>{qpLimitSell != null ? `$${fmt(qpLimitSell)}` : '—'}</span>
                         </div>
 
+                        <div style={{
+                          display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                          fontSize: '0.64rem', color: '#7c2d12', fontWeight: 800, marginBottom: '0.25rem',
+                        }}>
+                          <span>Safety SL delta</span>
+                          <span style={{ color: '#7c2d12' }}>{safetyDeltaText}</span>
+                        </div>
+
                         <div style={{ display: 'grid', gap: '0.2rem' }}>
                           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '0.67rem' }}>
-                            <span style={{ color: '#ef4444', fontWeight: 700 }}>{slHit ? 'Hit SL' : 'Will hit SL'}</span>
+                            <span style={{ color: '#ef4444', fontWeight: 800 }}>{slHit ? 'Hit Safety SL' : 'Safety SL'}</span>
                             <span style={{ color: '#777', fontWeight: 700 }}>
-                              {slPct == null ? '—' : slHit ? fmtPctSigned(slPct) : `${slDelta.toFixed(2)}% away`}
+                              {safetySlSellPrice == null
+                                ? '—'
+                                : slHit
+                                  ? `@ $${fmt(safetySlSellPrice)}`
+                                  : `${slDeltaAbs != null ? `$${fmt(slDeltaAbs)} away` : '—'} · @ $${fmt(safetySlSellPrice)}`}
                             </span>
                           </div>
                           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '0.67rem' }}>
-                            <span style={{ color: '#16a34a', fontWeight: 700 }}>{tpHit ? 'Hit TP' : 'Will hit TP'}</span>
+                            <span style={{ color: '#16a34a', fontWeight: 800 }}>{tpHit ? 'Hit TP' : 'TP'}</span>
                             <span style={{ color: '#777', fontWeight: 700 }}>
-                              {tpPct == null ? '—' : tpHit ? fmtPctSigned(tpPct) : `${tpDelta.toFixed(2)}% away`}
+                              {tpSellPrice == null
+                                ? '—'
+                                : tpHit
+                                  ? `@ $${fmt(tpSellPrice)}`
+                                  : `${tpDeltaAbs != null ? `$${fmt(tpDeltaAbs)} away` : '—'} · @ $${fmt(tpSellPrice)}`}
                             </span>
                           </div>
                           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '0.67rem' }}>
@@ -2283,10 +2391,27 @@ export default function TradingView() {
                               {qpPct == null
                                 ? '—'
                                 : !qpArmed
-                                  ? `Peak ${fmtPctSigned(peakPct)} · LMT ${qpLimitSell != null ? `$${fmt(qpLimitSell)}` : '—'}`
+                                  ? `Peak ${peakPx != null ? `$${fmt(peakPx)}` : '—'} · LMT ${qpLimitSell != null ? `$${fmt(qpLimitSell)}` : '—'}`
                                   : qpHit
-                                    ? `${fmtPctSigned(qpPct)} · LMT ${qpLimitSell != null ? `$${fmt(qpLimitSell)}` : '—'}`
-                                    : `${qpDelta.toFixed(2)}% above · LMT ${qpLimitSell != null ? `$${fmt(qpLimitSell)}` : '—'}`}
+                                    ? `${qpLimitSell != null ? `@ $${fmt(qpLimitSell)}` : '—'}`
+                                    : `${qpDeltaAbs != null ? `$${fmt(qpDeltaAbs)} above` : '—'} · @ ${qpLimitSell != null ? `$${fmt(qpLimitSell)}` : '—'}`}
+                            </span>
+                          </div>
+                        </div>
+
+                        <div style={{ marginTop: '0.45rem', display: 'grid', gap: '0.2rem' }}>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '0.67rem' }}>
+                            <span style={{ color: '#111', fontWeight: 800 }}>
+                              {sellNowPrice == null ? 'Will sell at' : (qpArmed ? 'Will sell at (QP LMT)' : 'Will sell at (SL)')}
+                            </span>
+                            <span style={{ color: '#111', fontWeight: 900 }}>
+                              {sellNowPrice != null ? `$${fmt(sellNowPrice)}` : '—'}
+                            </span>
+                          </div>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '0.67rem' }}>
+                            <span style={{ color: '#16a34a', fontWeight: 800 }}>TP price</span>
+                            <span style={{ color: '#16a34a', fontWeight: 900 }}>
+                              {tpSellPrice != null ? `$${fmt(tpSellPrice)}` : '—'}
                             </span>
                           </div>
                         </div>
@@ -2947,8 +3072,9 @@ export default function TradingView() {
               </div>
             )}
 
-            {/* Buy / Sell Button — hidden in AI mode, but always visible when a position is open */}
-            {(tradeMode !== 'ai' || manualPosition) && <button
+            {/* Buy / Sell Button — visible when Manual mode is active for the selected symbol
+              or when the right-panel tradeMode is not AI; always visible when a position is open */}
+            {((tradeMode !== 'ai') || symbolMode[selected.symbol] === 'manual' || manualPosition) && <button
               onClick={manualPosition ? handleSell : handleBuy}
               disabled={orderStatus === 'waiting' || orderStatus === 'selling' || (!manualPosition && !expiry)}
               style={{

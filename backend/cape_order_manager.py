@@ -251,8 +251,8 @@ class CapeOrderManager:
                 orders_to_cancel.append(state.sl_order_id)
             orders_to_place.append({
                 'type': 'SL_LIMIT',
-                'stop_price': round(new_sl, 4),
-                'limit_price': round(new_sl * (1 - 0.05), 4),  # 5% buffer
+                'stop_price': round(new_sl, 2),
+                'limit_price': round(new_sl * (1 - 0.05), 2),  # 5% buffer
             })
             state.current_sl = new_sl
         
@@ -297,8 +297,8 @@ class CapeOrderManager:
                 orders_to_cancel.append(state.sl_order_id)
             orders_to_place.append({
                 'type': 'SL_LIMIT',
-                'stop_price': round(new_sl, 4),
-                'limit_price': round(new_sl * (1 - 0.05), 4),
+                'stop_price': round(new_sl, 2),
+                'limit_price': round(new_sl * (1 - 0.05), 2),
             })
             state.current_sl = new_sl
         

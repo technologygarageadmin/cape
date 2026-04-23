@@ -15,6 +15,7 @@ const GOLD_LIGHT = '#F5C518'
 const SYMBOLS = ['ALL','SPY','QQQ','AAPL','MSFT','NVDA','AMZN','META','TSLA','GOOGL','AMD','NFLX','AVGO']
 const DATE_FILTERS  = ['1H','3H','TODAY','WEEK','MONTH','ALL TIME']
 const RESULT_FILTERS = ['ALL','WIN','LOSS']
+const TYPE_FILTERS = ['ALL','AIT','MANUAL']
 
 // ── helpers ────────────────────────────────────────────────────────────────
 const fmt2 = (n) => Number(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
@@ -169,9 +170,28 @@ function isWithinRange(dateStr, range) {
     return d >= new Date(Date.now() - 3 * 60 * 60 * 1000)
   }
 
-  const nowCDT = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Chicago' }))
   if (range === 'TODAY') {
-    return cdtDateKey(d) === cdtDateKey(nowCDT)
+    // Use Intl.formatToParts to get the Chicago-local date/time components for the
+    // trade `d` and for now. This avoids creating Date objects via locale strings
+    // which can be interpreted in the host timezone and lead to mismatches.
+    try {
+      const fmt = new Intl.DateTimeFormat('en-US', {
+        timeZone: 'America/Chicago', year: 'numeric', month: '2-digit', day: '2-digit',
+        hour: '2-digit', minute: '2-digit', hour12: false,
+      })
+      const extract = (dt) => fmt.formatToParts(dt).reduce((acc, p) => { if (p.type !== 'literal') acc[p.type] = p.value; return acc }, {})
+      const dParts = extract(d)
+      const nowParts = extract(new Date())
+      // Require same Chicago calendar day
+      if (dParts.year !== nowParts.year || dParts.month !== nowParts.month || dParts.day !== nowParts.day) return false
+      // Check market hours: 08:30 -> 15:00 CT
+      const dMinutes = (parseInt(dParts.hour || '0', 10) * 60) + parseInt(dParts.minute || '0', 10)
+      return dMinutes >= (8 * 60 + 30) && dMinutes <= (15 * 60)
+    } catch (e) {
+      // Fallback to calendar-day equality if Intl fails for any reason
+      const nowCDT = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Chicago' }))
+      return cdtDateKey(d) === cdtDateKey(nowCDT)
+    }
   }
   if (range === 'WEEK') {
     const w = new Date(nowCDT); w.setDate(w.getDate() - 7); return d >= w
@@ -737,6 +757,7 @@ export default function OverallSummary() {
   const [dateFilter,   setDateFilter]   = useState('TODAY')
   const [resultFilter, setResultFilter] = useState('ALL')
   const [symbolFilter, setSymbolFilter] = useState('ALL')
+  const [typeFilter,   setTypeFilter]   = useState('ALL')
   const [sortCol,      setSortCol]      = useState('createdAt')
   const [sortDir,      setSortDir]      = useState('desc')
   const [hideStraddle, setHideStraddle]  = useState(false)
@@ -885,7 +906,9 @@ export default function OverallSummary() {
       const dateOk = isWithinRange(t.createdAt || t.entryTime, dateFilter)
       const resOk  = resultFilter === 'ALL' || t.result === resultFilter
       const symOk  = symbolFilter === 'ALL' || t.symbol === symbolFilter
-      return dateOk && resOk && symOk
+      const tag = String(t.tradeTypeTag || t.trade_type || t.tradeType || '').toUpperCase()
+      const typeOk = typeFilter === 'ALL' || (typeFilter === 'AIT' && tag === 'AIT') || (typeFilter === 'MANUAL' && tag === 'MANUAL')
+      return dateOk && resOk && symOk && typeOk
     })
   ), [allTrades, dateFilter, resultFilter, symbolFilter, hideStraddle])
 
@@ -1141,6 +1164,16 @@ export default function OverallSummary() {
 
           <div style={S.divider} />
 
+          {/* Type */}
+          <div style={S.filterGroup}>
+            <span style={S.filterLabel}><Filter size={11} /> Type</span>
+            {TYPE_FILTERS.map(f => (
+              <button key={f} style={S.btn(typeFilter === f)} onClick={() => setTypeFilter(f)}>{f === 'MANUAL' ? 'MT' : f}</button>
+            ))}
+          </div>
+
+          <div style={S.divider} />
+
           {/* Symbol */}
           <div style={S.filterGroup}>
             <span style={S.filterLabel}><Layers size={11} /> Symbol</span>
@@ -1168,11 +1201,11 @@ export default function OverallSummary() {
           </div>
 
           {/* Clear filters */}
-          {(dateFilter !== 'ALL TIME' || resultFilter !== 'ALL' || symbolFilter !== 'ALL' || !hideStraddle) && (
+          {(dateFilter !== 'ALL TIME' || resultFilter !== 'ALL' || symbolFilter !== 'ALL' || !hideStraddle || typeFilter !== 'ALL') && (
             <>
               <div style={S.divider} />
               <button
-                onClick={() => { setDateFilter('ALL TIME'); setResultFilter('ALL'); setSymbolFilter('ALL'); setHideStraddle(true) }}
+                onClick={() => { setDateFilter('ALL TIME'); setResultFilter('ALL'); setSymbolFilter('ALL'); setHideStraddle(true); setTypeFilter('ALL') }}
                 style={{
                   padding: '0.35rem 0.85rem', borderRadius: '999px', border: '1px solid rgba(239,68,68,0.25)',
                   cursor: 'pointer', fontSize: '0.76rem', fontWeight: 700,

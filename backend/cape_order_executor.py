@@ -49,7 +49,7 @@ class CapeOrderExecutor:
                 qty=qty,
                 side=OrderSide.BUY,
                 time_in_force=TimeInForce[time_in_force.upper()],
-                limit_price=round(limit_price, 4),
+                limit_price=round(limit_price, 2),
             )
             order = self.trading_client.submit_order(request)
             order_id = str(order.id)
@@ -88,7 +88,7 @@ class CapeOrderExecutor:
                 qty=qty,
                 side=OrderSide.SELL,
                 time_in_force=TimeInForce[time_in_force.upper()],
-                limit_price=round(limit_price, 4),
+                limit_price=round(limit_price, 2),
             )
             order = self.trading_client.submit_order(request)
             order_id = str(order.id)
@@ -124,8 +124,8 @@ class CapeOrderExecutor:
                 qty=qty,
                 side=OrderSide.SELL,
                 time_in_force=TimeInForce[time_in_force.upper()],
-                stop_price=round(stop_price, 4),
-                limit_price=round(limit_price, 4),
+                stop_price=round(stop_price, 2),
+                limit_price=round(limit_price, 2),
             )
             order = self.trading_client.submit_order(request)
             order_id = str(order.id)
@@ -196,9 +196,9 @@ class CapeOrderExecutor:
             
             replace_kwargs = {}
             if new_limit_price is not None:
-                replace_kwargs['limit_price'] = round(new_limit_price, 4)
+                replace_kwargs['limit_price'] = round(new_limit_price, 2)
             if new_stop_price is not None:
-                replace_kwargs['stop_price'] = round(new_stop_price, 4)
+                replace_kwargs['stop_price'] = round(new_stop_price, 2)
             
             if not replace_kwargs:
                 return False
