@@ -44,6 +44,8 @@ def register_position(
     signal_time: str | None = None,
     entry_time: str | None = None,
     entry_reasons: list[str] | None = None,
+    entry_strategies: list[str] | None = None,
+    entry_strategy_names: list[str] | None = None,
     entry_filters_passed: list[str] | None = None,
 ) -> None:
     """Record a newly filled buy lot in the registry."""
@@ -64,6 +66,8 @@ def register_position(
             "cross_time": signal_time,
             "entry_time": entry_time,
             "entry_reasons": entry_reasons or [],
+            "entry_strategies": entry_strategies or [],
+            "entry_strategy_names": entry_strategy_names or [],
             "entry_filters_passed": entry_filters_passed or [],
         }
     # Init live state with starting values
@@ -240,7 +244,7 @@ def upsert_broker_safety_sl(
         try:
             order = trading_client.replace_order_by_id(
                 existing_order_id,
-                ReplaceOrderRequest(stop_price=stop_price, limit_price=limit_price),
+                ReplaceOrderRequest(stop_price=stop_price),
             )
             new_order_id = str(getattr(order, "id", existing_order_id) or existing_order_id)
         except Exception as ex:
@@ -248,27 +252,46 @@ def upsert_broker_safety_sl(
             return existing_order_id
     else:
         try:
+            # Use stop-market (StopLossRequest) to reduce gap-down miss risk.
             order = trading_client.submit_order(
-                StopLimitOrderRequest(
+                StopLossRequest(
                     symbol=contract_symbol,
                     qty=qty,
                     side=OrderSide.SELL,
                     time_in_force=TimeInForce.DAY,
                     stop_price=stop_price,
-                    limit_price=limit_price,
                 )
             )
             new_order_id = str(getattr(order, "id", "") or "")
         except Exception as ex:
             info(f"[REGISTRY] Safety SL submit failed for {buy_order_id}: {ex}")
-            return None
+            # Attempt fallback using notional if broker requires it
+            err = str(ex or "").lower()
+            if "qty or notional" in err or "qty or notional is required" in err:
+                try:
+                    notional = round(float(stop_price) * 100.0 * float(qty), 2)
+                    order = trading_client.submit_order(
+                        StopLossRequest(
+                            symbol=contract_symbol,
+                            notional=notional,
+                            side=OrderSide.SELL,
+                            time_in_force=TimeInForce.DAY,
+                            stop_price=stop_price,
+                        )
+                    )
+                    new_order_id = str(getattr(order, "id", "") or "")
+                except Exception as ex2:
+                    info(f"[REGISTRY] Safety SL notional fallback failed for {buy_order_id}: {ex2}")
+                    return None
+            else:
+                return None
 
     with _live_exit_lock:
         live = _live_exit_states.get(buy_order_id)
         if live:
             live["broker_safety_sl_order_id"] = new_order_id
             live["broker_safety_sl_stop_price"] = stop_price
-            live["broker_safety_sl_limit_price"] = limit_price
+            live["broker_safety_sl_limit_price"] = None
             live["broker_safety_sl_last_placed_pct"] = float(sl_dynamic_pct)
     return new_order_id or None
 

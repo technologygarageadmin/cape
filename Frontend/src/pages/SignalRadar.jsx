@@ -31,6 +31,15 @@ const STATUS_CONFIG = {
   NO_DATA:      { color: '#888',    bg: 'rgba(0,0,0,0.04)',      text: 'No Data',       pulse: false },
 }
 
+// Known strategies and their backend key prefixes
+const STRATEGIES_META = [
+  { key: 'ema_crossover', label: 'EMA Crossover', id: 'EMA_CROSSOVER' },
+  { key: 'rsi_crossover', label: 'RSI Crossover', id: 'RSI_CROSSOVER' },
+  { key: 'rsi_mean_reversion', label: 'RSI Mean Reversion', id: 'RSI_MEAN_REVERSION' },
+  { key: 'macd_crossover', label: 'MACD Crossover', id: 'MACD_CROSSOVER' },
+  { key: 'bollinger_bands', label: 'Bollinger Bands', id: 'BOLLINGER_BANDS' },
+]
+
 // ── Circular gauge component ──
 function CircularGauge({ value, size = 120, strokeWidth = 10, color, label, sublabel }) {
   const radius = (size - strokeWidth) / 2
@@ -235,6 +244,31 @@ function SymbolCard({ data, onModeChange }) {
   const dominantColor = dominantSide === 'CALL' ? '#22c55e' : '#ef4444'
   const isOff = data.mode === 'off'
 
+
+  // Strategy forming signals (backend must provide these fields for each strategy)
+  const formingSignals = [];
+  // Generic: scan for any backend-provided "*_forming" flags and display them
+  Object.keys(data || {}).forEach((key) => {
+    if (!key.endsWith('_forming')) return;
+    if (!data[key]) return;
+    const base = key.slice(0, -8); // remove '_forming'
+    const typeKey = `${base}_type`;
+    let t = (data[typeKey] || '').toLowerCase();
+    if (!t) {
+      // Fallback: infer side from call/put scores when explicit type not provided
+      t = (data.call_score || 0) >= (data.put_score || 0) ? 'call' : 'put';
+    }
+    const side = t === 'put' ? 'PUT' : 'CALL';
+    const isCall = side === 'CALL';
+    const pretty = base.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+    formingSignals.push({
+      label: `Forming ${side} (${pretty})`,
+      color: isCall ? '#16a34a' : '#ef4444',
+      bg: isCall ? 'rgba(34,197,94,0.13)' : 'rgba(239,68,68,0.13)',
+      border: isCall ? 'rgba(34,197,94,0.25)' : 'rgba(239,68,68,0.25)'
+    });
+  });
+
   return (
     <div style={{
       background: '#fff',
@@ -335,6 +369,36 @@ function SymbolCard({ data, onModeChange }) {
           }}>
             {statusConf.text}
           </span>
+          {Array.isArray(data.entry_strategies) && data.entry_strategies.length > 0 && (
+            <div style={{ marginTop: '0.25rem', textAlign: 'right' }}>
+              <span style={{ padding: '0.2rem 0.5rem', borderRadius: '8px', background: '#fff4e6', border: '1px solid rgba(201,162,39,0.12)', color: '#92400e', fontSize: '0.68rem', fontWeight: 800 }}>Entry: {data.entry_strategies.map(id => (STRATEGIES_META.find(x => x.id === id) || { label: id }).label).join(', ')}</span>
+            </div>
+          )}
+          {/* Forming signal badges for all strategies */}
+          {formingSignals.map((sig, idx) => (
+            <span key={sig.label + idx} style={{
+              padding: '0.22rem 0.65rem', borderRadius: '20px',
+              background: sig.bg,
+              color: sig.color,
+              fontWeight: 800, fontSize: '0.68rem', letterSpacing: '0.04em',
+              border: `1px solid ${sig.border}`,
+              marginTop: '0.1rem',
+              display: 'block',
+            }}>{sig.label}</span>
+          ))}
+          {Array.isArray(data.entry_strategies) && data.entry_strategies.length > 0 && (
+            <div style={{ marginTop: '0.25rem', textAlign: 'right' }}>
+              <div style={{ fontSize: '0.62rem', color: '#666', fontWeight: 700 }}>Used by</div>
+              <div style={{ display: 'flex', gap: '0.35rem', justifyContent: 'flex-end', marginTop: '0.25rem' }}>
+                {data.entry_strategies.map((id) => {
+                  const m = STRATEGIES_META.find(x => x.id === id)
+                  return (
+                    <span key={id} style={{ padding: '0.18rem 0.5rem', borderRadius: '10px', background: '#fff7ed', border: '1px solid rgba(201,162,39,0.15)', color: '#92400e', fontSize: '0.68rem', fontWeight: 800 }}>{m ? m.label : id}</span>
+                  )
+                })}
+              </div>
+            </div>
+          )}
           {data.trend && (
             <div style={{ display: 'flex', alignItems: 'center', gap: '0.3rem' }}>
               {data.trend === 'UPTREND' ? <ArrowUpRight size={13} color="#22c55e" /> :
@@ -399,6 +463,44 @@ function SymbolCard({ data, onModeChange }) {
                 </button>
               )
             })}
+          </div>
+
+          {/* Strategy forming details for the 5 main strategies */}
+          <div style={{
+            padding: '0.6rem 0',
+            borderTop: '1px dashed rgba(0,0,0,0.04)',
+            marginTop: '0.4rem',
+          }}>
+            <div style={{ fontSize: '0.72rem', fontWeight: 700, color: '#666', marginBottom: '0.5rem' }}>Strategy Forming</div>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: '0.45rem' }}>
+              {STRATEGIES_META.map(s => {
+                const formingKey = `${s.key}_forming`;
+                const typeKey = `${s.key}_type`;
+                const forming = Boolean(data[formingKey]);
+                let side = data[typeKey];
+                if (!side && forming) side = (data.call_score || 0) >= (data.put_score || 0) ? 'call' : 'put';
+                const isCall = String(side || '').toLowerCase() === 'call';
+                const usedForEntry = Array.isArray(data.entry_strategies) && data.entry_strategies.includes(s.id)
+                return (
+                  <div key={s.key} style={{
+                    padding: '0.45rem',
+                    borderRadius: '8px',
+                    background: usedForEntry ? (isCall ? 'rgba(34,197,94,0.12)' : 'rgba(239,68,68,0.12)') : (forming ? (isCall ? 'rgba(34,197,94,0.06)' : 'rgba(239,68,68,0.06)') : 'rgba(0,0,0,0.02)'),
+                    border: `1px solid ${usedForEntry ? (isCall ? 'rgba(34,197,94,0.22)' : 'rgba(239,68,68,0.22)') : (forming ? (isCall ? 'rgba(34,197,94,0.12)' : 'rgba(239,68,68,0.12)') : 'rgba(0,0,0,0.03)')}`,
+                  }}>
+                    <div style={{ fontSize: '0.68rem', fontWeight: 700, color: forming ? (isCall ? '#16a34a' : '#ef4444') : '#888' }}>{s.label}</div>
+                    <div style={{ fontSize: '0.76rem', fontWeight: 800, marginTop: '0.35rem', color: forming ? (isCall ? '#16a34a' : '#ef4444') : '#999' }}>
+                      {forming ? (isCall ? 'Forming CALL' : 'Forming PUT') : '—'}
+                    </div>
+                    {usedForEntry && (
+                      <div style={{ marginTop: '0.4rem', fontSize: '0.68rem', fontWeight: 800, color: isCall ? '#14532d' : '#7f1d1d' }}>
+                        USED FOR ENTRY
+                      </div>
+                    )}
+                  </div>
+                )
+              })}
+            </div>
           </div>
 
           {/* Indicators row */}
@@ -563,6 +665,7 @@ export default function SignalRadar() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
   const [lastUpdate, setLastUpdate] = useState(null)
+  const [showHelp, setShowHelp] = useState(false)
   const [autoRefresh, setAutoRefresh] = useState(true)
   const intervalRef = useRef(null)
 
@@ -730,6 +833,19 @@ export default function SignalRadar() {
               }}>
                 <RefreshCw size={12} />
               </button>
+              
+                  <button onClick={() => setShowHelp(true)} style={{
+                    background: 'transparent',
+                    border: '1px solid rgba(255,255,255,0.06)',
+                    borderRadius: '8px',
+                    padding: '0.35rem 0.6rem',
+                    cursor: 'pointer',
+                    color: '#fff',
+                    display: 'flex', alignItems: 'center', gap: '0.35rem',
+                    fontSize: '0.72rem', fontWeight: 600,
+                  }} title="Quick help">
+                    <Info size={12} /> Help
+                  </button>
             </div>
             {lastUpdate && (
               <span style={{ fontSize: '0.6rem', color: '#555' }}>
@@ -739,6 +855,38 @@ export default function SignalRadar() {
           </div>
         </div>
       </div>
+
+      {/* Quick legend */}
+      <div style={{ padding: '0.6rem 1rem', display: 'flex', gap: '0.6rem', alignItems: 'center', marginBottom: '0.75rem' }}>
+        <div style={{ display: 'flex', gap: '0.4rem', alignItems: 'center' }}>
+          <span style={{ fontSize: '0.68rem', color: '#666', fontWeight: 700, marginRight: '0.6rem' }}>Legend</span>
+          <span style={{ padding: '0.25rem 0.6rem', borderRadius: '8px', background: 'rgba(34,197,94,0.12)', color: '#16a34a', fontWeight: 700 }}>CALL READY</span>
+          <span style={{ padding: '0.25rem 0.6rem', borderRadius: '8px', background: 'rgba(239,68,68,0.12)', color: '#dc2626', fontWeight: 700 }}>PUT READY</span>
+          <span style={{ padding: '0.25rem 0.6rem', borderRadius: '8px', background: 'rgba(245,158,11,0.10)', color: '#92400e', fontWeight: 700 }}>Warming / Building</span>
+          <span style={{ padding: '0.25rem 0.6rem', borderRadius: '8px', background: 'rgba(0,0,0,0.04)', color: '#666', fontWeight: 700 }}>Scanning</span>
+        </div>
+      </div>
+
+      {/* Help overlay */}
+      {showHelp && (
+        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.45)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 60 }} onClick={() => setShowHelp(false)}>
+          <div onClick={(e) => e.stopPropagation()} style={{ width: '840px', maxWidth: '92%', background: '#fff', borderRadius: '12px', padding: '1.25rem', boxShadow: '0 20px 60px rgba(0,0,0,0.3)' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.5rem' }}>
+              <div style={{ fontSize: '1.05rem', fontWeight: 800 }}>Signal Radar — Quick Help</div>
+              <button onClick={() => setShowHelp(false)} style={{ border: 'none', background: 'transparent', cursor: 'pointer', color: '#666', fontWeight: 700 }}>Close</button>
+            </div>
+            <div style={{ color: '#444', lineHeight: 1.5 }}>
+              <ul>
+                <li><strong>CALL / PUT gauges:</strong> Probability score (0–100) built from filters. Higher = stronger signal.</li>
+                <li><strong>Forming tiles:</strong> Strategies currently indicating a forming CALL or PUT for this symbol (green = CALL, red = PUT).</li>
+                <li><strong>Used by:</strong> If a trade would be entered now, this lists the strategy(ies) that caused the entry.</li>
+                <li><strong>Status badge:</strong> READY = actionable (AIT can enter); WARMING / BUILDING = approaching; BLOCKED = entry prevented (market/mode/config).</li>
+                <li><strong>Click a symbol row</strong> to expand and see filters, RSI bar, EMAs, and the full breakdown.</li>
+              </ul>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Heatmap overview */}
       <Heatmap symbols={symbols} />

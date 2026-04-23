@@ -23,6 +23,8 @@ from config import (
     SECRET_KEY,
     STOP_LOSS_PCT,
     TAKE_PROFIT_PCT,
+    compute_tp_price,
+    compute_sl_price,
 )
 from logger import debug, info
 from monitoring import (
@@ -244,8 +246,8 @@ def monitor_position_loop(tc: TradingClient, odc: OptionHistoricalDataClient, sy
         info(f"[MONITOR] {symbol} reserved by dedicated monitor — skipping generic monitor thread")
         return
 
-    tp_price = entry_price * (1 + TAKE_PROFIT_PCT)
-    sl_price = entry_price * (1 - STOP_LOSS_PCT)
+    tp_price = compute_tp_price(entry_price)
+    sl_price = compute_sl_price(entry_price)
     info(f"[MONITOR] {symbol} tracking started | entry={entry_price:.4f} tp={tp_price:.4f} sl={sl_price:.4f}")
 
     underlying, signal = _parse_option(symbol)
@@ -315,7 +317,7 @@ def monitor_position_loop(tc: TradingClient, odc: OptionHistoricalDataClient, sy
                     fill_price=entry_price, mid_price=price,
                     bid_price=None, sellable_price=price, pnl_pct=pnl_pct,
                 )
-                maybe_exit = _evaluate_priority_exit(pnl_pct, exit_state)
+                maybe_exit = _evaluate_priority_exit(pnl_pct, exit_state, sellable_price=price)
                 if maybe_exit:
                     exit_reason = maybe_exit
                     exit_price = price

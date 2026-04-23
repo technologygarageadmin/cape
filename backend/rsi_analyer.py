@@ -331,6 +331,15 @@ def analyze_rsi(symbol: str = SYMBOL) -> dict:
 
 	rsi_values = calculate_rsi_series(closes, RSI_PERIOD)
 	result = classify_rsi_trend(rsi_values)
+	rsi_mr_values = calculate_rsi_series(closes, 3)
+	if len(rsi_mr_values) >= 2:
+		result["rsi_mr_period"] = 3
+		result["rsi_mr_oversold"] = 40.0
+		result["rsi_mr_overbought"] = 70.0
+		result["latest_rsi_mr"] = float(rsi_mr_values[-1])
+		result["previous_rsi_mr"] = float(rsi_mr_values[-2])
+		result["rsi_mr_cross_up"] = bool(rsi_mr_values[-2] <= 40.0 and rsi_mr_values[-1] > 40.0)
+		result["rsi_mr_cross_down"] = bool(rsi_mr_values[-2] >= 70.0 and rsi_mr_values[-1] < 70.0)
 	result["close_price"] = float(closes.iloc[-1])
 	result["alpaca_bar_time_utc"] = last_bar_time
 	result["alpaca_bar_time_cst"] = last_bar_time.astimezone(DISPLAY_TZ) if last_bar_time else None
@@ -384,12 +393,57 @@ def analyze_rsi(symbol: str = SYMBOL) -> dict:
 	# ── Pullback to 9 EMA check ──
 	# Price is near 9 EMA (within tolerance) — not chasing a breakout
 	current_close = float(closes.iloc[-1])
+	prev_close_val = float(closes.iloc[-2]) if len(closes) >= 2 else current_close
 	ema_fast_val = float(ema_fast.iloc[-1])
 	pullback_pct = abs(current_close - ema_fast_val) / ema_fast_val * 100 if ema_fast_val > 0 else 999
 	result["pullback_to_ema_pct"] = pullback_pct
+	result["previous_close"] = prev_close_val
 	# For CALL: price pulled back DOWN toward 9 EMA (or touching it)
 	# For PUT: price pulled back UP toward 9 EMA (or touching it)
 	result["price_near_ema_fast"] = pullback_pct  # caller checks threshold
+
+	# ── MACD (12, 26, 9) ──
+	ema_12 = closes.ewm(span=12, adjust=False).mean()
+	ema_26 = closes.ewm(span=26, adjust=False).mean()
+	macd_line = ema_12 - ema_26
+	macd_signal = macd_line.ewm(span=9, adjust=False).mean()
+	macd_hist = macd_line - macd_signal
+
+	macd_now = float(macd_line.iloc[-1])
+	macd_prev = float(macd_line.iloc[-2]) if len(macd_line) >= 2 else macd_now
+	sig_now = float(macd_signal.iloc[-1])
+	sig_prev = float(macd_signal.iloc[-2]) if len(macd_signal) >= 2 else sig_now
+
+	result["macd_line"] = round(macd_now, 6)
+	result["macd_signal"] = round(sig_now, 6)
+	result["macd_hist"] = round(float(macd_hist.iloc[-1]), 6)
+	result["prev_macd_line"] = round(macd_prev, 6)
+	result["prev_macd_signal"] = round(sig_prev, 6)
+	result["macd_cross_up"] = (macd_prev <= sig_prev) and (macd_now > sig_now)
+	result["macd_cross_down"] = (macd_prev >= sig_prev) and (macd_now < sig_now)
+
+	# ── Bollinger Bands (20, 2) ──
+	bb_basis = closes.rolling(window=20).mean()
+	bb_std = closes.rolling(window=20).std(ddof=0)
+	bb_upper = bb_basis + (2.0 * bb_std)
+	bb_lower = bb_basis - (2.0 * bb_std)
+
+	bb_upper_now = float(bb_upper.iloc[-1]) if pd.notna(bb_upper.iloc[-1]) else current_close
+	bb_lower_now = float(bb_lower.iloc[-1]) if pd.notna(bb_lower.iloc[-1]) else current_close
+	bb_basis_now = float(bb_basis.iloc[-1]) if pd.notna(bb_basis.iloc[-1]) else current_close
+
+	if len(bb_upper) >= 2 and pd.notna(bb_upper.iloc[-2]) and pd.notna(bb_lower.iloc[-2]):
+		bb_upper_prev = float(bb_upper.iloc[-2])
+		bb_lower_prev = float(bb_lower.iloc[-2])
+	else:
+		bb_upper_prev = bb_upper_now
+		bb_lower_prev = bb_lower_now
+
+	result["bb_upper"] = round(bb_upper_now, 4)
+	result["bb_basis"] = round(bb_basis_now, 4)
+	result["bb_lower"] = round(bb_lower_now, 4)
+	result["prev_bb_upper"] = round(bb_upper_prev, 4)
+	result["prev_bb_lower"] = round(bb_lower_prev, 4)
 
 	# ── Candle analysis ──
 	curr_open = float(df["open"].iloc[-1])

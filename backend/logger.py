@@ -78,6 +78,39 @@ def _fmt_dur(sec) -> str:
         return "—"
 
 
+def _fmt_order_audit_line(tick: dict) -> str:
+    order_type = str(tick.get("order_type") or "ORDER")
+    order_id = str(tick.get("order_id") or "—")
+    prev_id = str(tick.get("prev_order_id") or "")
+    status = str(tick.get("status") or "live").upper()
+    status_at = _fmt_ts(tick.get("status_at") or tick.get("filled_at") or tick.get("canceled_at") or tick.get("updated_at") or tick.get("ts"))
+    submitted_at = _fmt_ts(tick.get("submitted_at") or tick.get("ts"))
+    filled_at = _fmt_ts(tick.get("filled_at"))
+    canceled_at = _fmt_ts(tick.get("canceled_at"))
+    fill_price = _fmt_price(tick.get("fill_price")) if tick.get("fill_price") is not None else "—"
+    price_bits = []
+    if tick.get("stop_price") is not None:
+        price_bits.append(f"stop {_fmt_price(tick.get('stop_price'))}")
+    if tick.get("limit_price") is not None:
+        price_bits.append(f"lmt {_fmt_price(tick.get('limit_price'))}")
+    prices = " | ".join(price_bits) if price_bits else "—"
+    base = f"{order_type} id={order_id}"
+    if prev_id:
+        base += f" (prev={prev_id})"
+    return (
+        f"{base} | st={status} @ {status_at} | submitted {submitted_at} | "
+        f"filled {filled_at} ({fill_price}) | cancelled {canceled_at} | {prices}"
+    )
+
+
+def _fmt_list(v) -> str:
+    if isinstance(v, (list, tuple, set)):
+        return ", ".join(str(x) for x in v if x is not None) or "—"
+    if v is None:
+        return "—"
+    return str(v)
+
+
 def _safe_float(v, decimals: int = 4):
     try:
         return round(float(v), decimals)
@@ -103,7 +136,7 @@ _AIT_FIELDS = [
     "entry_volume_ratio", "entry_body_ratio", "entry_pullback_pct",
     "entry_up_streak", "entry_down_streak",
     "entry_underlying_price", "entry_vwap", "entry_price_above_vwap",
-    "entry_trend", "entry_filters_passed",
+    "entry_trend", "entry_strategies", "entry_strategy_names", "entry_filters_passed",
     "created_at",
 ]
 
@@ -206,6 +239,7 @@ def log_trade(trade_type: str, data: dict) -> None:
     symbol      = str(data.get("symbol") or "?")
     option_type = str(data.get("option_type") or "?").upper()
     exit_reason = str(data.get("exit_reason") or "?")
+    entry_strategy = _fmt_list(data.get("entry_strategy_names") or data.get("entry_strategies"))
     dur         = _fmt_dur(data.get("trade_duration_sec"))
     peak_pct    = _safe_float(data.get("peak_pnl_pct"), 2)
 
@@ -216,7 +250,7 @@ def log_trade(trade_type: str, data: dict) -> None:
         f"[{ttype}] {icon} | {symbol} {option_type} | "
         f"{sign}${abs(pnl_val):.2f} ({_fmt_pct(pnl_pct)}) | "
         f"Buy {_fmt_price(buy_price)} → Sell {_fmt_price(sell_price)} | "
-        f"Exit: {exit_reason} | Dur: {dur}"
+        f"Entry: {entry_strategy} | Exit: {exit_reason} | Dur: {dur}"
     )
 
     # 2. trade.log rich block
@@ -271,6 +305,9 @@ def _append_trade_block(ttype, data, symbol, option_type, buy_price, sell_price,
             # Lifecycle timestamps
             if ttype == "AIT":
                 f.write(
+                    f"  Entry Strategy: {_fmt_list(data.get('entry_strategy_names') or data.get('entry_strategies'))}\n"
+                )
+                f.write(
                     f"  Entry Signal: {_fmt_ts(data.get('entry_signal_time'))}"
                     f"  (cross: {_fmt_ts(data.get('entry_cross_time'))})\n"
                 )
@@ -294,6 +331,41 @@ def _append_trade_block(ttype, data, symbol, option_type, buy_price, sell_price,
             # Order IDs
             f.write(f"  Buy Order   : {data.get('buy_order_id','—')}\n")
             f.write(f"  Sell Order  : {data.get('sell_order_id','—')}\n")
+
+            timeline = data.get("timeline") or []
+            order_ticks = [
+                t for t in timeline
+                if isinstance(t, dict) and t.get("source") in ("order_placed", "order_replaced")
+            ]
+            if order_ticks:
+                f.write(f"  ── Limit Order Lifecycle ─────────────────────────────────────\n")
+                for tick in order_ticks:
+                    f.write(f"  • {_fmt_order_audit_line(tick)}\n")
+
+            # Last sell tick summary (store whether sell was MARKET or LIMIT and reason)
+            sell_tick = None
+            for t in reversed(timeline):
+                if isinstance(t, dict) and t.get("source") == "sell":
+                    sell_tick = t
+                    break
+
+            if sell_tick:
+                sell_ts = _fmt_ts(sell_tick.get("ts"))
+                sell_price = _fmt_price(sell_tick.get("sellable_price") or sell_tick.get("sell_price") or data.get("sell_price"))
+                sell_reason = sell_tick.get("exit_reason") or data.get("exit_reason") or "-"
+
+                # Infer method: prefer LIMIT if any order_placed/replaced tick exists with a limit/stop price
+                method = "MARKET"
+                for ot in order_ticks:
+                    if ot.get("limit_price") is not None or ot.get("stop_price") is not None:
+                        method = "LIMIT"
+                        break
+
+                f.write(f"  Last Tick    : {sell_ts} | Sell {sell_price} | Method: {method} | Reason: {sell_reason}\n")
+                # Include sell order id/time if present
+                sell_oid = data.get("sell_order_id") or sell_tick.get("order_id")
+                if sell_oid:
+                    f.write(f"  Sell Order ID: {sell_oid}  |  Sell Filled: {_fmt_ts(data.get('sell_filled_time') or sell_tick.get('filled_at'))}\n")
 
             # AIT indicators
             if ttype == "AIT":

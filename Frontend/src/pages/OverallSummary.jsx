@@ -187,6 +187,31 @@ function reasonLabel(raw) {
   return String(raw).replace(/_/g, ' ').trim()
 }
 
+function asList(value) {
+  if (Array.isArray(value)) return value.filter(v => v != null && String(v).trim())
+  if (typeof value === 'string') {
+    return value.split(',').map(v => v.trim()).filter(Boolean)
+  }
+  return []
+}
+
+function strategyLabelFromId(id) {
+  return String(id || '')
+    .toLowerCase()
+    .split('_')
+    .filter(Boolean)
+    .map(word => word.charAt(0).toUpperCase() + word.slice(1))
+    .join(' ')
+}
+
+function resolveEntryStrategyNames(trade) {
+  const explicit = asList(trade?.entryStrategyNames ?? trade?.entry_strategy_names)
+  if (explicit.length > 0) return explicit
+  const ids = asList(trade?.entryStrategies ?? trade?.entry_strategies)
+  if (ids.length > 0) return ids.map(strategyLabelFromId)
+  return []
+}
+
 function entryReasonMeaning(raw) {
   const key = String(raw || '').toUpperCase().trim()
   const map = {
@@ -394,12 +419,21 @@ function TradeTimeline({ timeline, fillPrice, qpArmed, qpArmTime, qpArmPrice, qp
                     const isReplace = tick.source === 'order_replaced'
                     const status = tick.status || 'live'
                     const isError = status === 'error'
+                    const statusAt = tick.status_at || tick.filled_at || tick.canceled_at || tick.updated_at || tick.submitted_at || tick.ts
+                    const placedAt = tick.submitted_at || tick.ts
+                    const filledAt = tick.filled_at || null
+                    const cancelledAt = tick.canceled_at || null
                     const statusColor = status === 'filled' ? '#16a34a' : status === 'cancelled' ? '#aaa' : isError ? '#dc2626' : '#d97706'
                     const statusIcon = status === 'filled' ? '✓ FILLED' : status === 'cancelled' ? '✕ CANCELLED' : isError ? '✕ FAILED' : '⏳ LIVE'
                     const rowBg = status === 'filled' ? 'rgba(22,163,74,0.08)' : status === 'cancelled' ? 'rgba(0,0,0,0.03)' : isError ? 'rgba(220,38,38,0.08)' : isQP ? 'rgba(217,119,6,0.05)' : 'rgba(239,68,68,0.05)'
                     const typeLabel = isReplace ? 'ORDER_REPLACED' : (isQP ? 'QP LIMIT' : isTrail ? 'TRAIL SL STOP' : 'SL STOP')
                     const typeColor = isQP ? '#d97706' : '#ef4444'
                     const orderCountText = tick.order_count != null ? `#${tick.order_count}` : '#—'
+                    const statusTimeText = `status @ ${fmtTickTime(statusAt)}`
+                    const placedTimeText = `placed ${fmtTickTime(placedAt)}`
+                    const filledTimeText = filledAt ? `filled ${fmtTickTime(filledAt)}` : null
+                    const cancelledTimeText = cancelledAt ? `cancelled ${fmtTickTime(cancelledAt)}` : null
+                    const timeAuditText = [placedTimeText, statusTimeText, filledTimeText, cancelledTimeText].filter(Boolean).join(' · ')
                     return (
                       <tr key={idx} style={{ background: rowBg, borderLeft: `3px solid ${isError ? '#dc2626' : typeColor}` }}>
                         <td style={{ padding: '2px 6px', fontFamily: 'monospace', color: '#555', whiteSpace: 'nowrap' }}>{fmtTickTime(tick.ts)}</td>
@@ -417,7 +451,7 @@ function TradeTimeline({ timeline, fillPrice, qpArmed, qpArmTime, qpArmPrice, qp
                         <td colSpan={8} style={{ padding: '2px 6px', fontFamily: 'monospace', fontSize: '9px', color: statusColor, fontWeight: 700 }}>
                           {isError
                             ? `✕ FAILED · ${tick.error || 'unknown error'}`
-                            : `${statusIcon} · ${orderCountText} · id ${(tick.order_id || '').slice(0, 8)}…`
+                            : `${statusIcon} · ${orderCountText} · id ${(tick.order_id || '').slice(0, 8)}… · ${timeAuditText}`
                           }
                         </td>
                         <td />
@@ -738,7 +772,15 @@ export default function OverallSummary() {
                   ? 'RECOVERY'
                   : 'UNKNOWN'
           const entryReasonRaw = tt === 'STRADDLE' ? 'STRADDLE' : tt === 'AIT' ? 'AIT' : null
-          return { ...t, contractName, optionType, tradeTypeTag, entryReason_raw: entryReasonRaw }
+          return {
+            ...t,
+            contractName,
+            optionType,
+            tradeTypeTag,
+            entryReason_raw: entryReasonRaw,
+            entryStrategies: asList(t.entryStrategies ?? t.entry_strategies),
+            entryStrategyNames: resolveEntryStrategyNames(t),
+          }
         })
         setAitTrades(all)
       } else {
@@ -1775,12 +1817,23 @@ export default function OverallSummary() {
                           const filters = t.entryFiltersPassed
                           const entryVwap = toNum(t.entryVwap)
                           const priceAboveVwap = t.entryPriceAboveVwap
-                          const hasAny = dur != null || rsi != null || volRatio != null || underlying != null || entryVwap != null || (filters && filters.length > 0)
+                          const entryStrategyNames = resolveEntryStrategyNames(t)
+                          const hasAny = dur != null || rsi != null || volRatio != null || underlying != null || entryVwap != null || entryStrategyNames.length > 0 || (filters && filters.length > 0)
                           if (!hasAny) return null
                           return (
                             <div style={{ display: 'flex', flexDirection: 'column', gap: '5px' }}>
                               {/* Duration + underlying price */}
                               <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
+                                {entryStrategyNames.length > 0 && (
+                                  <span style={{
+                                    display: 'inline-flex', alignItems: 'center', gap: '4px',
+                                    padding: '2px 8px', borderRadius: '6px',
+                                    background: 'rgba(201,162,39,0.09)', fontSize: '11px',
+                                  }}>
+                                    <span style={{ fontSize: '9px', fontWeight: 800, color: '#b5973b', textTransform: 'uppercase', letterSpacing: '0.4px' }}>Entry Strategy</span>
+                                    <span style={{ color: GOLD_DEEP, fontWeight: 800 }}>{entryStrategyNames.join(', ')}</span>
+                                  </span>
+                                )}
                                 {dur != null && (
                                   <span style={{
                                     display: 'inline-flex', alignItems: 'center', gap: '4px',

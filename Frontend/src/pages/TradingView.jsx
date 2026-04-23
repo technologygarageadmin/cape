@@ -1,9 +1,108 @@
 ﻿import React, { useState, useEffect, useRef } from 'react'
 import CandleChart from '../components/CandleChart'
+
+// --- EMA calculation ---
+const toChartTime = (time) => {
+  if (typeof time === 'number') return time
+  const parsed = new Date(time).getTime()
+  return Number.isFinite(parsed) ? Math.floor(parsed / 1000) : time
+}
+
+function calcEMA(data, period) {
+  if (!Array.isArray(data) || data.length < period) return [];
+  const k = 2 / (period + 1);
+  let emaPrev = data.slice(0, period).reduce((sum, d) => sum + d.close, 0) / period;
+  const result = [{ time: toChartTime(data[period - 1].time), value: emaPrev }];
+  for (let i = period; i < data.length; i++) {
+    const price = data[i].close;
+    emaPrev = price * k + emaPrev * (1 - k);
+    result.push({ time: toChartTime(data[i].time), value: emaPrev });
+  }
+  return result;
+}
+
+function calcRSI(data, period = 3) {
+  if (!Array.isArray(data) || data.length <= period) return [];
+  const closes = data.map(d => Number(d.close));
+  let gainSum = 0;
+  let lossSum = 0;
+
+  for (let i = 1; i <= period; i++) {
+    const diff = closes[i] - closes[i - 1];
+    if (diff > 0) gainSum += diff;
+    else lossSum += Math.abs(diff);
+  }
+
+  let avgGain = gainSum / period;
+  let avgLoss = lossSum / period;
+  const result = [{
+    time: toChartTime(data[period].time),
+    value: avgLoss === 0 ? 100 : 100 - 100 / (1 + avgGain / avgLoss),
+  }];
+
+  for (let i = period + 1; i < data.length; i++) {
+    const diff = closes[i] - closes[i - 1];
+    avgGain = (avgGain * (period - 1) + Math.max(diff, 0)) / period;
+    avgLoss = (avgLoss * (period - 1) + Math.max(-diff, 0)) / period;
+    result.push({
+      time: toChartTime(data[i].time),
+      value: avgLoss === 0 ? 100 : 100 - 100 / (1 + avgGain / avgLoss),
+    });
+  }
+
+  return result;
+}
+
+// --- EMA crossover detection ---
+function getEMACrossMarkers(emaFast, emaSlow, trendEma = [], bars = []) {
+  const markers = [];
+  const slowByTime = new Map((emaSlow || []).map(point => [point.time, point.value]));
+  const trendByTime = new Map((trendEma || []).map(point => [point.time, point.value]));
+  const closeByTime = new Map((bars || []).map(bar => [toChartTime(bar.time), Number(bar.close)]));
+  const aligned = (emaFast || [])
+    .filter(point => slowByTime.has(point.time))
+    .map(point => ({
+      time: point.time,
+      fast: point.value,
+      slow: slowByTime.get(point.time),
+      trend: trendByTime.get(point.time),
+      close: closeByTime.get(point.time),
+    }));
+
+  for (let i = 1; i < aligned.length; i++) {
+    const prevFast = aligned[i - 1].fast, prevSlow = aligned[i - 1].slow;
+    const currFast = aligned[i].fast, currSlow = aligned[i].slow;
+    const priceAboveTrend = Number.isFinite(aligned[i].close) &&
+      Number.isFinite(aligned[i].trend) &&
+      aligned[i].close > aligned[i].trend;
+
+    if (prevFast <= prevSlow && currFast > currSlow && priceAboveTrend) {
+      markers.push({ time: aligned[i].time, type: 'buy' });
+    } else if (prevFast >= prevSlow && currFast < currSlow) {
+      markers.push({ time: aligned[i].time, type: 'sell' });
+    }
+  }
+  return markers;
+}
+
+function getRSIMeanReversionMarkers(rsiPoints, oversold = 40, overbought = 70) {
+  const markers = [];
+  for (let i = 1; i < (rsiPoints || []).length; i++) {
+    const prev = rsiPoints[i - 1].value;
+    const curr = rsiPoints[i].value;
+    if (prev <= oversold && curr > oversold) {
+      markers.push({ time: rsiPoints[i].time, type: 'buy', strategy: 'rsi-mr' });
+    } else if (prev >= overbought && curr < overbought) {
+      markers.push({ time: rsiPoints[i].time, type: 'sell', strategy: 'rsi-mr' });
+    }
+  }
+  return markers;
+}
 import {
   Play, Square, TrendingUp, TrendingDown, Target,
   ShieldAlert, Activity, DollarSign, CheckCircle2, Layers, Zap, User
 } from 'lucide-react'
+import Loader from '../components/loader'
 
 const GOLD = '#C9A227'
 const GOLD_LIGHT = '#F5C518'
@@ -30,8 +129,8 @@ const STRATEGIES = ['ATR Momentum', 'RSI Mean Reversion', 'Breakout Strategy', '
 const API_TRADING = 'http://localhost:8001'
 const API_DISPLAY = 'http://localhost:8002'
 const INTERVAL_MAP = { '1m': '1Min', '5m': '5Min', '15m': '15Min', '1H': '1Hour', '4H': '4Hour', '1D': '1Day' }
-// Bars to fetch per interval to cover ~2 trading days
-const BARS_LIMIT = { '1m': 800, '5m': 200, '15m': 70, '1H': 20, '4H': 8, '1D': 5 }
+// Enough history to render EMA(50) and detect EMA(9/21) crosses.
+const BARS_LIMIT = { '1m': 800, '5m': 500, '15m': 300, '1H': 240, '4H': 220, '1D': 220 }
 // Polling interval per chart interval (ms) — no faster than 30s
 const POLL_MS = { '1m': 5_000, '5m': 5_000, '15m': 5_000, '1H': 5_000, '4H': 5_000, '1D': 5_000 }
 // Normalize API bar: map `timestamp` field → `time` that CandleChart expects
@@ -110,6 +209,38 @@ const fmtTickTime = (value) => {
   })
 }
 
+const asList = (value) => {
+  if (Array.isArray(value)) return value.filter(v => v != null && String(v).trim())
+  if (typeof value === 'string') {
+    return value
+      .split(',')
+      .map(v => v.trim())
+      .filter(Boolean)
+  }
+  return []
+}
+
+const strategyLabelFromId = (id) => String(id || '')
+  .toLowerCase()
+  .split('_')
+  .filter(Boolean)
+  .map(word => word.charAt(0).toUpperCase() + word.slice(1))
+  .join(' ')
+
+const resolveEntryStrategyNames = (trade) => {
+  const explicit = asList(trade?.entryStrategyNames ?? trade?.entry_strategy_names)
+  if (explicit.length > 0) return explicit
+  const ids = asList(trade?.entryStrategies ?? trade?.entry_strategies)
+  if (ids.length > 0) return ids.map(strategyLabelFromId)
+  if (trade?.strategy) return [trade.strategy]
+  return []
+}
+
+const formatEntryStrategies = (trade) => {
+  const names = resolveEntryStrategyNames(trade)
+  return names.length > 0 ? names.join(', ') : '—'
+}
+
 export default function TradingView() {
   const [selected, setSelected]       = useState(() => STOCK_SYMBOLS.find(s => s.symbol === 'TSLA') ?? STOCK_SYMBOLS[0])
   const [interval, setInterval_]      = useState('1m')
@@ -120,6 +251,7 @@ export default function TradingView() {
   const [rsiMaPoints, setRsiMaPoints] = useState([])
   const [rsiMarkers, setRsiMarkers]   = useState([])
   const [obrLevels, setObrLevels]     = useState([])
+  const [showEmaOverlay, setShowEmaOverlay] = useState(true)
   const [barsLoading, setBarsLoading] = useState(false)
   const [tpPct, setTpPct]             = useState('2.0')
   const [slPct, setSlPct]             = useState('1.0')
@@ -127,6 +259,7 @@ export default function TradingView() {
   const [autoTrade, setAutoTrade]           = useState(false)
   const [lastTrade, setLastTrade]           = useState(null)
   const [hoveredSymbol, setHoveredSymbol]   = useState(null)
+  const [liquidating, setLiquidating]       = useState(null)
   const autoTimerRef       = useRef(null)
   const lastBarTimeRef     = useRef(null)  // tracks latest bar timestamp for incremental polling
   const suggestContractRef = useRef(null)  // stores latest contract_name from /api/options/suggest
@@ -145,7 +278,9 @@ export default function TradingView() {
   const [orderStatus, setOrderStatus]       = useState(null)  // null | 'waiting' | 'filled' | 'error'
   const [tradeHistory, setTradeHistory]     = useState([])
   const [suggestLoading, setSuggestLoading] = useState(false)
+  const [autoSuggestEnabled, setAutoSuggestEnabled] = useState(true)
   const [contractQuote, setContractQuote]     = useState(null)  // { bid, ask, mid, spread_pct }
+  const [quoteBook, setQuoteBook]             = useState({ call: null, put: null })
   const [mktCountdown, setMktCountdown]       = useState('')
   const [toasts, setToasts]                   = useState([])
   const toastIdRef = useRef(0)
@@ -154,6 +289,8 @@ export default function TradingView() {
   const [histTypeFilter, setHistTypeFilter]   = useState('All')  // 'All' | 'MT' | 'AIT'
   // Global AIT/MT config gate from backend config.py
   const [tradingConfig, setTradingConfig]     = useState({ ait_enabled: true, mt_enabled: true, config_healthy: true, config_warning: null, symbols: [] })
+  const [entryStrategies, setEntryStrategies] = useState({ maxEnabled: 2, enabled: [], available: [] })
+  const [strategyBusy, setStrategyBusy]       = useState(false)
 
   // symbolMode: 'off' | 'auto' | 'manual' per symbol
   // Default to 'off' for all until backend sync resolves the correct per-symbol mode
@@ -170,6 +307,13 @@ export default function TradingView() {
         .then(cfg => {
           if (!cfg) return
           setTradingConfig(cfg)
+          if (cfg.strategies) {
+            setEntryStrategies({
+              maxEnabled: Number(cfg.strategies.maxEnabled) || 2,
+              enabled: Array.isArray(cfg.strategies.enabled) ? cfg.strategies.enabled : [],
+              available: Array.isArray(cfg.strategies.available) ? cfg.strategies.available : [],
+            })
+          }
           const merged = {}
           ;(cfg.symbols || []).forEach(s => { if (s.symbol && s.mode) merged[s.symbol] = s.mode })
           if (Object.keys(merged).length > 0)
@@ -185,6 +329,25 @@ export default function TradingView() {
     const id = setInterval(fetchConfig, 30_000)
     return () => clearInterval(id)
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Keep strategy status live even if another session changes it.
+  useEffect(() => {
+    const pollStrategies = async () => {
+      try {
+        const res = await fetch(`${API_DISPLAY}/api/strategies`)
+        if (!res.ok) return
+        const data = await res.json()
+        setEntryStrategies({
+          maxEnabled: Number(data.maxEnabled) || 2,
+          enabled: Array.isArray(data.enabled) ? data.enabled : [],
+          available: Array.isArray(data.available) ? data.available : [],
+        })
+      } catch (_) {}
+    }
+    pollStrategies()
+    const id = setInterval(pollStrategies, 2_000)
+    return () => clearInterval(id)
+  }, [])
 
   // Keep right-panel tradeMode in sync with the selected symbol's symbolMode
   // (This is the ONLY place tradeMode is derived from — always backend-driven)
@@ -414,6 +577,38 @@ export default function TradingView() {
     setTimeout(() => setToasts(prev => prev.filter(t => t.id !== id)), 5000)
   }
 
+  const toggleEntryStrategy = async (strategyId, nextEnabled) => {
+    const enabledNow = Array.isArray(entryStrategies.enabled) ? entryStrategies.enabled : []
+    if (nextEnabled && !enabledNow.includes(strategyId) && enabledNow.length >= (entryStrategies.maxEnabled || 2)) {
+      pushToast(`Only ${entryStrategies.maxEnabled || 2} entry strategies can be active`, 'error')
+      return
+    }
+
+    setStrategyBusy(true)
+    try {
+      const res = await fetch(`${API_DISPLAY}/api/strategies/toggle`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ strategy: strategyId, enabled: nextEnabled }),
+      })
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}))
+        throw new Error(err?.detail || `Unable to update strategy (${res.status})`)
+      }
+      const data = await res.json()
+      setEntryStrategies({
+        maxEnabled: Number(data.maxEnabled) || 2,
+        enabled: Array.isArray(data.enabled) ? data.enabled : [],
+        available: Array.isArray(data.available) ? data.available : [],
+      })
+      pushToast(nextEnabled ? 'Strategy enabled' : 'Strategy disabled', 'success')
+    } catch (err) {
+      pushToast(err.message || 'Failed to toggle strategy', 'error')
+    } finally {
+      setStrategyBusy(false)
+    }
+  }
+
   const handleSymbolSelect = (stock) => {
     if (tradeActive) return
     setSelected(stock)
@@ -501,7 +696,7 @@ export default function TradingView() {
     if (!symbol) return
     const ok = window.confirm(`Liquidate open position for ${symbol}?`)
     if (!ok) return
-
+    setLiquidating(symbol)
     try {
       // 1. Stop the AI monitoring thread for this symbol's underlying
       const underlying = symbol.replace(/\d{6}[CP]\d+$/i, '')
@@ -516,14 +711,33 @@ export default function TradingView() {
       }
 
       // 2. Close the position via Alpaca
-      const res = await fetch(`${API_TRADING}/api/positions/${encodeURIComponent(symbol)}/close`, {
-        method: 'POST',
-      })
-      if (!res.ok) {
-        const errData = await res.json().catch(() => ({}))
-        throw new Error(errData?.detail || `Liquidation failed (${res.status})`)
+      // Try trading API first; if it fails (network error or non-OK),
+      // fall back to the display proxy which may forward the request.
+      let data = null
+      try {
+        const res = await fetch(`${API_TRADING}/api/positions/${encodeURIComponent(symbol)}/close`, { method: 'POST' })
+        if (res.ok) {
+          data = await res.json()
+        } else {
+          const errData = await res.json().catch(() => ({}))
+          throw new Error(errData?.detail || `Liquidation failed (${res.status})`)
+        }
+      } catch (errPrimary) {
+        // Primary failed — attempt display server proxy as a best-effort fallback
+        try {
+          const res2 = await fetch(`${API_DISPLAY}/api/positions/${encodeURIComponent(symbol)}/close`, { method: 'POST' })
+          if (res2.ok) {
+            data = await res2.json()
+            pushToast('Liquidate: used display proxy fallback', 'info')
+          } else {
+            const errData2 = await res2.json().catch(() => ({}))
+            throw new Error(errData2?.detail || `Liquidation failed (${res2.status})`)
+          }
+        } catch (errFallback) {
+          // Re-throw the primary error if no fallback succeeded so the outer catch shows it
+          throw errFallback || errPrimary
+        }
       }
-      const data = await res.json()
 
       if (data?.logged_trade) {
         setTradeHistory(prev => [{ ...data.logged_trade, _entryIso: data.logged_trade.entryTime || new Date().toISOString() }, ...prev])
@@ -533,6 +747,8 @@ export default function TradingView() {
       pushToast(`Liquidated ${symbol}`, 'success')
     } catch (err) {
       pushToast(`Failed to liquidate: ${err.message}`, 'error')
+    } finally {
+      setLiquidating(null)
     }
   }
 
@@ -758,6 +974,8 @@ export default function TradingView() {
             buyPrice: Number(t.buyPrice) || 0,
             sellPrice: Number(t.sellPrice) || 0,
             pnl: Number(t.pnl) || 0,
+            entryStrategies: asList(t.entryStrategies ?? t.entry_strategies),
+            entryStrategyNames: resolveEntryStrategyNames(t),
             entryTime: fmtEntryTime(t.entryTime),
             exitTime: fmtEntryTime(t.exitTime),
             _entryIso: t.entryTime || t.createdAt,
@@ -806,6 +1024,8 @@ export default function TradingView() {
             buyPrice: Number(t.buyPrice) || 0,
             sellPrice: Number(t.sellPrice) || 0,
             pnl: Number(t.pnl) || 0,
+            entryStrategies: asList(t.entryStrategies ?? t.entry_strategies),
+            entryStrategyNames: resolveEntryStrategyNames(t),
             entryTime: fmtEntryTime(t.entryTime),
             exitTime: fmtEntryTime(t.exitTime),
             _entryIso: t.entryTime || t.createdAt,
@@ -881,6 +1101,8 @@ export default function TradingView() {
                 buyPrice: Number(t.buyPrice) || 0,
                 sellPrice: Number(t.sellPrice) || 0,
                 pnl: Number(t.pnl) || 0,
+                entryStrategies: asList(t.entryStrategies ?? t.entry_strategies),
+                entryStrategyNames: resolveEntryStrategyNames(t),
                 entryTime: fmtEntryTime(t.entryTime),
                 exitTime: fmtEntryTime(t.exitTime),
                 _entryIso: t.entryTime || t.createdAt,
@@ -997,7 +1219,6 @@ export default function TradingView() {
   }, [manualPosition?.orderId, orderStatus])
 
   const handleBuy = async () => {
-    if (!strikePrice || !expiry) return
     setOrderStatus('waiting')
     try {
       // Get a fresh Alpaca-listed contract if not already cached
@@ -1007,16 +1228,33 @@ export default function TradingView() {
       let resolvedOptionType = optionType
       let resolvedExpiry = expiry
 
+      // Use quoteBook suggestion first (this is populated even when autoSuggest is off)
+      if (!contractSymbol) {
+        const q = optionType === 'put' ? quoteBook.put : quoteBook.call
+        if (q?.contract_name) {
+          contractSymbol = q.contract_name
+          resolvedStrike = String(q.strike_price ?? strikePrice ?? '')
+          resolvedExpiry = q.expiry ?? expiry
+        }
+      }
+
+      // Fallback: call backend suggest with an explicit strike (entered -> quoteBook -> livePrice +/- 1)
       if (!contractSymbol) {
         const params = new URLSearchParams({ symbol: selected.symbol })
         if (optionType) params.set('option_type', optionType)
-        if (strikePrice) params.set('strike_price', strikePrice)
+        const quoteStrike = optionType === 'put' ? quoteBook.put?.strike_price : quoteBook.call?.strike_price
+        let strikeParam = strikePrice || quoteStrike || null
+        if (!strikeParam) {
+          const lp = Number(livePrices[selected.symbol] || contractQuote?.mid || 0)
+          if (lp > 0) strikeParam = String(Math.max(0, Math.round(optionType === 'call' ? lp + 1 : lp - 1)))
+        }
+        if (strikeParam) params.set('strike_price', String(Math.round(Number(strikeParam))))
         const sRes = await fetch(`${API_TRADING}/api/options/suggest?${params}`)
         if (!sRes.ok) throw new Error('Could not fetch contract — try clicking Refresh first')
         const sData = await sRes.json()
-        if (!sData.contract_name) throw new Error('No listed contract available right now (market may be closed or contract unavailable)')
-        contractSymbol = sData.contract_name
-        resolvedStrike = String(sData.strike_price ?? strikePrice)
+        if (!sData.contract_name && !(optionType === 'put' ? quoteBook.put?.contract_name : quoteBook.call?.contract_name)) throw new Error('No listed contract available right now (market may be closed or contract unavailable)')
+        contractSymbol = sData.contract_name ?? (optionType === 'put' ? quoteBook.put?.contract_name : quoteBook.call?.contract_name)
+        resolvedStrike = String(sData.strike_price ?? strikeParam ?? strikePrice ?? '')
         resolvedDirection = sData.direction ?? direction
         resolvedOptionType = sData.option_type ?? optionType
         resolvedExpiry = sData.expiry ?? expiry
@@ -1162,35 +1400,92 @@ export default function TradingView() {
   // keep ref in sync with state so interval closure always reads latest value
   useEffect(() => { optionTypeRef.current = optionType }, [optionType])
 
-  // updateType=true  → also update CALL/PUT selector (used on symbol change / first load)
-  // updateType=false → preserve user's current selection (used on 10s interval refresh)
-  const fetchSuggest = async (sym, optType = null, updateType = true) => {
-    setSuggestLoading(true)
+  const _quoteFromSuggest = (data) => ({
+    bid: data?.bid ?? 0,
+    ask: data?.ask ?? 0,
+    mid: data?.mid ?? 0,
+    spread_pct: data?.spread_pct ?? 0,
+    contract_name: data?.contract_name ?? null,
+    expiry: data?.expiry ?? null,
+    strike_price: data?.strike_price ?? null,
+    option_type: data?.option_type ?? null,
+  })
+
+  const fetchSuggestForType = async (sym, optType = 'call', opts = {}) => {
+    const { applyForm = false, updateType = false, strikeOverride = null } = opts
+    const type = String(optType || 'call').toLowerCase() === 'put' ? 'put' : 'call'
+    const params = new URLSearchParams({ symbol: sym || selected.symbol, option_type: type })
+    if (strikeOverride) params.set('strike_price', String(strikeOverride))
     try {
-      const params = new URLSearchParams({ symbol: sym || selected.symbol })
-      if (optType) params.set('option_type', optType)
       const res = await fetch(`${API_TRADING}/api/options/suggest?${params}`)
+      let data = null
       if (res.ok) {
-        const data = await res.json()
-        setStrikePrice(String(data.strike_price ?? ''))
-        setDirection(data.direction ?? 'uptrend')
-        if (updateType) setOptionType(data.option_type ?? 'call')
-        setExpiry(data.expiry ?? '')
-        setQty(String(data.qty ?? 1))
-        // Store contract symbol so Buy button can place real option order
-        suggestContractRef.current = data.contract_name ?? null
-        // Store bid/ask for display
-        if (data.bid != null || data.ask != null) {
-          setContractQuote({
-            bid: data.bid ?? 0,
-            ask: data.ask ?? 0,
-            mid: data.mid ?? 0,
-            spread_pct: data.spread_pct ?? 0,
-          })
+        data = await res.json()
+      }
+
+      // If backend returned a valid suggestion, use it. Otherwise compute a
+      // simple fallback strike based on current underlying price so the UI
+      // shows a sensible contract (CALL = price + 1, PUT = price - 1).
+      const currentPrice = Number(livePrices[sym || selected.symbol] || 0)
+      const fallbackStrike = currentPrice > 0 ?
+        (type === 'call' ? (currentPrice + 1) : (currentPrice - 1)) : null
+
+      // Prefer integer strikes (no decimals)
+      const strikeVal = data?.strike_price ?? (fallbackStrike != null ? Math.max(0, Math.round(fallbackStrike)) : null)
+
+      const q = _quoteFromSuggest(data || {
+        bid: 0,
+        ask: 0,
+        mid: 0,
+        spread_pct: 0,
+        contract_name: strikeVal != null ? `${(sym || selected.symbol)} ${type.toUpperCase()} $${strikeVal}` : null,
+        expiry: data?.expiry ?? null,
+        strike_price: strikeVal,
+        option_type: type,
+      })
+
+      setQuoteBook(prev => ({ ...prev, [type]: q }))
+      if (!manualPosition && optionTypeRef.current === type) setContractQuote(q)
+
+      if (applyForm) {
+        setStrikePrice(String(strikeVal ?? ''))
+        setDirection(data?.direction ?? 'uptrend')
+        if (updateType) setOptionType(data?.option_type ?? type)
+        setExpiry(data?.expiry ?? '')
+        setQty(String(data?.qty ?? 1))
+        suggestContractRef.current = data?.contract_name ?? (strikeVal != null ? `${(sym || selected.symbol)} ${type.toUpperCase()} $${strikeVal}` : null)
+      }
+      return data
+    } catch (_) {
+      // On network error, still set a UI-friendly fallback strike if possible
+      const currentPrice = Number(livePrices[sym || selected.symbol] || 0)
+      const fallbackStrike = currentPrice > 0 ? (optType === 'put' ? (currentPrice - 1) : (currentPrice + 1)) : null
+      const strikeVal = fallbackStrike != null ? Math.max(0, Math.round(fallbackStrike)) : null
+      if (strikeVal != null) {
+        const q = _quoteFromSuggest({ contract_name: `${(sym || selected.symbol)} ${type.toUpperCase()} $${strikeVal}`, strike_price: strikeVal, option_type: type })
+        setQuoteBook(prev => ({ ...prev, [type]: q }))
+        if (!manualPosition && optionTypeRef.current === type) setContractQuote(q)
+        if (applyForm) {
+          setStrikePrice(String(strikeVal))
+          suggestContractRef.current = `${(sym || selected.symbol)} ${type.toUpperCase()} $${strikeVal}`
         }
       }
+      return null
+    }
+  }
+
+  // updateType=true  → also update CALL/PUT selector (used on symbol change / first load)
+  // updateType=false → preserve user's current selection (used on 10s interval refresh)
+  const fetchSuggest = async (sym, optType = null, updateType = true, showLoading = true) => {
+    if (showLoading) setSuggestLoading(true)
+    try {
+      const type = String(optType || optionTypeRef.current || 'call').toLowerCase() === 'put' ? 'put' : 'call'
+      await fetchSuggestForType(sym, type, { applyForm: true, updateType })
+      // Keep both sides warm so switching CALL/PUT has immediate quote readiness.
+      const otherType = type === 'call' ? 'put' : 'call'
+      await fetchSuggestForType(sym, otherType, { applyForm: false })
     } catch (_) {}
-    setSuggestLoading(false)
+    if (showLoading) setSuggestLoading(false)
   }
 
   // ── Switch trade mode; stop AI trade if one is active ──
@@ -1234,22 +1529,45 @@ export default function TradingView() {
     } catch (_) {}
   }
 
-  // Auto-fetch suggest on symbol/mode change, then refresh every 10 s while no open position
+  // Auto-suggest ON: refresh form + quotes every minute.
+  // Auto-suggest OFF: keep quote refresh every minute for BOTH call/put without mutating form fields.
   useEffect(() => {
-    if (manualPosition) return            // don't overwrite fields while a trade is open
-    fetchSuggest(selected.symbol, optionTypeRef.current, true)  // first load: let backend suggest type
-    const id = setInterval(() => {
-      if (!manualPosition) fetchSuggest(selected.symbol, optionTypeRef.current, false)  // refresh: keep user's type
-    }, 10_000)
+    if (manualPosition) return
+
+    const poll = async () => {
+      if (manualPosition) return
+      if (autoSuggestEnabled) {
+        await fetchSuggest(selected.symbol, optionTypeRef.current, false, false)
+      } else {
+        await Promise.allSettled([
+          fetchSuggestForType(selected.symbol, 'call', { applyForm: false }),
+          fetchSuggestForType(selected.symbol, 'put', { applyForm: false }),
+        ])
+      }
+    }
+
+    if (autoSuggestEnabled) {
+      fetchSuggest(selected.symbol, optionTypeRef.current, true, true)
+    } else {
+      poll()
+    }
+
+    const id = setInterval(poll, 60_000)
     return () => clearInterval(id)
-  }, [tradeMode, selected.symbol]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [tradeMode, selected.symbol, autoSuggestEnabled, manualPosition]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Keep selected quote card synced when user switches CALL/PUT.
+  useEffect(() => {
+    if (manualPosition) return
+    const selectedQuote = optionType === 'put' ? quoteBook.put : quoteBook.call
+    if (selectedQuote) setContractQuote(selectedQuote)
+  }, [optionType, quoteBook, manualPosition])
 
   // When user manually changes option type or strike, invalidate the cached contract
   // so handleBuy will re-fetch a contract matching the new values.
   useEffect(() => {
     if (!manualPosition) {
       suggestContractRef.current = null
-      setContractQuote(null)
     }
   }, [optionType, strikePrice]) // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -1259,6 +1577,32 @@ export default function TradingView() {
   const prevCandle = candles[candles.length - 2]
   const chartChange    = lastCandle && prevCandle ? lastCandle.close - prevCandle.close : 0
   const chartChangePct = prevCandle ? ((chartChange / prevCandle.close) * 100).toFixed(2) : '0.00'
+
+
+  // --- EMA lines and crossover markers for chart (memoized) ---
+  const { emaLines, emaCrossMarkers, rsiMeanReversionMarkers } = React.useMemo(() => {
+    const enabledStrategies = Array.isArray(entryStrategies.enabled) ? entryStrategies.enabled : [];
+    const showEma = showEmaOverlay || enabledStrategies.includes('EMA_CROSSOVER');
+    const showRsiMr = enabledStrategies.includes('RSI_MEAN_REVERSION');
+    const rsiMr = showRsiMr ? getRSIMeanReversionMarkers(calcRSI(candles, 3), 40, 70) : [];
+
+    if (showEma) {
+      const ema9 = calcEMA(candles, 9);
+      const ema21 = calcEMA(candles, 21);
+      const ema50 = calcEMA(candles, 50);
+      const crosses = getEMACrossMarkers(ema9, ema21, ema50, candles);
+      return {
+        emaLines: [
+          { period: 9, color: GOLD_LIGHT, data: ema9 },
+          { period: 21, color: '#7c3aed', data: ema21 },
+          { period: 50, color: '#2563eb', data: ema50 },
+        ],
+        emaCrossMarkers: crosses,
+        rsiMeanReversionMarkers: rsiMr,
+      };
+    }
+    return { emaLines: [], emaCrossMarkers: [], rsiMeanReversionMarkers: rsiMr };
+  }, [candles, entryStrategies.enabled, showEmaOverlay]);
 
   return (
     <div style={{ width: '100%', display: 'flex', gap: '1.25rem', alignItems: 'flex-start', minHeight: 'calc(100vh - 160px)' }}>
@@ -1443,6 +1787,27 @@ export default function TradingView() {
                   BOT OFF
                 </span>
               )}
+              <span style={{
+                display: 'inline-flex', alignItems: 'center', gap: '0.3rem',
+                padding: '0.22rem 0.55rem', borderRadius: '20px',
+                background: 'rgba(201,162,39,0.1)', border: '1px solid rgba(201,162,39,0.28)',
+                fontSize: '0.68rem', fontWeight: 800, color: GOLD_DEEP, letterSpacing: '0.04em',
+              }}>
+                STRATEGY {entryStrategies.enabled.length}/{entryStrategies.maxEnabled}
+              </span>
+              {/* EMA status badge (visible when EMA Crossover strategy enabled) */}
+              {Array.isArray(emaLines) && emaLines.length > 0 && (
+                <span style={{
+                  display: 'inline-flex', alignItems: 'center', gap: '0.4rem',
+                  padding: '0.22rem 0.6rem', borderRadius: '20px',
+                  background: 'rgba(201,162,39,0.04)', border: '1px solid rgba(201,162,39,0.16)',
+                  fontSize: '0.66rem', fontWeight: 800, color: GOLD_DEEP, letterSpacing: '0.04em',
+                }} title={`EMA lines visible (${emaLines.map(e=>e.period).join('/')})`}>
+                  <span style={{ fontSize: '0.72rem', fontWeight: 900, color: '#92710a' }}>EMA</span>
+                  <span style={{ fontSize: '0.66rem', fontWeight: 800, color: '#444' }}>{emaLines.map(e=>e.period).join('/')}</span>
+                  <span style={{ fontSize: '0.66rem', fontWeight: 700, color: emaCrossMarkers && emaCrossMarkers.length > 0 ? '#16a34a' : '#999' }}>{emaCrossMarkers ? `${emaCrossMarkers.length}×` : '0×'}</span>
+                </span>
+              )}
             </div>
             <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
               {/* Market status badge */}
@@ -1529,6 +1894,78 @@ export default function TradingView() {
               <span style={{ color: '#aaa', fontSize: '0.7rem' }}>Vol:</span>
               <span style={{ color: GOLD_DEEP, fontWeight: 800 }}>{fmtVol(totalVolume)}</span>
             </div>
+
+            {/* Live strategy status strip */}
+            {(entryStrategies.available || []).length > 0 && (
+              <div style={{
+                width: '100%',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '0.35rem',
+                flexWrap: 'wrap',
+                marginTop: '0.12rem',
+                paddingTop: '0.35rem',
+                borderTop: '1px dashed rgba(201,162,39,0.22)',
+              }}>
+                <span style={{ fontSize: '0.64rem', fontWeight: 800, color: '#b5973b', letterSpacing: '0.05em' }}>
+                  LIVE STRATEGIES
+                </span>
+                {(entryStrategies.available || []).map((s) => (
+                  <span
+                    key={s.id}
+                    style={{
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: '0.25rem',
+                      padding: '0.14rem 0.46rem',
+                      borderRadius: '999px',
+                      border: `1px solid ${s.enabled ? 'rgba(22,163,74,0.28)' : 'rgba(107,114,128,0.2)'}`,
+                      background: s.enabled ? 'rgba(22,163,74,0.1)' : 'rgba(107,114,128,0.08)',
+                      color: s.enabled ? '#15803d' : '#6b7280',
+                      fontSize: '0.64rem',
+                      fontWeight: 800,
+                      letterSpacing: '0.02em',
+                    }}
+                  >
+                    <span style={{
+                      width: '6px',
+                      height: '6px',
+                      borderRadius: '50%',
+                      background: s.enabled ? '#22c55e' : '#9ca3af',
+                      display: 'inline-block',
+                    }} />
+                    {s.label} · {s.enabled ? 'ON' : 'OFF'}
+                  </span>
+                ))}
+                <span
+                  key="show-ema-overlay"
+                  onClick={() => setShowEmaOverlay(prev => !prev)}
+                  style={{
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: '0.25rem',
+                    padding: '0.14rem 0.46rem',
+                    borderRadius: '999px',
+                    border: `1px solid ${showEmaOverlay ? 'rgba(37,99,235,0.22)' : 'rgba(107,114,128,0.2)'}`,
+                    background: showEmaOverlay ? 'rgba(37,99,235,0.06)' : 'rgba(107,114,128,0.04)',
+                    color: showEmaOverlay ? '#1e3a8a' : '#6b7280',
+                    fontSize: '0.64rem',
+                    fontWeight: 800,
+                    letterSpacing: '0.02em',
+                    cursor: 'pointer',
+                  }}
+                >
+                  <span style={{
+                    width: '6px',
+                    height: '6px',
+                    borderRadius: '50%',
+                    background: showEmaOverlay ? '#2563eb' : '#9ca3af',
+                    display: 'inline-block',
+                  }} />
+                  EMA Overlay · {showEmaOverlay ? 'ON' : 'OFF'}
+                </span>
+              </div>
+            )}
           </div>
 
           <CandleChart
@@ -1537,6 +1974,9 @@ export default function TradingView() {
             rsiPoints={rsiPoints}
             rsiMaPoints={rsiMaPoints}
             rsiMarkers={rsiMarkers}
+            emaLines={emaLines}
+            emaCrossMarkers={emaCrossMarkers}
+            rsiMeanReversionMarkers={rsiMeanReversionMarkers}
             fitKey={selected.symbol + '_' + interval}
             livePrice={livePrice}
           />
@@ -1603,6 +2043,7 @@ export default function TradingView() {
                       const isOrder = tick.source === 'order_placed' || tick.source === 'order_replaced'
                       const isSell = tick.source === 'sell'
                       const src = String(isSell ? (tick.exit_reason || 'sell') : (tick.source || 'tick')).toUpperCase()
+                      const orderStatusAt = tick.status_at || tick.filled_at || tick.canceled_at || tick.updated_at || tick.submitted_at || tick.ts
                       const peakPct = toNum(tick.max_pnl_pct)
                       const peakPx = fillPx != null && peakPct != null ? fillPx * (1 + peakPct / 100) : null
                       const rowBg = isSell
@@ -1643,7 +2084,7 @@ export default function TradingView() {
                           </td>
                           <td style={{ padding: '0.26rem 0.38rem', fontFamily: 'monospace', color: '#555', whiteSpace: 'nowrap' }}>
                             {isOrder
-                              ? `${String(tick.status || 'live').toUpperCase()}${tick.order_id ? ` · ${String(tick.order_id).slice(0, 8)}…` : ''}`
+                              ? `${String(tick.status || 'live').toUpperCase()}${tick.order_id ? ` · ${String(tick.order_id).slice(0, 8)}…` : ''} @ ${fmtTickTime(orderStatusAt)}`
                               : tick.sl_action === 'UPDATED'
                                 ? `${fmtMoneyMaybe(tick.sl_prev_price)} -> ${fmtMoneyMaybe(tick.sl_new_price)}`
                                 : 'No change'}
@@ -1854,6 +2295,7 @@ export default function TradingView() {
                       <div style={{ marginTop: '0.65rem', display: 'flex', justifyContent: 'flex-end' }}>
                         <button
                           onClick={() => handleLiquidatePosition(p.symbol)}
+                          disabled={liquidating === p.symbol}
                           style={{
                             padding: '0.35rem 0.7rem',
                             borderRadius: '8px',
@@ -1862,10 +2304,21 @@ export default function TradingView() {
                             color: '#ef4444',
                             fontSize: '0.72rem',
                             fontWeight: 800,
-                            cursor: 'pointer',
+                            cursor: liquidating === p.symbol ? 'not-allowed' : 'pointer',
+                            opacity: liquidating === p.symbol ? 0.6 : 1,
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: '0.45rem',
                           }}
                         >
-                          Liquidate
+                          {liquidating === p.symbol ? (
+                            <>
+                              <Loader size="small" variant="classic" text="" />
+                              <span style={{ fontSize: '0.72rem', fontWeight: 800 }}>Liquidating...</span>
+                            </>
+                          ) : (
+                            'Liquidate'
+                          )}
                         </button>
                       </div>
                     </div>
@@ -2033,6 +2486,7 @@ export default function TradingView() {
                         : { label: 'AIT', bg: 'rgba(201,162,39,0.12)', color: GOLD_DEEP }
                 const sideLabel = t.optionType !== '—' ? t.optionType.toUpperCase() : '—'
                 const exitReason = String(t.exitReason || t.exit_reason || '—').replace(/_/g, ' ')
+                const entryStrategyText = formatEntryStrategies(t)
 
                 return (
                   <div
@@ -2078,6 +2532,33 @@ export default function TradingView() {
                         </div>
                       </div>
                     </div>
+
+                    {t.type !== 'manual' && entryStrategyText !== '—' && (
+                      <div style={{
+                        marginTop: '0.5rem',
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '0.35rem',
+                        flexWrap: 'wrap',
+                      }}>
+                        <span style={{ fontSize: '0.6rem', fontWeight: 800, color: '#b5973b', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                          Entry Strategy
+                        </span>
+                        {resolveEntryStrategyNames(t).map(name => (
+                          <span key={name} style={{
+                            padding: '0.14rem 0.46rem',
+                            borderRadius: '999px',
+                            border: '1px solid rgba(201,162,39,0.22)',
+                            background: 'rgba(201,162,39,0.07)',
+                            color: GOLD_DEEP,
+                            fontSize: '0.64rem',
+                            fontWeight: 800,
+                          }}>
+                            {name}
+                          </span>
+                        ))}
+                      </div>
+                    )}
 
                     <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(135px, 1fr))', gap: '0.3rem', marginTop: '0.52rem' }}>
                       {[
@@ -2190,6 +2671,71 @@ export default function TradingView() {
           </button>
         </div>
 
+        {/* Entry Strategy Toggles */}
+        <div style={{
+          background: '#fff', border: '1px solid rgba(201,162,39,0.18)', borderRadius: '14px',
+          padding: '0.95rem 0.9rem', boxShadow: '0 2px 10px rgba(0,0,0,0.04)', flexShrink: 0,
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.65rem' }}>
+            <div style={{ fontSize: '0.74rem', fontWeight: 800, color: '#111', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+              Entry Strategies
+            </div>
+            <div style={{ fontSize: '0.66rem', fontWeight: 700, color: GOLD_DEEP }}>
+              {entryStrategies.enabled.length}/{entryStrategies.maxEnabled}
+            </div>
+          </div>
+          <div style={{ fontSize: '0.67rem', color: '#777', marginBottom: '0.6rem', lineHeight: 1.35 }}>
+            Enable up to {entryStrategies.maxEnabled} for entry. Exit logic stays unchanged.
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.42rem' }}>
+            {(entryStrategies.available || []).map((item) => {
+              const isEnabled = !!item.enabled
+              const maxReached = !isEnabled && entryStrategies.enabled.length >= (entryStrategies.maxEnabled || 2)
+              return (
+                <button
+                  key={item.id}
+                  onClick={() => toggleEntryStrategy(item.id, !isEnabled)}
+                  disabled={strategyBusy || maxReached}
+                  title={maxReached ? `Maximum ${entryStrategies.maxEnabled} strategies can be active` : ''}
+                  style={{
+                    width: '100%',
+                    textAlign: 'left',
+                    padding: '0.5rem 0.62rem',
+                    borderRadius: '9px',
+                    border: `1px solid ${isEnabled ? 'rgba(201,162,39,0.5)' : 'rgba(0,0,0,0.1)'}`,
+                    background: isEnabled
+                      ? 'linear-gradient(135deg, rgba(201,162,39,0.18) 0%, rgba(245,197,24,0.2) 100%)'
+                      : '#fff',
+                    color: isEnabled ? '#111' : '#555',
+                    fontSize: '0.72rem',
+                    fontWeight: isEnabled ? 700 : 600,
+                    cursor: strategyBusy || maxReached ? 'not-allowed' : 'pointer',
+                    opacity: strategyBusy || maxReached ? 0.55 : 1,
+                    transition: 'all 0.15s ease',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                  }}
+                >
+                  <span>{item.label}</span>
+                  <span style={{
+                    minWidth: '38px',
+                    textAlign: 'center',
+                    fontSize: '0.64rem',
+                    fontWeight: 800,
+                    borderRadius: '999px',
+                    padding: '0.12rem 0.32rem',
+                    background: isEnabled ? 'rgba(16,185,129,0.14)' : 'rgba(107,114,128,0.12)',
+                    color: isEnabled ? '#047857' : '#6b7280',
+                  }}>
+                    {isEnabled ? 'ON' : 'OFF'}
+                  </span>
+                </button>
+              )
+            })}
+          </div>
+        </div>
+
         {/* ── MANUAL TRADE SECTION ── always visible; Buy/Sell hidden in AI mode */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
 
@@ -2197,12 +2743,31 @@ export default function TradingView() {
           <div style={{ background: '#fff', border: '1px solid rgba(201,162,39,0.15)', borderRadius: '14px', padding: '1.25rem', boxShadow: '0 2px 12px rgba(0,0,0,0.04)' }}>
             <div style={{ fontSize: '0.78rem', fontWeight: 700, color: '#111', marginBottom: '1rem', textTransform: 'uppercase', letterSpacing: '0.06em', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
               <User size={13} color={GOLD_DEEP} /> Trade Setup
-              {suggestLoading && (
+              {suggestLoading && autoSuggestEnabled && (
                 <span style={{ marginLeft: 'auto', fontSize: '0.65rem', color: GOLD_DEEP, fontWeight: 600 }}>loading...</span>
+              )}
+              {!manualPosition && (
+                <button
+                  onClick={() => setAutoSuggestEnabled(v => !v)}
+                  style={{
+                    marginLeft: suggestLoading && autoSuggestEnabled ? '0' : 'auto',
+                    padding: '0.2rem 0.5rem',
+                    borderRadius: '6px',
+                    border: `1px solid ${autoSuggestEnabled ? 'rgba(22,163,74,0.35)' : 'rgba(100,100,100,0.25)'}`,
+                    background: autoSuggestEnabled ? 'rgba(22,163,74,0.08)' : 'rgba(100,100,100,0.08)',
+                    color: autoSuggestEnabled ? '#16a34a' : '#666',
+                    fontSize: '0.65rem',
+                    fontWeight: 800,
+                    cursor: 'pointer',
+                  }}
+                  title="Toggle auto-suggest form updates"
+                >
+                  SUGGEST {autoSuggestEnabled ? 'ON' : 'OFF'}
+                </button>
               )}
               {!suggestLoading && !manualPosition && (
                 <button onClick={() => fetchSuggest(selected.symbol)} style={{
-                  marginLeft: 'auto', padding: '0.2rem 0.5rem', borderRadius: '6px', border: `1px solid rgba(201,162,39,0.3)`,
+                  marginLeft: '0.3rem', padding: '0.2rem 0.5rem', borderRadius: '6px', border: `1px solid rgba(201,162,39,0.3)`,
                   background: 'rgba(201,162,39,0.07)', color: GOLD_DEEP, fontSize: '0.65rem', fontWeight: 700, cursor: 'pointer',
                 }}>Refresh</button>
               )}
@@ -2213,14 +2778,13 @@ export default function TradingView() {
               <label style={{ fontSize: '0.68rem', fontWeight: 700, color: '#888', textTransform: 'uppercase', letterSpacing: '0.05em', display: 'block', marginBottom: '0.35rem' }}>Strike Price</label>
               <div style={{ display: 'flex', alignItems: 'center', border: `1.5px solid ${manualPosition ? 'rgba(0,0,0,0.08)' : 'rgba(201,162,39,0.3)'}`, borderRadius: '8px', padding: '0.48rem 0.75rem', background: manualPosition ? '#f9f9f9' : '#fff' }}>
                 <span style={{ fontSize: '0.82rem', color: '#aaa', marginRight: '3px', fontWeight: 600 }}>$</span>
-                <input
-                  type="number" placeholder="e.g. 185"
-                  value={strikePrice}
-                  disabled={!!manualPosition}
-                  onChange={e => setStrikePrice(e.target.value)}
-                  style={{ flex: 1, border: 'none', outline: 'none', background: 'transparent', fontSize: '0.88rem', fontWeight: 700, color: '#111', minWidth: 0 }}
-                />
-              </div>
+                        <input
+                          type="number" step="1" inputMode="numeric" placeholder="e.g. 185"
+                          value={strikePrice}
+                          disabled={!!manualPosition}
+                          onChange={e => setStrikePrice(e.target.value)}
+                          style={{ flex: 1, border: 'none', outline: 'none', background: 'transparent', fontSize: '0.88rem', fontWeight: 700, color: '#111', minWidth: 0 }}
+                        />
             </div>
 
             {/* Direction */}
@@ -2255,8 +2819,8 @@ export default function TradingView() {
                     setOptionType(opt.val)
                     if (!manualPosition) {
                       suggestContractRef.current = null
-                      // pass false: user picked the type — don't let backend flip it back
-                      fetchSuggest(selected.symbol, opt.val, false)
+                      // Always sync once on type switch so strike/expiry follow selected contract.
+                      fetchSuggestForType(selected.symbol, opt.val, { applyForm: true, updateType: false })
                     }
                   }} disabled={!!manualPosition} style={{
                     flex: 1, padding: '0.45rem', borderRadius: '8px', border: 'none', cursor: manualPosition ? 'not-allowed' : 'pointer',
@@ -2300,6 +2864,58 @@ export default function TradingView() {
               <span style={{ color: direction === 'uptrend' ? '#16a34a' : '#ef4444' }}>· {direction === 'uptrend' ? 'Up' : 'Down'}</span>
             </div>
 
+            {!manualPosition && (
+              <div style={{
+                marginBottom: '0.75rem',
+                padding: '0.45rem 0.65rem',
+                borderRadius: '8px',
+                border: '1px solid rgba(0,0,0,0.08)',
+                background: '#fafafa',
+                fontSize: '0.66rem',
+                lineHeight: 1.4,
+                display: 'grid',
+                gap: '0.2rem',
+              }}>
+                <div style={{ color: '#666', fontWeight: 700 }}>
+                  SELECTED {optionType.toUpperCase()} CONTRACT: <span style={{ color: '#111', fontFamily: 'monospace' }}>{(optionType === 'put' ? quoteBook.put?.contract_name : quoteBook.call?.contract_name) || '—'}</span>
+                </div>
+                <div style={{ color: '#888', fontWeight: 700 }}>
+                  Expiry: <span style={{ color: '#111' }}>{(optionType === 'put' ? quoteBook.put?.expiry : quoteBook.call?.expiry) || expiry || '—'}</span>
+                  {' · '}
+                  Strike: <span style={{ color: '#111' }}>${(optionType === 'put' ? quoteBook.put?.strike_price : quoteBook.call?.strike_price) ?? strikePrice ?? '—'}</span>
+                </div>
+              </div>
+            )}
+
+            {!manualPosition && !autoSuggestEnabled && (
+              <div style={{
+                marginBottom: '0.7rem',
+                padding: '0.4rem 0.6rem',
+                borderRadius: '8px',
+                border: '1px solid rgba(201,162,39,0.18)',
+                background: 'rgba(201,162,39,0.04)',
+                fontSize: '0.68rem',
+                fontWeight: 700,
+                display: 'grid',
+                gap: '0.3rem',
+              }}>
+                <span style={{ color: '#16a34a' }}>
+                  CALL ready: {quoteBook.call?.ask > 0 ? `$${quoteBook.call.ask.toFixed(2)}` : '—'}
+                  {' · '}
+                  {quoteBook.call?.contract_name || '—'}
+                  {' · Exp '}
+                  {quoteBook.call?.expiry || '—'}
+                </span>
+                <span style={{ color: '#ef4444' }}>
+                  PUT ready: {quoteBook.put?.ask > 0 ? `$${quoteBook.put.ask.toFixed(2)}` : '—'}
+                  {' · '}
+                  {quoteBook.put?.contract_name || '—'}
+                  {' · Exp '}
+                  {quoteBook.put?.expiry || '—'}
+                </span>
+              </div>
+            )}
+
             {/* Bid / Ask price row + spread warning */}
             {!manualPosition && contractQuote && contractQuote.ask > 0 && (
               <div style={{ marginBottom: '0.75rem' }}>
@@ -2334,7 +2950,7 @@ export default function TradingView() {
             {/* Buy / Sell Button — hidden in AI mode, but always visible when a position is open */}
             {(tradeMode !== 'ai' || manualPosition) && <button
               onClick={manualPosition ? handleSell : handleBuy}
-              disabled={orderStatus === 'waiting' || orderStatus === 'selling' || (!manualPosition && (!strikePrice || !expiry))}
+              disabled={orderStatus === 'waiting' || orderStatus === 'selling' || (!manualPosition && !expiry)}
               style={{
                 width: '100%', padding: '0.9rem', borderRadius: '10px', border: 'none',
                 cursor: (orderStatus === 'waiting' || orderStatus === 'selling' || (!manualPosition && (!strikePrice || !expiry))) ? 'not-allowed' : 'pointer',
@@ -2511,7 +3127,11 @@ export default function TradingView() {
                       {ticks.map((tick, idx) => {
                         const isOrder = tick.source === 'order_placed' || tick.source === 'order_replaced'
                         const isSell = tick.source === 'sell'
-                        const src = String(isSell ? (tick.exit_reason || 'sell') : (tick.source || 'tick')).toUpperCase()
+                        const srcBase = String(isSell ? (tick.exit_reason || 'sell') : (tick.source || 'tick')).toUpperCase()
+                        const statusAt = tick.status_at || tick.filled_at || tick.canceled_at || tick.updated_at || tick.submitted_at || tick.ts
+                        const src = isOrder
+                          ? `${srcBase}:${String(tick.status || 'live').toUpperCase()} @ ${fmtTickTime(statusAt)}`
+                          : srcBase
                         const price = !isOrder
                           ? (tick.sellable_price ?? tick.mid_price ?? tick.bid_price)
                           : (tick.fill_price ?? tick.limit_price)
@@ -2689,6 +3309,7 @@ export default function TradingView() {
         </div>
       )}
 
+    </div>
     </div>
   )
 }

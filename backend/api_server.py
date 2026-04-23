@@ -157,7 +157,7 @@ from config import (
     ENTRY_ALLOW_PREV_BAR_CROSS, MIN_RSI_MA_GAP, PAPER_TRADING, POST_TRADE_COOLDOWN_BARS,
     QTY, QP_GAP_PCT, RSI_MA_PERIOD, RSI_PERIOD, SECRET_KEY,
     STOCK_DATA_FEED, STOP_LOSS_PCT, STRADDLE_ENABLED, STRADDLE_OPEN_WINDOW_MIN,
-    SYMBOL, TAKE_PROFIT_PCT, WATCHLIST_SYMBOLS,
+    SYMBOL, TAKE_PROFIT_PCT, WATCHLIST_SYMBOLS, compute_tp_price, compute_sl_price,
     SL_STOP_LIMIT_BUFFER_PCT,
     EXIT_TAKE_PROFIT_ENABLED, EXIT_STOP_LOSS_ENABLED, PRICE_POLL_SEC,
     AIT_ENABLED, MT_ENABLED,
@@ -168,12 +168,20 @@ from market_data import fetch_current_price_1m, fetch_obr, get_option_price, sel
 from strategy_helpers import determine_signal, get_expiry_date, ny_trading_date
 from rsi_analyer import analyze_rsi
 from symbol_mode import ensure_defaults, get_mode, set_mode, get_all_modes, VALID_MODES
+from strategy_mode import (
+    ensure_defaults as ensure_strategy_defaults,
+    get_strategy_config,
+    set_strategy_enabled,
+    STRATEGY_LABELS,
+    VALID_STRATEGIES,
+)
 from monitoring import monitor_with_polling, monitor_with_websocket, _init_exit_state, _update_dynamic_thresholds, _evaluate_priority_exit, _cancel_exit_orders, _append_sell_tick
 from order_execution import (
     place_market_order, wait_for_fill, register_position, mark_selling,
     close_position, get_open_positions, get_live_positions,
     update_live_exit_state, set_live_exit_reason,
 )
+from order_execution import upsert_broker_safety_sl
 from position_monitor_loop import start_position_monitor_service
 from logger import log_trade
 
@@ -997,7 +1005,7 @@ def _poll_straddle_call_call_day(
             + (" [CALL DAY — SL disabled]" if call_day else "")
         )
 
-        exit_reason = _evaluate_priority_exit(pnl_pct, exit_state, use_extended_exit_criteria=True)
+        exit_reason = _evaluate_priority_exit(pnl_pct, exit_state, sellable_price=sellable, use_extended_exit_criteria=True)
 
         # CALL-day: suppress SL so the winning leg can run to TP/QP
         if call_day and exit_reason == "STOP_LOSS_EXIT":
@@ -1076,7 +1084,7 @@ def _poll_straddle_call_call_day(
             + (" [CALL DAY \u2014 SL disabled]" if call_day else "")
         )
 
-        exit_reason = _evaluate_priority_exit(pnl_pct, exit_state, use_extended_exit_criteria=True)
+        exit_reason = _evaluate_priority_exit(pnl_pct, exit_state, sellable_price=sellable, use_extended_exit_criteria=True)
 
         # CALL-day: suppress SL so the winning leg can run to TP/QP
         if call_day and exit_reason == "STOP_LOSS_EXIT":
@@ -1156,11 +1164,11 @@ def _ait_run_straddle(
                 allow_limit=False,
                 use_bracket=EXIT_BRACKET_QP_ENABLED,
                 take_profit_price=(
-                    max(0.01, round(entry_option_price * (1 + TAKE_PROFIT_PCT), 4))
+                    max(0.01, compute_tp_price(entry_option_price))
                     if entry_option_price and entry_option_price > 0 else None
                 ),
                 stop_loss_price=(
-                    max(0.01, round(entry_option_price * (1 - STOP_LOSS_PCT), 4))
+                    max(0.01, compute_sl_price(entry_option_price))
                     if entry_option_price and entry_option_price > 0 else None
                 ),
             )
@@ -1169,8 +1177,8 @@ def _ait_run_straddle(
                 print(f"[AIT:{symbol}] Straddle {leg_name} BUY failed: {filled_buy.status}")
                 continue
             fill_price = float(filled_buy.filled_avg_price or get_option_price(odc, contract.symbol))
-            tp_price = fill_price * (1 + TAKE_PROFIT_PCT)
-            sl_price = fill_price * (1 - STOP_LOSS_PCT)
+            tp_price = compute_tp_price(fill_price)
+            sl_price = compute_sl_price(fill_price)
             buy_order_id = str(buy_order.id)
             entry_time_iso = (
                 _to_iso(getattr(buy_order, "submitted_at", None))
@@ -1193,12 +1201,43 @@ def _ait_run_straddle(
                 trade_type="STRADDLE",
                 entry_time=entry_time_iso,
             )
+
+            # If bracket legs were NOT attached by the broker, proactively place
+            # a TP limit and a broker-side safety SL (stop-market) so exits exist
+            # immediately. Record initial_exit_state for the monitor thread.
+            initial_exit_state = None
+            try:
+                legs_attr = getattr(buy_order, "legs", None) or getattr(filled_buy, "legs", None)
+                if not legs_attr:
+                    # Place TP limit sell proactively
+                    tp_ord = place_market_order(
+                        tc,
+                        contract.symbol,
+                        QTY,
+                        OrderSide.SELL,
+                        reference_price=tp_price,
+                        allow_limit=True,
+                        force_limit=True,
+                    )
+                    tp_ord_id = str(getattr(tp_ord, "id", "") or "")
+                    # Upsert broker safety SL as stop-market
+                    sl_pct = ((tp_price / fill_price) - 1.0) * 100.0 if fill_price > 0 else 0.0
+                    # compute sl_dynamic_pct from sl_price
+                    sl_dynamic_pct = ((sl_price / fill_price) - 1.0) * 100.0 if fill_price > 0 else 0.0
+                    _ = upsert_broker_safety_sl(tc, buy_order_id, contract.symbol, QTY, fill_price, sl_dynamic_pct)
+                    initial_exit_state = _init_exit_state(fill_price, tp_price, sl_price)
+                    if tp_ord_id:
+                        initial_exit_state["tp_order_ids"] = [tp_ord_id]
+            except Exception:
+                initial_exit_state = None
+
             open_legs.append({
                 "leg_name": leg_name, "contract": contract,
                 "fill_price": fill_price, "tp_price": tp_price, "sl_price": sl_price,
                 "buy_order_id": buy_order_id,
                 "entry_signal_time": entry_time_iso,
                 "buy_filled_time": entry_time_iso,
+                "initial_exit_state": initial_exit_state,
             })
         except Exception as ex:
             print(f"[AIT:{symbol}] Straddle {leg_name} setup error: {ex}")
@@ -1230,6 +1269,7 @@ def _ait_run_straddle(
                     buy_order_id=buy_order_id,
                     buy_entry_order_id=buy_order_id,
                     tc=tc, qty=QTY,
+                    initial_exit_state=leg.get("initial_exit_state"),
                 )
                 exit_signal_time_iso = datetime.now(CDT).isoformat(timespec="seconds")
 
@@ -1460,11 +1500,11 @@ def _ait_trade_loop(
                 allow_limit=False,
                 use_bracket=EXIT_BRACKET_QP_ENABLED,
                 take_profit_price=(
-                    max(0.01, round(entry_signal_price * (1 + TAKE_PROFIT_PCT), 4))
+                    max(0.01, compute_tp_price(entry_signal_price))
                     if entry_signal_price and entry_signal_price > 0 else None
                 ),
                 stop_loss_price=(
-                    max(0.01, round(entry_signal_price * (1 - STOP_LOSS_PCT), 4))
+                    max(0.01, compute_sl_price(entry_signal_price))
                     if entry_signal_price and entry_signal_price > 0 else None
                 ),
             )
@@ -1478,8 +1518,8 @@ def _ait_trade_loop(
             fill_price = float(filled_buy.filled_avg_price or get_option_price(odc, contract_symbol))
             if entry_signal_price is None:
                 entry_signal_price = fill_price
-            tp_price = fill_price * (1 + TAKE_PROFIT_PCT)
-            sl_price = fill_price * (1 - STOP_LOSS_PCT)
+            tp_price = compute_tp_price(fill_price)
+            sl_price = compute_sl_price(fill_price)
             rsi_buy_order_id = str(buy_order.id)
             entry_time_iso = (
                 _to_iso(getattr(buy_order, "submitted_at", None))
@@ -1520,6 +1560,11 @@ def _ait_trade_loop(
                 signal_time=signal_detected_time_iso,
                 entry_time=buy_filled_time_iso,
                 entry_reasons=entry_info.get("reasons") if entry_info else None,
+                entry_strategies=entry_info.get("entry_strategies") if entry_info else None,
+                entry_strategy_names=[
+                    STRATEGY_LABELS.get(str(s), str(s))
+                    for s in (entry_info.get("entry_strategies") if entry_info else []) or []
+                ],
                 entry_filters_passed=entry_info.get("filters_passed") if entry_info else None,
             )
             print(f"[AIT:{symbol}] BUY FILLED: {fill_price:.4f} | buy_order_id={rsi_buy_order_id} | waiting for bracket TP/SL fill")
@@ -1629,6 +1674,8 @@ def _ait_trade_loop(
                 # Entry indicators from signal detection
                 _indicators = entry_info.get("indicators", {}) if entry_info else {}
                 _filters = entry_info.get("filters_passed", []) if entry_info else []
+                _entry_strategies = entry_info.get("entry_strategies", []) if entry_info else []
+                _entry_strategy_names = [STRATEGY_LABELS.get(str(s), str(s)) for s in _entry_strategies]
 
                 _ait_doc = {
                     "symbol": symbol, "contract_name": contract_symbol,
@@ -1681,6 +1728,8 @@ def _ait_trade_loop(
                     "entry_down_streak": int(rsi_result.get("down_streak", 0)),
                     "entry_underlying_price": current_price,
                     "entry_bar_time": price_bartime,
+                    "entry_strategies": _entry_strategies,
+                    "entry_strategy_names": _entry_strategy_names,
                     "entry_filters_passed": _filters,
                     "entry_trend": rsi_result.get("base_trend"),
                     "entry_vwap": _indicators.get("vwap"),
@@ -1785,8 +1834,8 @@ def _recovery_monitor_thread(
     buy_order_id: str,
 ) -> None:
     """Monitor a recovered position; sell when exit triggers; log to MongoDB."""
-    tp_price = entry_price * (1 + TAKE_PROFIT_PCT)
-    sl_price = entry_price * (1 - STOP_LOSS_PCT)
+    tp_price = compute_tp_price(entry_price)
+    sl_price = compute_sl_price(entry_price)
 
     print(
         f"[RECOVERY:{underlying}] Monitoring {contract_symbol} ({signal}) "
@@ -1804,12 +1853,16 @@ def _recovery_monitor_thread(
         snap_obj = extract_snapshot_for_symbol(snap, contract_symbol)
         snap_price = extract_snapshot_mid_price(snap_obj)
         if snap_price > 0:
-            pnl_now = (snap_price - entry_price) / entry_price * 100
-            print(f"[RECOVERY:{underlying}] Current price={snap_price:.4f} pnl={pnl_now:+.2f}%")
-            if pnl_now <= -STOP_LOSS_PCT * 100:
-                print(f"[RECOVERY:{underlying}] Already past SL ({pnl_now:+.2f}%) — selling immediately")
-                exit_reason = "SL_MISSED_GAPDOWN_MARKET_EXIT"
-                opt_price = snap_price
+            # For SL quick-check use configured absolute price threshold
+            try:
+                if snap_price <= sl_price:
+                    pnl_now = (snap_price - entry_price) / entry_price * 100
+                    print(f"[RECOVERY:{underlying}] Current price={snap_price:.4f} pnl={pnl_now:+.2f}%")
+                    print(f"[RECOVERY:{underlying}] Already past SL — selling immediately")
+                    exit_reason = "SL_MISSED_GAPDOWN_MARKET_EXIT"
+                    opt_price = snap_price
+            except Exception:
+                pass
     except Exception as ex:
         print(f"[RECOVERY:{underlying}] Quick price check failed: {ex}")
 
@@ -2033,8 +2086,9 @@ def _recover_open_positions() -> None:
         # Check if position is already way past SL — close immediately
         current_price_raw = float(getattr(pos, "current_price", 0) or 0)
         if current_price_raw > 0 and entry_price > 0:
-            pnl_now = (current_price_raw - entry_price) / entry_price * 100
-            if pnl_now <= -STOP_LOSS_PCT * 100:
+            sl_price = compute_sl_price(entry_price)
+            if current_price_raw <= sl_price:
+                pnl_now = (current_price_raw - entry_price) / entry_price * 100
                 print(
                     f"[RECOVERY] {contract_symbol} already at {pnl_now:+.2f}% (past SL) — "
                     f"closing immediately via Alpaca"
@@ -2098,8 +2152,8 @@ def _recover_open_positions() -> None:
         entry_time = entry_time_map.get(contract_symbol)
 
         # Register in position registry so it shows in LivePositions UI
-        tp_price = entry_price * (1 + TAKE_PROFIT_PCT)
-        sl_price = entry_price * (1 - STOP_LOSS_PCT)
+        tp_price = compute_tp_price(entry_price)
+        sl_price = compute_sl_price(entry_price)
         register_position(
             buy_order_id=buy_order_id,
             symbol=underlying,
@@ -2157,6 +2211,7 @@ async def _startup() -> None:
     # Ensure symbol_modes.json has defaults for all watchlist symbols.
     # Only fills MISSING entries — never overwrites a mode the user/frontend already set.
     ensure_defaults()
+    ensure_strategy_defaults()
     _init_straddle_mongo()
     asyncio.create_task(_straddle_runner_loop())
     asyncio.create_task(_straddle_monitor_loop())
@@ -2200,7 +2255,13 @@ def get_bars(
     #   1m/800 bars → 800min ÷ 390min/day ≈ 2.1 trading days → 7 cal days
     #   5m/200 bars → 1000min ÷ 78bars/day ≈ 2.6 trading days → 7 cal days
     #   Others: 7 cal days is comfortably enough.
-    days_back = 7
+    timeframe_key = str(timeframe or "").lower()
+    if "day" in timeframe_key or timeframe_key in {"1d", "day", "d"}:
+        days_back = max(365, int(limit * 2.2))
+    elif "hour" in timeframe_key or timeframe_key in {"1h", "4h"}:
+        days_back = max(30, int(limit / 6))
+    else:
+        days_back = 7
     start = end - timedelta(days=days_back)
 
     try:
@@ -2462,11 +2523,62 @@ def close_position_endpoint(symbol: str) -> dict[str, Any]:
     except Exception:
         position_obj = None
 
+    result = None
     try:
-        response = trading_client.close_position(ticker)
-        result = _serialize_order(response) if response is not None else None
+        # If we detected a live position from the broker, prefer submitting
+        # an explicit market order so the liquidation hits Alpaca immediately.
+        if position_obj is not None and qty > 0:
+            sell_side = OrderSide.BUY if "short" in side_raw else OrderSide.SELL
+
+            # If the bot has an internal registry entry for this contract, capture it
+            buy_order_id_for_contract = None
+            try:
+                for lot in get_open_positions():
+                    if str(lot.get("contract_symbol") or "") == str(ticker):
+                        buy_order_id_for_contract = lot.get("buy_order_id")
+                        break
+            except Exception:
+                buy_order_id_for_contract = None
+
+            # Submit a market order immediately (do not attach TP/SL here)
+            try:
+                order = place_market_order(trading_client, ticker, qty, sell_side, allow_limit=False)
+                order_id = str(getattr(order, "id", "") or "")
+                # If we have a registry buy_order_id, mark it as SELLING now
+                if buy_order_id_for_contract and order_id:
+                    try:
+                        mark_selling(buy_order_id_for_contract, order_id)
+                    except Exception:
+                        pass
+
+                # Wait briefly for fill to capture filled price for the log
+                try:
+                    filled = wait_for_fill(trading_client, order_id, FILL_WAIT_SEC)
+                    result = _serialize_order(filled or order)
+                    # If we have a registered lot, finalize it as closed
+                    if buy_order_id_for_contract and getattr(filled or order, "status", None) and str(getattr(filled or order, "status", "")).lower() == "filled":
+                        try:
+                            close_position(buy_order_id_for_contract)
+                        except Exception:
+                            pass
+                except Exception:
+                    # Fill may not complete within timeout — still return submitted order
+                    result = _serialize_order(order) if order is not None else None
+            except Exception as ex:
+                # If direct market order failed, fall back to the convenience close_position
+                try:
+                    response = trading_client.close_position(ticker)
+                    result = _serialize_order(response) if response is not None else None
+                except Exception:
+                    result = None
+        else:
+            # No broker-side position detected — use client-close as a fallback
+            try:
+                response = trading_client.close_position(ticker)
+                result = _serialize_order(response) if response is not None else None
+            except Exception:
+                result = None
     except Exception:
-        # Position may not exist in Alpaca (frontend-only position) — treat as success
         result = None
 
     logged_trade = None
@@ -2942,11 +3054,11 @@ def manual_option_buy(body: ManualOptionBuyBody) -> dict[str, Any]:
             allow_limit=False,
             use_bracket=EXIT_BRACKET_QP_ENABLED,
             take_profit_price=(
-                max(0.01, round(entry_price * (1 + TAKE_PROFIT_PCT), 4))
+                max(0.01, compute_tp_price(entry_price))
                 if entry_price and entry_price > 0 else None
             ),
             stop_loss_price=(
-                max(0.01, round(entry_price * (1 - STOP_LOSS_PCT), 4))
+                max(0.01, compute_sl_price(entry_price))
                 if entry_price and entry_price > 0 else None
             ),
         )
@@ -2963,7 +3075,7 @@ def manual_option_buy(body: ManualOptionBuyBody) -> dict[str, Any]:
     safety_stop_order = None
     if fill_price and fill_price > 0:
         try:
-            safety_stop_price = max(0.01, round(fill_price * (1 - STOP_LOSS_PCT), 4))
+            safety_stop_price = max(0.01, compute_sl_price(fill_price))
             safety_stop_limit_price = max(
                 0.01,
                 round(safety_stop_price * (1 - SL_STOP_LIMIT_BUFFER_PCT / 100.0), 4),
@@ -3102,8 +3214,8 @@ def _manual_trade_monitor_thread(
     option_type = parsed.get("signal", "").upper() if parsed else ""
     signal = option_type if option_type in ("CALL", "PUT") else "CALL"
 
-    tp_price = entry_price * (1 + TAKE_PROFIT_PCT)
-    sl_price = entry_price * (1 - STOP_LOSS_PCT)
+    tp_price = compute_tp_price(entry_price)
+    sl_price = compute_sl_price(entry_price)
 
     print(
         f"[MT:{underlying}] Monitor started for {contract_symbol} "
@@ -3317,11 +3429,11 @@ def manual_trade_buy(body: ManualTradeBuyBody) -> dict[str, Any]:
             allow_limit=False,
             use_bracket=EXIT_BRACKET_QP_ENABLED,
             take_profit_price=(
-                max(0.01, round(entry_price * (1 + TAKE_PROFIT_PCT), 4))
+                max(0.01, compute_tp_price(entry_price))
                 if entry_price and entry_price > 0 else None
             ),
             stop_loss_price=(
-                max(0.01, round(entry_price * (1 - STOP_LOSS_PCT), 4))
+                max(0.01, compute_sl_price(entry_price))
                 if entry_price and entry_price > 0 else None
             ),
         )
@@ -3359,8 +3471,8 @@ def manual_trade_buy(body: ManualTradeBuyBody) -> dict[str, Any]:
     )
 
     # 3. Register position so it appears in LivePositions UI
-    tp_price = fill_price * (1 + TAKE_PROFIT_PCT)
-    sl_price = fill_price * (1 - STOP_LOSS_PCT)
+    tp_price = compute_tp_price(fill_price)
+    sl_price = compute_sl_price(fill_price)
     register_position(
         buy_order_id=buy_order_id,
         symbol=underlying,
@@ -3530,6 +3642,8 @@ def get_options_log(
                 "pnlPct": r.get("pnl_pct"),
                 "tradeDurationSec": r.get("trade_duration_sec"),
                 "entryRsi": r.get("entry_rsi"),
+                "entryStrategies": r.get("entry_strategies"),
+                "entryStrategyNames": r.get("entry_strategy_names"),
                 "entryRsiMa": r.get("entry_rsi_ma"),
                 "entryRsiDelta": r.get("entry_rsi_delta"),
                 "entryRsiMaGap": r.get("entry_rsi_ma_gap"),
@@ -3601,6 +3715,11 @@ class SymbolModeBody(BaseModel):
     mode: str   = Field(..., description="'auto' (AIT) | 'off' | 'manual'")
 
 
+class StrategyToggleBody(BaseModel):
+    strategy: str = Field(..., description=f"One of: {sorted(VALID_STRATEGIES)}")
+    enabled: bool = Field(..., description="true to enable, false to disable")
+
+
 @app.get("/api/config/trading-modes")
 def get_trading_modes_config() -> dict[str, Any]:
     """
@@ -3640,7 +3759,24 @@ def get_trading_modes_config() -> dict[str, Any]:
         "config_healthy": config_healthy,
         "config_warning": config_warning,
         "symbols": per_symbol,
+        "strategies": get_strategy_config(),
     }
+
+
+@app.get("/api/strategies")
+def get_entry_strategies() -> dict[str, Any]:
+    """Return available entry strategies and currently enabled strategy IDs."""
+    return get_strategy_config()
+
+
+@app.post("/api/strategies/toggle")
+def toggle_entry_strategy(body: StrategyToggleBody) -> dict[str, Any]:
+    """Enable/disable one entry strategy. At most two strategies can be enabled."""
+    try:
+        cfg = set_strategy_enabled(body.strategy, body.enabled)
+    except ValueError as ex:
+        raise HTTPException(status_code=400, detail=str(ex)) from ex
+    return {"status": "updated", **cfg}
 
 
 @app.get("/api/symbol/mode")
@@ -4259,7 +4395,9 @@ def get_signal_readiness() -> dict[str, Any]:
 
         # Readiness parity with backend entry logic:
         # If determine_signal would enter now, force that side to 100.
-        signal_now, _, _, _ = determine_signal(rsi_result, close_price)
+        signal_now, _, _, entry_info = determine_signal(rsi_result, close_price)
+        # expose entry strategies if provided by determine_signal
+        item["entry_strategies"] = entry_info.get("entry_strategies") if entry_info else []
         item["entry_signal"] = signal_now
         if signal_now == "CALL":
             item["call_score"] = 100
@@ -4286,6 +4424,36 @@ def get_signal_readiness() -> dict[str, Any]:
         # Determine dominant signal & status
         cs = item["call_score"]
         ps = item["put_score"]
+
+        # Per-strategy forming flags — run lightweight detectors and expose *_forming and *_type keys
+        try:
+            from strategy_rsi_crossover import detect as _rsi_crossover_detect
+            from strategy_ema_crossover import detect as _ema_crossover_detect
+            from strategy_rsi_mean_reversion import detect as _rsi_mr_detect
+            from strategy_macd_crossover import detect as _macd_detect
+            from strategy_bollinger_bands import detect as _bb_detect
+
+            strategy_map = {
+                "RSI_CROSSOVER": _rsi_crossover_detect,
+                "EMA_CROSSOVER": _ema_crossover_detect,
+                "RSI_MEAN_REVERSION": _rsi_mr_detect,
+                "MACD_CROSSOVER": _macd_detect,
+                "BOLLINGER_BANDS": _bb_detect,
+            }
+
+            for sid, fn in strategy_map.items():
+                # Some detectors accept cross flags; pass what we can
+                if sid == "RSI_CROSSOVER":
+                    calls, puts = fn(rsi_result, close_price, cross_up, cross_down)
+                else:
+                    calls, puts = fn(rsi_result, close_price)
+                forming = bool((calls and len(calls) > 0) or (puts and len(puts) > 0))
+                base = sid.lower()
+                item[f"{base}_forming"] = forming
+                item[f"{base}_type"] = ("call" if calls and len(calls) > 0 else ("put" if puts and len(puts) > 0 else None))
+        except Exception:
+            # Non-fatal: fail silently if detectors unavailable
+            pass
         if signal_now == "CALL" and not block_reason:
             item["status"] = "CALL_READY"
         elif signal_now == "PUT" and not block_reason:

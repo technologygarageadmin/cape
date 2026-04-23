@@ -31,6 +31,8 @@ DISPLAY_ALLOWLIST = {
     "/api/manual-trades",
     "/api/config",
     "/api/config/trading-modes",
+    "/api/strategies",
+    "/api/strategies/toggle",
     "/api/symbol/mode",
     "/api/symbol/modes",
     "/api/signal-readiness",
@@ -138,6 +140,19 @@ async def post_manual_trades(request: Request) -> Response:
     return _forward("POST", "/api/manual-trades", query=dict(request.query_params), payload=body)
 
 
+@app.post("/api/positions/{symbol}/close")
+async def post_close_position(symbol: str, request: Request) -> Response:
+    """Forward position close requests to the trading backend so the UI's
+    Liquidate button works when the display server is fronting traffic.
+    """
+    # Body is optional for this endpoint; forward any JSON payload if present
+    try:
+        body = await request.json()
+    except Exception:
+        body = None
+    return _forward("POST", f"/api/positions/{symbol}/close", query=dict(request.query_params), payload=body)
+
+
 @app.get("/api/config")
 def get_config(request: Request) -> Response:
     return _forward("GET", "/api/config", query=dict(request.query_params))
@@ -146,6 +161,17 @@ def get_config(request: Request) -> Response:
 @app.get("/api/config/trading-modes")
 def get_trading_modes(request: Request) -> Response:
     return _forward("GET", "/api/config/trading-modes", query=dict(request.query_params))
+
+
+@app.get("/api/strategies")
+def get_entry_strategies(request: Request) -> Response:
+    return _forward("GET", "/api/strategies", query=dict(request.query_params))
+
+
+@app.post("/api/strategies/toggle")
+async def toggle_entry_strategy(request: Request) -> Response:
+    body = await request.json()
+    return _forward("POST", "/api/strategies/toggle", query=dict(request.query_params), payload=body)
 
 
 @app.get("/api/symbol/mode")

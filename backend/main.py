@@ -85,6 +85,8 @@ from config import (
     STOP_LOSS_PCT,
     SYMBOL,
     TAKE_PROFIT_PCT,
+    compute_tp_price,
+    compute_sl_price,
 )
 from logger import info, init_log, log_shutdown_summary, validate_credentials, write_log
 from market_data import (
@@ -96,6 +98,7 @@ from monitoring import monitor_with_polling, monitor_with_websocket
 from order_execution import place_market_order, wait_for_fill
 from rsi_analyer import analyze_rsi
 from strategy_helpers import determine_signal, get_expiry_date
+from strategy_mode import STRATEGY_LABELS
 from symbol_mode import ensure_defaults, get_mode, set_mode
 
 
@@ -108,6 +111,11 @@ INSTANCE_LOCK_FILE = os.path.join(
 )
 
 _instance_lock_fd = None
+
+
+def _entry_strategy_names(entry_info: dict | None) -> list[str]:
+    strategies = (entry_info or {}).get("entry_strategies") or []
+    return [STRATEGY_LABELS.get(str(s), str(s)) for s in strategies]
 
 
 def _pid_is_running(pid: int) -> bool:
@@ -395,7 +403,7 @@ def execute_startup_straddle(
                 reference_price=current_price,
                 allow_limit=False,
                 use_bracket=EXIT_BRACKET_QP_ENABLED,
-                take_profit_price=max(0.01, round(current_price * (1 + TAKE_PROFIT_PCT), 4)),
+                take_profit_price=max(0.01, compute_tp_price(current_price)),
                 stop_loss_price=max(0.01, round(current_price * (1 + BRACKET_QP_PLACEHOLDER_PCT / 100.0), 4)),
             )
             filled_buy = wait_for_fill(trading_client, str(buy_order.id), FILL_WAIT_SEC)
@@ -423,8 +431,8 @@ def execute_startup_straddle(
                 _iso_ts(getattr(filled_buy, "filled_at", None))
                 or datetime.now(timezone.utc).isoformat(timespec="seconds")
             )
-            tp_price = fill_price * (1 + TAKE_PROFIT_PCT)
-            sl_price = fill_price * (1 - STOP_LOSS_PCT)
+            tp_price = compute_tp_price(fill_price)
+            sl_price = compute_sl_price(fill_price)
 
             info(
                 f" Startup {leg_name} FILLED: {fill_price:.4f} | "
@@ -774,7 +782,10 @@ def main() -> None:
                 time.sleep(CHECK_INTERVAL_SEC)
                 continue
 
+            entry_strategies = (entry_info or {}).get("entry_strategies") or []
+            entry_strategy_names = _entry_strategy_names(entry_info)
             info(f" >>> SIGNAL: {signal} <<<")
+            info(f" Entry strategy: {', '.join(entry_strategy_names) if entry_strategy_names else 'Unknown'}")
             bar_time_utc = rsi_result.get("alpaca_bar_time_utc")
             bar_time = bar_time_utc.strftime("%Y-%m-%d %H:%M:%S") if bar_time_utc else None
             entry_signal_time_iso = (
@@ -790,8 +801,10 @@ def main() -> None:
                     "bar_time": bar_time,
                     "price": current_price,
                     "signal": signal,
+                    "entry_strategies": ",".join(str(s) for s in entry_strategies),
+                    "entry_strategy_names": ", ".join(entry_strategy_names),
                     "status": (
-                        f"Signal {signal} from RSI trend + RSI MA crossover "
+                        f"Signal {signal} from {', '.join(entry_strategy_names) if entry_strategy_names else 'entry strategy'} "
                         f"(RSI {latest_rsi:.2f}, RSI_MA {latest_rsi_ma:.2f}, "
                         f"Trend {base_trend}, CrossUp {rsi_ma_cross_up}, CrossDown {rsi_ma_cross_down})"
                     ),
@@ -826,6 +839,8 @@ def main() -> None:
                     "contract_no": contract_no,
                     "trade_side": signal,
                     "signal": signal,
+                    "entry_strategies": ",".join(str(s) for s in entry_strategies),
+                    "entry_strategy_names": ", ".join(entry_strategy_names),
                     "strike": best_contract.strike_price,
                     "expiry": str(expiry),
                     "qty": QTY,
@@ -845,7 +860,7 @@ def main() -> None:
                 reference_price=current_price,
                 allow_limit=False,
                 use_bracket=EXIT_BRACKET_QP_ENABLED,
-                take_profit_price=max(0.01, round(current_price * (1 + TAKE_PROFIT_PCT), 4)),
+                take_profit_price=max(0.01, compute_tp_price(current_price)),
                 stop_loss_price=max(0.01, round(current_price * (1 + BRACKET_QP_PLACEHOLDER_PCT / 100.0), 4)),
             )
             write_log(
@@ -857,6 +872,8 @@ def main() -> None:
                     "contract_no": contract_no,
                     "trade_side": signal,
                     "signal": signal,
+                    "entry_strategies": ",".join(str(s) for s in entry_strategies),
+                    "entry_strategy_names": ", ".join(entry_strategy_names),
                     "strike": best_contract.strike_price,
                     "expiry": str(expiry),
                     "qty": QTY,
@@ -897,8 +914,8 @@ def main() -> None:
                 _iso_ts(getattr(filled_buy, "filled_at", None))
                 or datetime.now(timezone.utc).isoformat(timespec="seconds")
             )
-            tp_price = fill_price * (1 + TAKE_PROFIT_PCT)
-            sl_price = fill_price * (1 - STOP_LOSS_PCT)
+            tp_price = compute_tp_price(fill_price)
+            sl_price = compute_sl_price(fill_price)
 
             info(f" BUY FILLED: {fill_price:.4f} | TP: {tp_price:.4f} | SL: {sl_price:.4f}")
             write_log(
@@ -910,6 +927,8 @@ def main() -> None:
                     "contract_no": contract_no,
                     "trade_side": signal,
                     "signal": signal,
+                    "entry_strategies": ",".join(str(s) for s in entry_strategies),
+                    "entry_strategy_names": ", ".join(entry_strategy_names),
                     "strike": best_contract.strike_price,
                     "expiry": str(expiry),
                     "qty": QTY,

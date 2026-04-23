@@ -4,7 +4,7 @@ import logging
 from datetime import datetime, timezone
 
 from alpaca.data.historical import OptionHistoricalDataClient
-from alpaca.trading.requests import ReplaceOrderRequest, StopLimitOrderRequest
+from alpaca.trading.requests import ReplaceOrderRequest, StopLossRequest
 from alpaca.trading.enums import OrderSide, TimeInForce, OrderStatus
 
 from alpaca_helpers import (
@@ -34,6 +34,8 @@ from config import (
     EXIT_TAKE_PROFIT_ENABLED,
     EXIT_TRAILING_STOP_ENABLED,
     EXIT_STOP_LOSS_ENABLED,
+    EXIT_TAKE_PROFIT_MODE,
+    EXIT_STOP_LOSS_MODE,
     PRICE_POLL_SEC,
     QP_GAP_PCT,
     RSI_EXIT_CHECK_SEC,
@@ -49,6 +51,7 @@ from config import (
 from logger import debug, info
 from order_execution import set_live_exit_reason, update_live_exit_state
 from rsi_analyer import analyze_rsi
+from order_execution import place_market_order
 
 
 _WS_MONITOR_LOCK = threading.Lock()
@@ -69,6 +72,8 @@ def _init_exit_state(fill_price: float, tp_price: float, sl_price: float) -> dic
     return {
         "use_bracket_exit": bool(EXIT_BRACKET_QP_ENABLED),
         "fill_price": fill_price,
+        "tp_price": round(tp_price, 4),
+        "sl_price": round(sl_price, 4),
         "tp_pct": tp_pct,
         "sl_static_pct": sl_pct,
         "sl_dynamic_pct": sl_pct,
@@ -161,6 +166,90 @@ def _iso_now_utc() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
 
 
+def _to_iso(value) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        dt = value
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc).isoformat(timespec="milliseconds")
+    try:
+        dt = datetime.fromisoformat(str(value))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc).isoformat(timespec="milliseconds")
+    except Exception:
+        return str(value)
+
+
+def _order_status_value(order) -> str:
+    status = getattr(order, "status", "")
+    raw = getattr(status, "value", status)
+    return str(raw or "").strip().lower()
+
+
+def _status_for_ui(status: str) -> str:
+    if status == "replaced":
+        return "cancelled"
+    if status == "canceled":
+        return "cancelled"
+    return status or "live"
+
+
+def _fetch_order_snapshot(tc, order_id: str) -> dict | None:
+    if tc is None or not order_id:
+        return None
+    try:
+        order = tc.get_order_by_id(order_id)
+        status = _order_status_value(order)
+        submitted_at = _to_iso(getattr(order, "submitted_at", None) or getattr(order, "created_at", None))
+        updated_at = _to_iso(getattr(order, "updated_at", None))
+        canceled_at = _to_iso(getattr(order, "canceled_at", None))
+        filled_at = _to_iso(getattr(order, "filled_at", None))
+        status_at = filled_at or canceled_at or updated_at or submitted_at or _iso_now_utc()
+        filled_price = float(getattr(order, "filled_avg_price", 0) or 0)
+        return {
+            "status": _status_for_ui(status),
+            "raw_status": status,
+            "status_at": status_at,
+            "submitted_at": submitted_at,
+            "updated_at": updated_at,
+            "canceled_at": canceled_at,
+            "filled_at": filled_at,
+            "fill_price": filled_price if filled_price > 0 else None,
+        }
+    except Exception:
+        return None
+
+
+def _mark_timeline_order_status(timeline: list, order_id: str, snapshot: dict | None, fallback_status: str | None = None) -> None:
+    if not timeline or not order_id:
+        return
+    for tick in reversed(timeline):
+        if tick.get("order_id") == order_id and tick.get("source") in ("order_placed", "order_replaced"):
+            if snapshot:
+                tick["status"] = snapshot.get("status") or tick.get("status") or "live"
+                tick["raw_status"] = snapshot.get("raw_status") or tick.get("raw_status")
+                tick["status_at"] = snapshot.get("status_at") or tick.get("status_at") or tick.get("ts")
+                if snapshot.get("submitted_at"):
+                    tick["submitted_at"] = snapshot.get("submitted_at")
+                if snapshot.get("updated_at"):
+                    tick["updated_at"] = snapshot.get("updated_at")
+                if snapshot.get("canceled_at"):
+                    tick["canceled_at"] = snapshot.get("canceled_at")
+                if snapshot.get("filled_at"):
+                    tick["filled_at"] = snapshot.get("filled_at")
+                if snapshot.get("fill_price") is not None:
+                    tick["fill_price"] = snapshot.get("fill_price")
+            elif fallback_status:
+                tick["status"] = fallback_status
+                tick["status_at"] = tick.get("status_at") or _iso_now_utc()
+            if tick.get("status") == "canceled":
+                tick["status"] = "cancelled"
+            break
+
+
 def _append_timeline_tick(
     exit_state: dict,
     *,
@@ -210,12 +299,12 @@ def _append_timeline_tick(
         "live_sl": live_sl,
         "live_tsl": live_tsl,
         "tp_action": tick_actions.get("tp_action", "NO_CHANGE"),
-        "tp_price": tick_actions.get("tp_price"),
+        "tp_price": tick_actions.get("tp_price", exit_state.get("tp_price")),
         "sl_action": tick_actions.get("sl_action", "NO_CHANGE"),
         "sl_prev_pct": tick_actions.get("sl_prev_pct"),
         "sl_new_pct": tick_actions.get("sl_new_pct"),
-        "sl_prev_price": tick_actions.get("sl_prev_price"),
-        "sl_new_price": tick_actions.get("sl_new_price"),
+        "sl_prev_price": tick_actions.get("sl_prev_price", exit_state.get("sl_price")),
+        "sl_new_price": tick_actions.get("sl_new_price", exit_state.get("sl_price")),
         "sl_order_action": tick_actions.get("sl_order_action", "NO_CHANGE"),
         "sl_order_prev_id": tick_actions.get("sl_order_prev_id"),
         "sl_order_new_id": tick_actions.get("sl_order_new_id"),
@@ -263,6 +352,7 @@ def _check_tp_order_filled(tc, exit_state: dict) -> bool:
 
     filled_id = None
     filled_price = None
+    filled_snapshot = None
     for oid in order_ids:
         try:
             order = tc.get_order_by_id(oid)
@@ -271,6 +361,7 @@ def _check_tp_order_filled(tc, exit_state: dict) -> bool:
                 filled_id = oid
                 fp = float(getattr(order, "filled_avg_price", 0) or 0)
                 filled_price = fp if fp > 0 else None
+                filled_snapshot = _fetch_order_snapshot(tc, oid)
                 break
         except Exception:
             pass
@@ -283,19 +374,20 @@ def _check_tp_order_filled(tc, exit_state: dict) -> bool:
         if oid != filled_id:
             try:
                 tc.cancel_order_by_id(oid)
-                for t in timeline:
-                    if t.get("source") == "order_placed" and t.get("order_id") == oid:
-                        t["status"] = "cancelled"
-                        break
+                cancel_snapshot = _fetch_order_snapshot(tc, oid)
+                _mark_timeline_order_status(timeline, oid, cancel_snapshot, fallback_status="cancelled")
             except Exception:
                 pass
 
-    for t in timeline:
-        if t.get("source") == "order_placed" and t.get("order_id") == filled_id:
-            t["status"] = "filled"
-            if filled_price:
-                t["fill_price"] = filled_price
-            break
+    if filled_snapshot is None:
+        filled_snapshot = {
+            "status": "filled",
+            "raw_status": "filled",
+            "status_at": _iso_now_utc(),
+            "filled_at": _iso_now_utc(),
+            "fill_price": filled_price,
+        }
+    _mark_timeline_order_status(timeline, filled_id, filled_snapshot, fallback_status="filled")
 
     exit_state["tp_order_ids"] = []
     exit_state["tp_order_filled"] = True
@@ -311,10 +403,13 @@ def _cancel_tp_orders(tc, exit_state: dict) -> None:
     if tc is None:
         return
     order_ids = exit_state.get("tp_order_ids") or []
+    timeline = exit_state.setdefault("timeline", [])
     for oid in order_ids:
         try:
             tc.cancel_order_by_id(oid)
             info(f"[TP] Cancelled {oid}")
+            cancel_snapshot = _fetch_order_snapshot(tc, oid)
+            _mark_timeline_order_status(timeline, oid, cancel_snapshot, fallback_status="cancelled")
         except Exception:
             pass
     exit_state["tp_order_ids"] = []
@@ -330,7 +425,8 @@ def _place_sl_stop_order(tc, exit_state: dict, contract_symbol: str | None, qty:
     if fill_price <= 0:
         return None
     stop_price = round(round(fill_price * (1.0 + sl_dynamic_pct / 100.0), 4), 2)
-    limit_price = round(round(stop_price * (1.0 - SL_STOP_LIMIT_BUFFER_PCT / 100.0), 4), 2)
+    # For stop-market we do not set a limit price; leave None
+    limit_price = None
     label = "TRAIL SL" if is_trailing else "SL"
     timeline = exit_state.setdefault("timeline", [])
     existing_ids = list(exit_state.get("sl_order_ids") or [])
@@ -339,59 +435,84 @@ def _place_sl_stop_order(tc, exit_state: dict, contract_symbol: str | None, qty:
         if existing_id:
             replaced = tc.replace_order_by_id(
                 existing_id,
-                ReplaceOrderRequest(stop_price=stop_price, limit_price=limit_price),
+                ReplaceOrderRequest(stop_price=stop_price),
             )
             new_id = str(getattr(replaced, "id", existing_id) or existing_id)
             exit_state["sl_order_ids"] = [new_id]
             exit_state["sl_last_placed_pct"] = sl_dynamic_pct
+            new_submitted_at = _to_iso(
+                getattr(replaced, "submitted_at", None)
+                or getattr(replaced, "created_at", None)
+                or getattr(replaced, "updated_at", None)
+            )
+            new_updated_at = _to_iso(getattr(replaced, "updated_at", None))
+            new_raw_status = _order_status_value(replaced)
+            new_status = _status_for_ui(new_raw_status)
+            event_ts = new_submitted_at or new_updated_at or _iso_now_utc()
             timeline.append({
-                "ts": _iso_now_utc(),
+                "ts": event_ts,
                 "source": "order_replaced",
-                "order_type": "TRAIL_SL_STOP" if is_trailing else "SL_STOP",
+                "order_type": "TRAIL_SL_STOP_MARKET" if is_trailing else "SL_STOP_MARKET",
                 "order_id": new_id,
                 "prev_order_id": existing_id,
-                "limit_price": limit_price,
                 "stop_price": stop_price,
                 "pct": round(sl_dynamic_pct, 4),
-                "status": "live",
+                "status": new_status or "live",
+                "raw_status": new_raw_status,
+                "status_at": event_ts,
+                "submitted_at": new_submitted_at,
+                "updated_at": new_updated_at,
             })
+            prev_snapshot = _fetch_order_snapshot(tc, existing_id)
+            _mark_timeline_order_status(timeline, existing_id, prev_snapshot, fallback_status="cancelled")
             info(
                 f"[{label} STOP] {contract_symbol} replaced id={existing_id} -> {new_id} "
-                f"stop={stop_price:.4f} limit={limit_price:.4f} (sl={sl_dynamic_pct:+.2f}%)"
+                f"stop={stop_price:.4f} (sl={sl_dynamic_pct:+.2f}%)"
             )
             return {
                 "operation": "replaced",
                 "prev_order_id": existing_id,
                 "new_order_id": new_id,
                 "stop_price": stop_price,
-                "limit_price": limit_price,
+                "limit_price": None,
                 "sl_dynamic_pct": sl_dynamic_pct,
             }
-
-        req = StopLimitOrderRequest(
+        # Use stop-market (StopLossRequest) to reduce gap-down misses
+        req = StopLossRequest(
             symbol=contract_symbol,
             qty=qty,
             side=OrderSide.SELL,
             time_in_force=TimeInForce.DAY,
             stop_price=stop_price,
-            limit_price=limit_price,
         )
         order = tc.submit_order(req)
         exit_state["sl_order_ids"] = [str(order.id)]
         exit_state["sl_last_placed_pct"] = sl_dynamic_pct
+        submitted_at = _to_iso(
+            getattr(order, "submitted_at", None)
+            or getattr(order, "created_at", None)
+            or getattr(order, "updated_at", None)
+        )
+        updated_at = _to_iso(getattr(order, "updated_at", None))
+        raw_status = _order_status_value(order)
+        status = _status_for_ui(raw_status)
+        event_ts = submitted_at or updated_at or _iso_now_utc()
         timeline.append({
-            "ts": _iso_now_utc(),
+            "ts": event_ts,
             "source": "order_placed",
-            "order_type": "TRAIL_SL_STOP" if is_trailing else "SL_STOP",
+            "order_type": "TRAIL_SL_STOP_MARKET" if is_trailing else "SL_STOP_MARKET",
             "order_id": str(order.id),
-            "limit_price": limit_price,
             "stop_price": stop_price,
             "pct": round(sl_dynamic_pct, 4),
             "order_count": 1,
-            "status": "live",
+            "status": status or "live",
+            "raw_status": raw_status,
+            "status_at": event_ts,
+            "submitted_at": submitted_at,
+            "updated_at": updated_at,
         })
         info(
-            f"[{label} STOP] {contract_symbol} stop={stop_price:.4f} limit={limit_price:.4f} "
+            f"[{label} STOP] {contract_symbol} stop={stop_price:.4f} "
             f"(sl={sl_dynamic_pct:+.2f}%) id={order.id}"
         )
         return {
@@ -399,32 +520,161 @@ def _place_sl_stop_order(tc, exit_state: dict, contract_symbol: str | None, qty:
             "prev_order_id": None,
             "new_order_id": str(order.id),
             "stop_price": stop_price,
-            "limit_price": limit_price,
+            "limit_price": None,
             "sl_dynamic_pct": sl_dynamic_pct,
         }
     except Exception as ex:
         info(f"[{label} STOP] Failed to upsert for {contract_symbol}: {ex}")
+        err_str = str(ex or "")
         timeline.append({
             "ts": _iso_now_utc(),
             "source": "order_placed" if not existing_id else "order_replaced",
-            "order_type": "TRAIL_SL_STOP" if is_trailing else "SL_STOP",
+            "order_type": "TRAIL_SL_STOP_MARKET" if is_trailing else "SL_STOP_MARKET",
             "order_id": None,
             "prev_order_id": existing_id,
-            "limit_price": limit_price,
             "stop_price": stop_price,
             "pct": round(sl_dynamic_pct, 4),
             "order_count": len(exit_state.get("sl_order_ids") or []),
             "status": "error",
-            "error": str(ex),
+            "error": err_str,
         })
+
+        # If broker complains about missing qty, try submitting using notional.
+        low = err_str.lower()
+        if "qty or notional" in low or "qty or notional is required" in low:
+            try:
+                notional = round(float(stop_price) * 100.0 * float(qty), 2)
+                req2 = StopLossRequest(
+                    symbol=contract_symbol,
+                    notional=notional,
+                    side=OrderSide.SELL,
+                    time_in_force=TimeInForce.DAY,
+                    stop_price=stop_price,
+                )
+                order = tc.submit_order(req2)
+                exit_state["sl_order_ids"] = [str(order.id)]
+                exit_state["sl_last_placed_pct"] = sl_dynamic_pct
+                submitted_at = _to_iso(
+                    getattr(order, "submitted_at", None)
+                    or getattr(order, "created_at", None)
+                    or getattr(order, "updated_at", None)
+                )
+                updated_at = _to_iso(getattr(order, "updated_at", None))
+                raw_status = _order_status_value(order)
+                status = _status_for_ui(raw_status)
+                event_ts = submitted_at or updated_at or _iso_now_utc()
+                timeline.append({
+                    "ts": event_ts,
+                    "source": "order_placed",
+                    "order_type": "TRAIL_SL_STOP_MARKET" if is_trailing else "SL_STOP_MARKET",
+                    "order_id": str(order.id),
+                    "stop_price": stop_price,
+                    "pct": round(sl_dynamic_pct, 4),
+                    "order_count": 1,
+                    "status": status or "live",
+                    "raw_status": raw_status,
+                    "status_at": event_ts,
+                    "submitted_at": submitted_at,
+                    "updated_at": updated_at,
+                })
+                info(
+                    f"[{label} STOP] (notional fallback) {contract_symbol} stop={stop_price:.4f} "
+                    f"(sl={sl_dynamic_pct:+.2f}%) id={order.id}"
+                )
+                return {
+                    "operation": "placed",
+                    "prev_order_id": None,
+                    "new_order_id": str(order.id),
+                    "stop_price": stop_price,
+                    "limit_price": None,
+                    "sl_dynamic_pct": sl_dynamic_pct,
+                }
+            except Exception as ex2:
+                info(f"[{label} STOP] Notional fallback failed for {contract_symbol}: {ex2}")
+                timeline.append({
+                    "ts": _iso_now_utc(),
+                    "source": "order_placed",
+                    "order_type": "TRAIL_SL_STOP_MARKET" if is_trailing else "SL_STOP_MARKET",
+                    "order_id": None,
+                    "prev_order_id": existing_id,
+                    "stop_price": stop_price,
+                    "pct": round(sl_dynamic_pct, 4),
+                    "order_count": len(exit_state.get("sl_order_ids") or []),
+                    "status": "error",
+                    "error": str(ex2),
+                })
+                # Final fallback: if both qty and notional submissions failed,
+                # submit a direct market sell to ensure the position is closed.
+                try:
+                    market_order = place_market_order(tc, contract_symbol, qty, OrderSide.SELL, allow_limit=False)
+                    mo_id = str(getattr(market_order, "id", "") or "")
+                    exit_state["sl_order_ids"] = [mo_id]
+                    exit_state["sl_last_placed_pct"] = sl_dynamic_pct
+                    submitted_at = _to_iso(
+                        getattr(market_order, "submitted_at", None)
+                        or getattr(market_order, "created_at", None)
+                        or getattr(market_order, "updated_at", None)
+                    )
+                    updated_at = _to_iso(getattr(market_order, "updated_at", None))
+                    raw_status = _order_status_value(market_order)
+                    status = _status_for_ui(raw_status)
+                    event_ts = submitted_at or updated_at or _iso_now_utc()
+                    timeline.append({
+                        "ts": event_ts,
+                        "source": "order_placed",
+                        "order_type": "MARKET_SELL_FALLBACK",
+                        "order_id": mo_id,
+                        "prev_order_id": existing_id,
+                        "stop_price": stop_price,
+                        "pct": round(sl_dynamic_pct, 4),
+                        "order_count": 1,
+                        "status": status or "submitted",
+                        "raw_status": raw_status,
+                        "status_at": event_ts,
+                        "submitted_at": submitted_at,
+                        "updated_at": updated_at,
+                    })
+                    info(f"[{label} STOP] (market fallback) {contract_symbol} forced market sell id={mo_id}")
+                    return {
+                        "operation": "market_sold",
+                        "prev_order_id": existing_id,
+                        "new_order_id": mo_id,
+                        "stop_price": stop_price,
+                        "limit_price": None,
+                        "sl_dynamic_pct": sl_dynamic_pct,
+                    }
+                except Exception as ex3:
+                    info(f"[{label} STOP] Market fallback failed for {contract_symbol}: {ex3}")
+                    timeline.append({
+                        "ts": _iso_now_utc(),
+                        "source": "order_placed",
+                        "order_type": "MARKET_SELL_FALLBACK",
+                        "order_id": None,
+                        "prev_order_id": existing_id,
+                        "stop_price": stop_price,
+                        "pct": round(sl_dynamic_pct, 4),
+                        "order_count": len(exit_state.get("sl_order_ids") or []),
+                        "status": "error",
+                        "error": str(ex3),
+                    })
+                    return {
+                        "operation": "error",
+                        "prev_order_id": existing_id,
+                        "new_order_id": None,
+                        "stop_price": stop_price,
+                        "limit_price": None,
+                        "sl_dynamic_pct": sl_dynamic_pct,
+                        "error": str(ex3),
+                    }
+
         return {
             "operation": "error",
             "prev_order_id": existing_id,
             "new_order_id": None,
             "stop_price": stop_price,
-            "limit_price": limit_price,
+            "limit_price": None,
             "sl_dynamic_pct": sl_dynamic_pct,
-            "error": str(ex),
+            "error": err_str,
         }
 
 
@@ -433,10 +683,13 @@ def _cancel_sl_orders(tc, exit_state: dict) -> None:
     if tc is None:
         return
     order_ids = exit_state.get("sl_order_ids") or []
+    timeline = exit_state.setdefault("timeline", [])
     for oid in order_ids:
         try:
             tc.cancel_order_by_id(oid)
             info(f"[SL STOP] Cancelled {oid}")
+            cancel_snapshot = _fetch_order_snapshot(tc, oid)
+            _mark_timeline_order_status(timeline, oid, cancel_snapshot, fallback_status="cancelled")
         except Exception:
             pass
     exit_state["sl_order_ids"] = []
@@ -451,6 +704,7 @@ def _check_sl_order_filled(tc, exit_state: dict) -> bool:
         return False
     filled_id = None
     filled_price = None
+    filled_snapshot = None
     for oid in order_ids:
         try:
             order = tc.get_order_by_id(oid)
@@ -459,6 +713,7 @@ def _check_sl_order_filled(tc, exit_state: dict) -> bool:
                 filled_id = oid
                 fp = float(getattr(order, "filled_avg_price", 0) or 0)
                 filled_price = fp if fp > 0 else None
+                filled_snapshot = _fetch_order_snapshot(tc, oid)
                 break
         except Exception:
             pass
@@ -469,19 +724,19 @@ def _check_sl_order_filled(tc, exit_state: dict) -> bool:
                 try:
                     tc.cancel_order_by_id(oid)
                     info(f"[SL STOP] Cancelled remaining SL order {oid} after fill")
-                    for t in timeline:
-                        if t.get("source") == "order_placed" and t.get("order_id") == oid:
-                            t["status"] = "cancelled"
-                            break
+                    cancel_snapshot = _fetch_order_snapshot(tc, oid)
+                    _mark_timeline_order_status(timeline, oid, cancel_snapshot, fallback_status="cancelled")
                 except Exception:
                     pass
-        # Mark the filled order row
-        for t in timeline:
-            if t.get("source") == "order_placed" and t.get("order_id") == filled_id:
-                t["status"] = "filled"
-                if filled_price:
-                    t["fill_price"] = filled_price
-                break
+        if filled_snapshot is None:
+            filled_snapshot = {
+                "status": "filled",
+                "raw_status": "filled",
+                "status_at": _iso_now_utc(),
+                "filled_at": _iso_now_utc(),
+                "fill_price": filled_price,
+            }
+        _mark_timeline_order_status(timeline, filled_id, filled_snapshot, fallback_status="filled")
         exit_state["sl_order_ids"] = []
         exit_state["sl_order_filled"] = True
         exit_state["sl_order_id_filled"] = filled_id
@@ -587,6 +842,62 @@ def _cancel_exit_orders(tc, exit_state: dict) -> None:
     _cancel_sl_orders(tc, exit_state)
 
 
+def _attempt_place_tp_limit(tc, exit_state: dict, contract_symbol: str | None, qty: int) -> dict | None:
+    """When TP is configured in 'price' mode and no TP child exists, place a limit
+    sell at the configured absolute `tp_price`. Returns placement info or None.
+    """
+    if tc is None or not contract_symbol or qty <= 0:
+        return None
+    # Don't place if TP already filled or TP child exists
+    if bool(exit_state.get("tp_order_filled", False)):
+        return None
+    if exit_state.get("tp_order_ids"):
+        return None
+    tp_price = float(exit_state.get("tp_price") or 0.0)
+    if tp_price <= 0:
+        return None
+
+    try:
+        order = place_market_order(
+            tc,
+            contract_symbol,
+            qty,
+            OrderSide.SELL,
+            reference_price=tp_price,
+            allow_limit=True,
+            force_limit=True,
+        )
+        order_id = str(getattr(order, "id", "") or "")
+        if not order_id:
+            return None
+
+        # record TP child id and timeline event
+        exit_state["tp_order_ids"] = [order_id]
+        timeline = exit_state.setdefault("timeline", [])
+        submitted_at = _to_iso(getattr(order, "submitted_at", None) or getattr(order, "created_at", None) or getattr(order, "updated_at", None))
+        updated_at = _to_iso(getattr(order, "updated_at", None))
+        raw_status = _order_status_value(order)
+        status = _status_for_ui(raw_status)
+        event_ts = submitted_at or updated_at or _iso_now_utc()
+        timeline.append({
+            "ts": event_ts,
+            "source": "order_placed",
+            "order_type": "TP_LIMIT",
+            "order_id": order_id,
+            "limit_price": round(float(tp_price), 4),
+            "status": status or "live",
+            "raw_status": raw_status,
+            "status_at": event_ts,
+            "submitted_at": submitted_at,
+            "updated_at": updated_at,
+        })
+        info(f"[TP LIMIT] Placed TP limit {contract_symbol} @{tp_price:.4f} id={order_id}")
+        return {"operation": "placed", "order_id": order_id, "limit_price": tp_price}
+    except Exception as ex:
+        info(f"[TP LIMIT] Failed to place TP limit for {contract_symbol}: {ex}")
+        return None
+
+
 def _update_dynamic_thresholds(
     exit_state: dict,
     pnl_pct: float,
@@ -614,14 +925,26 @@ def _update_dynamic_thresholds(
             return None
         return round(fill_price * (1.0 + pct / 100.0), 4)
 
+    # Prefer absolute TP price when configured in 'price' mode, otherwise derive from pct
+    if str(EXIT_TAKE_PROFIT_MODE).lower() == "price":
+        tp_price_val = exit_state.get("tp_price")
+    else:
+        tp_price_val = _pct_to_price(tp_pct)
+
+    # Prefer absolute SL price when configured in 'price' mode for initial values
+    if str(EXIT_STOP_LOSS_MODE).lower() == "price":
+        sl_prev_price_val = exit_state.get("sl_price")
+    else:
+        sl_prev_price_val = _pct_to_price(prev_sl_pct)
+
     tick_actions = {
         "tp_action": "NO_CHANGE",
-        "tp_price": _pct_to_price(tp_pct),
+        "tp_price": tp_price_val,
         "sl_action": "NO_CHANGE",
         "sl_prev_pct": round(prev_sl_pct, 4),
         "sl_new_pct": round(prev_sl_pct, 4),
-        "sl_prev_price": _pct_to_price(prev_sl_pct),
-        "sl_new_price": _pct_to_price(prev_sl_pct),
+        "sl_prev_price": sl_prev_price_val,
+        "sl_new_price": sl_prev_price_val,
         "sl_order_action": "NO_CHANGE",
         "sl_update_reason": None,
     }
@@ -723,6 +1046,7 @@ def _update_dynamic_thresholds(
 def _evaluate_priority_exit(
     pnl_pct: float,
     exit_state: dict,
+    sellable_price: float | None = None,
     use_extended_exit_criteria: bool = True,
 ) -> str | None:
     tp_pct = float(exit_state.get("tp_pct", 0.0))
@@ -731,10 +1055,24 @@ def _evaluate_priority_exit(
     max_pnl_pct = float(exit_state.get("max_pnl_pct", 0.0))
 
     # Priority 1: full TP / full SL.
-    if EXIT_TAKE_PROFIT_ENABLED and pnl_pct >= tp_pct:
-        return "TAKE_PROFIT_EXIT"
-    if EXIT_STOP_LOSS_ENABLED and pnl_pct <= sl_static_pct:
-        return "STOP_LOSS_EXIT"
+    # If configured in absolute-price mode and we have a sellable price, prefer
+    # direct price comparisons rather than percent math so small dollar TPs are
+    # captured exactly at the configured price.
+    if EXIT_TAKE_PROFIT_ENABLED:
+        if str(EXIT_TAKE_PROFIT_MODE).lower() == "price" and sellable_price is not None:
+            tp_price_abs = float(exit_state.get("tp_price") or 0.0)
+            if tp_price_abs > 0 and sellable_price >= tp_price_abs:
+                return "TAKE_PROFIT_EXIT"
+        elif pnl_pct >= tp_pct:
+            return "TAKE_PROFIT_EXIT"
+
+    if EXIT_STOP_LOSS_ENABLED:
+        if str(EXIT_STOP_LOSS_MODE).lower() == "price" and sellable_price is not None:
+            sl_price_abs = float(exit_state.get("sl_price") or 0.0)
+            if sl_price_abs > 0 and sellable_price <= sl_price_abs:
+                return "STOP_LOSS_EXIT"
+        elif pnl_pct <= sl_static_pct:
+            return "STOP_LOSS_EXIT"
 
     if not use_extended_exit_criteria:
         return None
@@ -1009,9 +1347,29 @@ def monitor_with_polling(
         exit_reason = _evaluate_priority_exit(
             pnl_pct,
             exit_state,
+            sellable_price=sellable_price,
             use_extended_exit_criteria=use_extended_exit_criteria,
         )
         if exit_reason:
+            # If TP triggered in absolute-price mode but no TP order exists yet,
+            # attempt to place an explicit TP limit and continue monitoring so
+            # small-dollar price targets can be captured by a limit fill.
+            if (
+                exit_reason == "TAKE_PROFIT_EXIT"
+                and str(EXIT_TAKE_PROFIT_MODE).lower() == "price"
+                and not exit_state.get("tp_order_filled")
+                and not (exit_state.get("tp_order_ids") or [])
+            ):
+                placed = _attempt_place_tp_limit(tc, exit_state, contract_symbol, qty)
+                if placed:
+                    # don't return yet — wait for the TP limit to fill on subsequent ticks
+                    info(f"{label}TAKE_PROFIT_EXIT detected — placed TP limit, awaiting fill")
+                    # broadcast live state and continue loop
+                    if buy_order_id:
+                        update_live_exit_state(buy_order_id, exit_state, pnl_pct, sellable_price)
+                    time.sleep(0.2)
+                    continue
+
             if buy_order_id:
                 set_live_exit_reason(buy_order_id, exit_reason)
             info(f"{label}{exit_reason} - exiting {signal} position at {sellable_price:.4f}")
@@ -1226,6 +1584,25 @@ def monitor_with_websocket(
                     done.set()
                     stop_stream(stream)
                     return
+            # Evaluate absolute-price TP/SL preference here as well. If TP triggered
+            # in price mode but no TP order exists, attempt to place one and wait.
+            pnl_pct = (sellable_price - fill_price) / fill_price * 100
+            exit_reason = _evaluate_priority_exit(
+                pnl_pct,
+                state["exit_state"],
+                sellable_price=sellable_price,
+                use_extended_exit_criteria=use_extended_exit_criteria,
+            )
+            if (
+                exit_reason == "TAKE_PROFIT_EXIT"
+                and str(EXIT_TAKE_PROFIT_MODE).lower() == "price"
+                and not state["exit_state"].get("tp_order_filled")
+                and not (state["exit_state"].get("tp_order_ids") or [])
+            ):
+                placed = _attempt_place_tp_limit(tc, state["exit_state"], contract_symbol, qty)
+                if placed:
+                    info(f"{label}WS TAKE_PROFIT_EXIT detected — placed TP limit, awaiting fill")
+                    return
             _append_timeline_tick(
                 state["exit_state"],
                 source="ws",
@@ -1321,6 +1698,7 @@ def monitor_with_websocket(
             exit_reason = _evaluate_priority_exit(
                 pnl_pct,
                 state["exit_state"],
+                sellable_price=sellable_price,
                 use_extended_exit_criteria=use_extended_exit_criteria,
             )
             if exit_reason:

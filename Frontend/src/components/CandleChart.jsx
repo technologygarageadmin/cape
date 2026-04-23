@@ -47,12 +47,29 @@ function calcMASeries(rsiPoints, period = 9) {
   return result;
 }
 
+// Utility: Calculate EMA
+function calcEMA(data, period) {
+  if (!Array.isArray(data) || data.length < period) return [];
+  const k = 2 / (period + 1);
+  let emaPrev = data.slice(0, period).reduce((sum, d) => sum + d.close, 0) / period;
+  const result = [{ time: data[period - 1].time, value: emaPrev }];
+  for (let i = period; i < data.length; i++) {
+    const price = data[i].close;
+    emaPrev = price * k + emaPrev * (1 - k);
+    result.push({ time: data[i].time, value: emaPrev });
+  }
+  return result;
+}
+
 const CandleChart = ({
   data = [],
   obrLines = [],
   rsiPoints = [],
   rsiMaPoints = [],
   rsiMarkers = [],
+  emaLines = [], // [{period: 9, color: '#F5C518', data: [...]}, ...]
+  emaCrossMarkers = [], // [{time, type: 'buy'|'sell'}]
+  rsiMeanReversionMarkers = [], // [{time, type: 'buy'|'sell'}]
   onPointHover,
   onPointLeave,
   fitKey,
@@ -66,6 +83,9 @@ const CandleChart = ({
   const rsiSeriesRef = useRef(null);
   const rsiMaSeriesRef = useRef(null);
   const crossoverMarkersRef = useRef(null);
+  const emaSeriesRefs = useRef([]); // For EMA lines
+  const emaMarkersRef = useRef(null);
+  const rsiMeanReversionMarkersRef = useRef(null);
   const prevFitKeyRef = useRef(null);
   const [hoveredBar, setHoveredBar] = useState(null);
 
@@ -129,6 +149,8 @@ const CandleChart = ({
 
       candleSeriesRef.current = candleSeries;
 
+      // EMA lines will be added/updated by a separate effect (prevents chart re-creation flicker)
+
       // Shrink candle area to top 65% so RSI pane fits below
       chart.priceScale('right').applyOptions({
         scaleMargins: { top: 0.02, bottom: 0.33 },
@@ -179,7 +201,8 @@ const CandleChart = ({
       });
       rsiMaSeriesRef.current = rsiMaSeries;
 
-      // OHLC crosshair overlay
+      // EMA crossover markers (BUY/SELL)
+      // EMA crossover markers will be added/updated by a separate effect (prevents chart re-creation flicker)
       chart.subscribeCrosshairMove((param) => {
         if (!param || !param.time || !param.seriesData) {
           setHoveredBar(null);
@@ -218,12 +241,93 @@ const CandleChart = ({
           crossoverMarkersRef.current.detach();
           crossoverMarkersRef.current = null;
         }
+        if (emaMarkersRef.current) {
+          try { emaMarkersRef.current.detach(); } catch (_) {}
+          emaMarkersRef.current = null;
+        }
+        if (rsiMeanReversionMarkersRef.current) {
+          try { rsiMeanReversionMarkersRef.current.detach(); } catch (_) {}
+          rsiMeanReversionMarkersRef.current = null;
+        }
         chart.remove();
       };
     } catch (error) {
       console.error("CandleChart: Error initializing chart", error);
     }
   }, []);
+
+  // Update EMA lines and crossover markers without recreating the chart
+  useLayoutEffect(() => {
+    if (!chartRef.current || !candleSeriesRef.current) return;
+    try {
+      // remove old EMA series
+      if (emaSeriesRefs.current && emaSeriesRefs.current.length) {
+        emaSeriesRefs.current.forEach(s => { try { chartRef.current.removeSeries(s); } catch (_) {} });
+        emaSeriesRefs.current = [];
+      }
+
+      // add new EMA lines
+      if (Array.isArray(emaLines) && emaLines.length > 0) {
+        emaLines.forEach(ema => {
+          const s = chartRef.current.addSeries(LineSeries, {
+            color: ema.color,
+            lineWidth: 2,
+            priceScaleId: 'right',
+            title: `EMA${ema.period}`,
+            crosshairMarkerVisible: false,
+            lastValueVisible: false,
+            priceFormat: { type: 'custom', formatter: v => v.toFixed(2) },
+          });
+          s.setData(ema.data || []);
+          emaSeriesRefs.current.push(s);
+        });
+      }
+
+      // update ema crossover markers
+      if (emaMarkersRef.current) {
+        try { emaMarkersRef.current.detach(); } catch (_) {}
+        emaMarkersRef.current = null;
+      }
+      if (Array.isArray(emaCrossMarkers) && emaCrossMarkers.length > 0) {
+        const markers = emaCrossMarkers.map(m => ({
+          time: typeof m.time === 'number' ? m.time : Math.floor(new Date(m.time).getTime() / 1000),
+          position: m.type === 'buy' ? 'belowBar' : 'aboveBar',
+          color: m.type === 'buy' ? '#16a34a' : '#ef4444',
+          shape: m.type === 'buy' ? 'arrowUp' : 'arrowDown',
+          size: 2,
+          text: m.type === 'buy' ? 'BUY' : 'SELL',
+        }));
+        emaMarkersRef.current = createSeriesMarkers(candleSeriesRef.current, markers);
+      }
+    } catch (err) {
+      console.warn('CandleChart: failed updating EMAs', err);
+    }
+  }, [emaLines, emaCrossMarkers]);
+
+  // Update RSI Mean Reversion markers without recreating the chart
+  useLayoutEffect(() => {
+    if (!candleSeriesRef.current) return;
+    try {
+      if (rsiMeanReversionMarkersRef.current) {
+        try { rsiMeanReversionMarkersRef.current.detach(); } catch (_) {}
+        rsiMeanReversionMarkersRef.current = null;
+      }
+
+      if (Array.isArray(rsiMeanReversionMarkers) && rsiMeanReversionMarkers.length > 0) {
+        const markers = rsiMeanReversionMarkers.map(m => ({
+          time: typeof m.time === 'number' ? m.time : Math.floor(new Date(m.time).getTime() / 1000),
+          position: m.type === 'buy' ? 'belowBar' : 'aboveBar',
+          color: m.type === 'buy' ? '#10b981' : '#dc2626',
+          shape: m.type === 'buy' ? 'arrowUp' : 'arrowDown',
+          size: 1,
+          text: m.type === 'buy' ? 'RSI MR BUY' : 'RSI MR SELL',
+        }));
+        rsiMeanReversionMarkersRef.current = createSeriesMarkers(candleSeriesRef.current, markers);
+      }
+    } catch (err) {
+      console.warn('CandleChart: failed updating RSI MR markers', err);
+    }
+  }, [rsiMeanReversionMarkers]);
 
   // Update chart data when it changes
   useLayoutEffect(() => {
