@@ -998,6 +998,87 @@ def _place_sl_stop_order(tc, exit_state: dict, contract_symbol: str | None, qty:
                     "error": err_str,
                 }
 
+        # Catch-all: replacement failed with an unrecognized error (none of the specific
+        # patterns above matched). Cancel the old SL and place a fresh standalone stop-limit.
+        # This handles broker-specific rejections for bracket child modifications.
+        if existing_id and not (
+            "40310000" in low
+            or "account not eligible to trade uncovered option contracts" in low
+            or "position intent mismatch" in low
+            or "order is not open" in low
+            or "42210000" in low
+            or "order not open" in low
+            or "held_for_orders" in low
+            or "insufficient qty available" in low
+            or "qty or notional" in low
+        ):
+            info(f"[{label} STOP] Unhandled replace error for {contract_symbol}: {err_str[:200]} — trying cancel-then-fresh")
+            try:
+                tc.cancel_order_by_id(existing_id)
+                time.sleep(0.3)
+            except Exception as _ex_cancel:
+                info(f"[{label} STOP] Cancel of {existing_id} failed: {_ex_cancel}")
+            try:
+                try:
+                    _qty_ctf = int(qty or 0)
+                except Exception:
+                    _qty_ctf = 0
+                if _qty_ctf <= 0:
+                    _qty_ctf = 1
+                _extra_ctf: dict = {}
+                if PositionIntent is not None and _is_option_contract_symbol(contract_symbol):
+                    _extra_ctf["position_intent"] = PositionIntent.SELL_TO_CLOSE
+                _req_ctf = StopLimitOrderRequest(
+                    symbol=contract_symbol,
+                    qty=_qty_ctf,
+                    side=OrderSide.SELL,
+                    time_in_force=TimeInForce.DAY,
+                    stop_price=stop_price,
+                    limit_price=limit_price,
+                    **_extra_ctf,
+                )
+                _order = tc.submit_order(_req_ctf)
+                exit_state["sl_order_ids"] = [str(_order.id)]
+                exit_state["sl_last_placed_pct"] = sl_dynamic_pct
+                _sub_at = _to_iso(
+                    getattr(_order, "submitted_at", None)
+                    or getattr(_order, "created_at", None)
+                    or getattr(_order, "updated_at", None)
+                )
+                _evt_ts = _sub_at or _iso_now_utc()
+                _raw_st = _order_status_value(_order)
+                _st = _status_for_ui(_raw_st)
+                timeline.append({
+                    "ts": _evt_ts,
+                    "source": "order_placed",
+                    "order_type": "TRAIL_SL_STOP_LIMIT" if is_trailing else "SL_STOP_LIMIT",
+                    "order_id": str(_order.id),
+                    "stop_price": stop_price,
+                    "limit_price": limit_price,
+                    "pct": round(sl_dynamic_pct, 4),
+                    "order_count": 1,
+                    "status": _st or "live",
+                    "raw_status": _raw_st,
+                    "status_at": _evt_ts,
+                    "submitted_at": _sub_at,
+                    "updated_at": None,
+                })
+                info(
+                    f"[{label} STOP] (cancel-then-fresh) {contract_symbol} "
+                    f"stop={stop_price:.4f} limit={limit_price:.4f} "
+                    f"(sl={sl_dynamic_pct:+.2f}%) id={_order.id}"
+                )
+                return {
+                    "operation": "placed",
+                    "prev_order_id": existing_id,
+                    "new_order_id": str(_order.id),
+                    "stop_price": stop_price,
+                    "limit_price": limit_price,
+                    "sl_dynamic_pct": sl_dynamic_pct,
+                }
+            except Exception as _ex_ctf:
+                info(f"[{label} STOP] Cancel-then-fresh also failed for {contract_symbol}: {_ex_ctf}")
+
 
 def _cancel_sl_orders(tc, exit_state: dict) -> None:
     """Cancel ALL outstanding SL stop-limit orders."""
@@ -1598,7 +1679,9 @@ def monitor_with_polling(
         if buy_order_id:
             update_live_exit_state(buy_order_id, exit_state, pnl_pct, sellable_price)
 
-        # Bracket-only mode: TP/SL child fills are the only exits.
+        # Bracket-only mode: TP/SL child fills and the market fallback are the only exits.
+        # The internal _evaluate_priority_exit is skipped — exits happen via broker-side
+        # stop-limit orders that are ratcheted up each tick by _update_dynamic_thresholds.
         if bool(exit_state.get("use_bracket_exit", False)):
             continue
 
@@ -2041,7 +2124,9 @@ def monitor_with_websocket(
                     )
                 state["last_print_ts"] = now
 
-            # Bracket-only mode: TP/SL child fills are the only exits.
+            # Bracket-only mode: TP/SL child fills and the market fallback are the only exits.
+            # The internal _evaluate_priority_exit is skipped — exits happen via broker-side
+            # stop-limit orders that are ratcheted up each tick by _update_dynamic_thresholds.
             if bool(state["exit_state"].get("use_bracket_exit", False)):
                 return
 
