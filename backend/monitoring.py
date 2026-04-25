@@ -1234,6 +1234,48 @@ def _detect_market_fallback_reason(tc, exit_state: dict, sellable_price: float) 
         if sl_trigger_price > 0 and sellable_price <= sl_trigger_price:
             return "ORDER_SYSTEM_FAILURE_MARKET_EXIT", "sl_orders_not_confirmed_by_broker_after_trigger"
 
+    # QP replacement failure guard: SL was ratcheted into profit territory (sl_dynamic_pct > 0)
+    # but the broker SL has not yet been moved to the current QP level (sl_last_placed_pct is
+    # behind sl_dynamic_pct). This covers partial ratchet success — e.g., replacements at +10%
+    # and +30% succeeded but the latest attempt to +49% failed. The broker SL is at +30% while
+    # QP wants it at +49%, leaving the profit band between +30% and +49% unprotected.
+    # When price slides back to the QP trigger level and stays there, force a market exit to
+    # capture profit at the intended QP level rather than letting the position erode to the
+    # lower (stale) broker SL.
+    if not bool(exit_state.get("sl_broker_disabled", False)):
+        _sl_dyn = float(exit_state.get("sl_dynamic_pct", exit_state.get("sl_static_pct", 0.0)) or 0.0)
+        _sl_placed = exit_state.get("sl_last_placed_pct")
+        _fill = float(exit_state.get("fill_price", 0.0) or 0.0)
+        if (
+            _sl_dyn > 0.0
+            and _sl_placed is not None
+            and float(_sl_placed) < _sl_dyn   # broker SL is behind the current QP level
+            and _fill > 0
+        ):
+            _qp_trigger = _fill * (1.0 + _sl_dyn / 100.0)
+            if sellable_price <= _qp_trigger:
+                _qp_guard_key = "qp_guard_trigger_seen_ts"
+                _first_seen = float(exit_state.get(_qp_guard_key, 0.0) or 0.0)
+                _now = time.time()
+                if _first_seen <= 0.0:
+                    exit_state[_qp_guard_key] = _now
+                elif (_now - _first_seen) >= trigger_grace_sec:
+                    detail = (
+                        f"qp_sl_not_replaced:sellable={sellable_price:.4f}:"
+                        f"qp_trigger={_qp_trigger:.4f}:"
+                        f"sl_dynamic={_sl_dyn:+.4f}%:"
+                        f"sl_last_placed={float(_sl_placed):+.4f}%:"
+                        f"waited={_now - _first_seen:.2f}s"
+                    )
+                    return "QP_SL_REPLACE_FAILED_MARKET_EXIT", detail
+            else:
+                # Price is above the QP trigger — reset the guard timer.
+                exit_state.pop("qp_guard_trigger_seen_ts", None)
+        else:
+            # Broker SL has caught up to the QP level (gap closed) — reset the guard timer so
+            # a stale timestamp from a prior failure doesn't carry over to the next failure window.
+            exit_state.pop("qp_guard_trigger_seen_ts", None)
+
     return None, None
 
 

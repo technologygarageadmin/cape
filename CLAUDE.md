@@ -62,7 +62,7 @@ This is the most complex module. After a fill, a monitoring loop runs on every p
 2. `_update_dynamic_thresholds()` — ratchets `sl_dynamic_pct` upward when price is in profit; **always called regardless of bracket mode**
 3. `_place_sl_stop_order()` — called inside `_update_dynamic_thresholds` on every profit tick to replace the broker-side SL order at the new QP level
 4. `_check_tp_order_filled()` / `_check_sl_order_filled()` — poll Alpaca to detect when a broker order filled
-5. `_detect_market_fallback_reason()` — safety net; forces a market sell only when the SL stop-limit failed to fill
+5. `_detect_market_fallback_reason()` — safety net; forces a market sell when the SL stop-limit failed to fill **or** when the QP replacement failed and price has slid back to the QP trigger level (see QP Guard below)
 6. `_evaluate_priority_exit()` — only reached when `use_bracket_exit = False`
 
 ### Bracket Mode vs. Internal Exit Mode
@@ -82,7 +82,7 @@ The QP (Quick Profit) mechanism repurposes the bracket's SL child order as a pro
    - `sl_candidate = max(existing_sl, qp_price, trailing_sl)` — **only ever increases**
    - `_place_sl_stop_order()` replaces the broker SL at the new level via `replace_order_by_id`
 3. **When price reverses**: the ratcheted SL stop-limit triggers on Alpaca → fills at or better than the limit price → `_check_sl_order_filled()` detects the fill → exit recorded
-4. **Market sell** fires only via `_detect_market_fallback_reason()` — gap-down miss or SL triggered but unfilled after 2 seconds
+4. **Market sell** fires only via `_detect_market_fallback_reason()` — three cases: (a) gap-down miss where the stop-limit cannot fill, (b) SL triggered but unfilled after 2 seconds, or (c) QP replacement failed and price slides back to the QP trigger level (QP guard, `QP_SL_REPLACE_FAILED_MARKET_EXIT`)
 
 **Why broker SL and not internal market sell**: a stop-limit has a defined `limit_price` floor, so the exit fills at or better than QP. A market sell at QP trigger time may fill materially lower if the option spread is wide or price is moving fast.
 
@@ -97,6 +97,39 @@ When replacing the broker SL fails, the function works through a priority chain:
 5. If all else fails: `sl_broker_disabled = True` → internal monitor and `_detect_market_fallback_reason` become the sole safety net
 
 When `sl_last_placed_pct` is **not updated** (replacement failed), `profit_sl_replace` remains True on the next tick and the replacement is retried automatically. Check `logs/trade.log` for `[TRAIL SL STOP] Failed to upsert` or `(cancel-then-fresh)` lines to diagnose replacement behavior.
+
+### `_detect_market_fallback_reason` — All Trigger Conditions
+
+Called on every monitoring tick (polling: every `PRICE_POLL_SEC`; websocket: every `WS_ORDER_CHECK_SEC`). Returns `(reason_string, detail_string)` or `(None, None)`. When non-None, the caller cancels all TP/SL orders and places a market sell.
+
+**Condition 1 — SL order in terminal state** (`ORDER_SYSTEM_FAILURE_MARKET_EXIT`)
+The broker SL order is in `rejected`, `expired`, `canceled`, or `cancelled` status. The order cannot fill; a market sell is the only exit.
+
+**Condition 2 — Gap-down miss** (`SL_MISSED_GAPDOWN_MARKET_EXIT`)
+The SL stop-limit is active but `sellable_price <= stop_price` AND `sellable_price < limit_price`. The stop triggered but the market gapped below the limit floor, so the stop-limit cannot fill. Forced market exit immediately.
+
+**Condition 3 — Triggered but unfilled** (`ORDER_SYSTEM_FAILURE_MARKET_EXIT`)
+`sellable_price <= stop_price` (stop triggered) but the order has not filled after a 2-second grace period. The broker acknowledged the trigger but did not fill — treated as an order-system failure.
+
+**Condition 4 — SL orders unconfirmable at trigger price** (`ORDER_SYSTEM_FAILURE_MARKET_EXIT`)
+`sl_order_ids` is non-empty but every `get_order_by_id` call raised an exception (broker unreachable) AND `sellable_price` is at or below the `sl_dynamic_pct` trigger price. Fires only when price is in the triggered zone so normal above-SL ticks do not false-trigger.
+
+**Condition 5 — QP replacement failure guard** (`QP_SL_REPLACE_FAILED_MARKET_EXIT`)
+Fires when the QP ratchet has moved the internal `sl_dynamic_pct` to a profit level but the broker SL has not been successfully moved there — meaning some or all replacement attempts failed. This covers the full spectrum:
+- *No replacement ever succeeded*: `sl_last_placed_pct` is still at the initial loss level (e.g., −50%) while `sl_dynamic_pct` is at +49%.
+- *Partial ratchet success*: earlier replacements succeeded (e.g., to +10%, +30%) but the latest attempt (to +49%) failed, leaving `sl_last_placed_pct = +30%` while `sl_dynamic_pct = +49%`.
+
+**Trigger condition** (all must be true simultaneously):
+- `sl_dynamic_pct > 0.0` — internal SL has ratcheted into the profit zone
+- `sl_last_placed_pct is not None` and `sl_last_placed_pct < sl_dynamic_pct` — broker SL is behind the current QP level
+- `fill_price > 0` and `sl_broker_disabled = False`
+- `sellable_price <= fill_price × (1 + sl_dynamic_pct / 100)` — price has slid back to the QP trigger price
+- After a **2-second grace period** — the condition must hold continuously for 2 seconds before firing, filtering out transient bid/ask spread dips
+
+**Grace timer lifecycle**:
+- Timer (`qp_guard_trigger_seen_ts`) starts on the first tick where price is at/below the QP trigger and the broker SL gap exists.
+- Timer **resets** (cleared) when either: (a) price recovers above the QP trigger, or (b) a replacement succeeds and `sl_last_placed_pct` catches up to `sl_dynamic_pct`. This prevents a stale timer from a prior failure window from causing an instant fire on the very next failure.
+- After 2 seconds uninterrupted, the guard fires: `_cancel_exit_orders` clears all TP/SL orders, and the monitor returns `QP_SL_REPLACE_FAILED_MARKET_EXIT` — the caller (main AIT loop or position monitor) then places the market sell.
 
 ### Position Registry (`order_execution.py`)
 

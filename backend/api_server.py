@@ -1260,6 +1260,7 @@ def _ait_run_straddle(
         market_fallback_reasons = {
             "SL_MISSED_GAPDOWN_MARKET_EXIT",
             "ORDER_SYSTEM_FAILURE_MARKET_EXIT",
+            "QP_SL_REPLACE_FAILED_MARKET_EXIT",
         }
         try:
             while True:
@@ -1589,6 +1590,7 @@ def _ait_trade_loop(
             market_fallback_reasons = {
                 "SL_MISSED_GAPDOWN_MARKET_EXIT",
                 "ORDER_SYSTEM_FAILURE_MARKET_EXIT",
+                "QP_SL_REPLACE_FAILED_MARKET_EXIT",
             }
 
             while True:
@@ -1921,6 +1923,7 @@ def _recovery_monitor_thread(
     market_fallback_reasons = {
         "SL_MISSED_GAPDOWN_MARKET_EXIT",
         "ORDER_SYSTEM_FAILURE_MARKET_EXIT",
+        "QP_SL_REPLACE_FAILED_MARKET_EXIT",
     }
     # Enforce configured minimum trade duration for recovery monitoring
     try:
@@ -2833,6 +2836,7 @@ def get_live_positions_api() -> dict[str, Any]:
         "TAKE_PROFIT_EXIT": "Price hit the take-profit target. Full profit captured!",
         "SL_MISSED_GAPDOWN_MARKET_EXIT": "SL stop-limit could not fill during a gap-down (market below SL limit). Forced market sell was used.",
         "ORDER_SYSTEM_FAILURE_MARKET_EXIT": "Broker TP/SL order state was missing or invalid. Forced market sell was used as recovery.",
+        "QP_SL_REPLACE_FAILED_MARKET_EXIT": "QP ratcheted to profit level but broker SL replacement failed. Forced market sell to lock in profit before price eroded to original stop-loss.",
         "FORCED_EXIT_NO_SIGNAL": "Forced exit due to timeout or market close. No clear signal to hold longer.",
     }
 
@@ -3324,6 +3328,7 @@ def _manual_trade_monitor_thread(
     market_fallback_reasons = {
         "SL_MISSED_GAPDOWN_MARKET_EXIT",
         "ORDER_SYSTEM_FAILURE_MARKET_EXIT",
+        "QP_SL_REPLACE_FAILED_MARKET_EXIT",
     }
     try:
         min_exit_epoch_ts = time.time() + float(MIN_TRADE_DURATION_SEC or 0)
