@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git pull *)",
+      "Bash(python tools/backtest.py --window 5 --verbose)",
+      "Bash(python tools/backtest.py --window 5)",
+      "Bash(python tools/backtest.py --window 5 --fail-after 2 --grace-bars 1)",
+      "Bash(python tools/backtest.py --window 5 --fail-after 1 --grace-bars 1)",
+      "Bash(python tools/backtest.py --window 5 --fail-after 2 --grace-bars 1 --verbose)",
+      "Bash(findstr /C:\"FAIL\" /C:\"TRADE:\" /C:\"Bar \" /C:\"===\")"
+    ]
+  }
+}

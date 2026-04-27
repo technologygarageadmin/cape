@@ -694,7 +694,6 @@ function PositionCard({ pos }) {
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
           {expanded ? <ChevronUp size={18} color="#888" /> : <ChevronDown size={18} color="#888" />}
-          {expanded ? <ChevronUp size={18} color="#888" /> : <ChevronDown size={18} color="#888" />}
         </div>
       </div>
 

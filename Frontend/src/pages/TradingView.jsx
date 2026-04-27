@@ -131,8 +131,12 @@ const API_DISPLAY = 'http://localhost:8002'
 const INTERVAL_MAP = { '1m': '1Min', '5m': '5Min', '15m': '15Min', '1H': '1Hour', '4H': '4Hour', '1D': '1Day' }
 // Enough history to render EMA(50) and detect EMA(9/21) crosses.
 const BARS_LIMIT = { '1m': 800, '5m': 500, '15m': 300, '1H': 240, '4H': 220, '1D': 220 }
-// Polling interval per chart interval (ms) — no faster than 30s
-const POLL_MS = { '1m': 5_000, '5m': 5_000, '15m': 5_000, '1H': 5_000, '4H': 5_000, '1D': 5_000 }
+// Polling interval per chart interval (ms) — 1m uses 2s for near-real-time updates
+const POLL_MS = { '1m': 2_000, '5m': 3_000, '15m': 5_000, '1H': 10_000, '4H': 30_000, '1D': 60_000 }
+// Limit used for incremental bar polls (only fetch recent bars, not full history)
+const POLL_LIMIT = { '1m': 5, '5m': 5, '15m': 5, '1H': 3, '4H': 3, '1D': 3 }
+// Bar duration in seconds — used to guard live-price injection into closed bars
+const BAR_DURATION_SEC = { '1m': 60, '5m': 300, '15m': 900, '1H': 3600, '4H': 14400, '1D': 86400 }
 // Normalize API bar: map `timestamp` field → `time` that CandleChart expects
 const normalizeBar = (b) => ({ ...b, time: b.time ?? b.timestamp })
 
@@ -476,7 +480,7 @@ export default function TradingView() {
   })
   const prevPricesRef = useRef({})
 
-  // ── Poll /api/quotes every 1.5 s for live prices ──
+  // ── Poll /api/quotes every 2 s for live prices ──
   useEffect(() => {
     const symbols = STOCK_SYMBOLS.map(s => s.symbol).join(',')
     const poll = async () => {
@@ -496,7 +500,7 @@ export default function TradingView() {
       } catch (_) {}
     }
     poll()
-    const id = setInterval(poll, 15000)
+    const id = setInterval(poll, 2_000)
     return () => clearInterval(id)
   }, [])
 
@@ -876,9 +880,13 @@ export default function TradingView() {
   useEffect(() => {
     const pollNewBars = async () => {
       try {
-        const tf  = INTERVAL_MAP[interval] || '5Min'
-        const limit = BARS_LIMIT[interval] || 200
-        const res = await fetch(`${API_DISPLAY}/api/bars?symbol=${selected.symbol}&timeframe=${tf}&limit=${limit}`)
+        const tf    = INTERVAL_MAP[interval] || '5Min'
+        // Use a small limit + since= for lightweight incremental fetches — avoids
+        // pulling 7-day history on every tick.  Falls back to full limit on first poll.
+        const since = lastBarTimeRef.current
+        const limit = since ? (POLL_LIMIT[interval] ?? 5) : (BARS_LIMIT[interval] ?? 200)
+        const sinceParam = since ? `&since=${encodeURIComponent(since)}` : ''
+        const res = await fetch(`${API_DISPLAY}/api/bars?symbol=${selected.symbol}&timeframe=${tf}&limit=${limit}${sinceParam}`)
         if (!res.ok) return
         const data = await res.json()
         if (!data.bars?.length) return
@@ -888,6 +896,16 @@ export default function TradingView() {
           ? data.bars.filter(b => (b.timestamp ?? b.time) > lastKnown)
           : []
 
+        // Helper: merge new RSI points into existing series (incremental polls only
+        // return bars/points newer than `since`, so we append rather than replace).
+        const mergePoints = (prev, incoming_) => {
+          if (!since) return Array.isArray(incoming_) ? incoming_ : prev
+          if (!Array.isArray(incoming_) || !incoming_.length) return prev
+          const existingTs = new Set(prev.map(p => p.timestamp))
+          const toAdd = incoming_.filter(p => !existingTs.has(p.timestamp))
+          return toAdd.length ? [...prev, ...toAdd] : prev
+        }
+
         if (incoming.length > 0) {
           lastBarTimeRef.current = data.bars[data.bars.length - 1].timestamp ?? lastKnown
           setCandles(prev => {
@@ -896,9 +914,9 @@ export default function TradingView() {
             return toAdd.length ? [...prev, ...toAdd] : prev
           })
           if (data.rsi != null) setRsi(data.rsi)
-          setRsiPoints(Array.isArray(data.rsi_points) ? data.rsi_points : [])
-          setRsiMaPoints(Array.isArray(data.rsi_ma_points) ? data.rsi_ma_points : [])
-          setRsiMarkers(Array.isArray(data.rsi_markers) ? data.rsi_markers : [])
+          setRsiPoints(prev => mergePoints(prev, data.rsi_points))
+          setRsiMaPoints(prev => mergePoints(prev, data.rsi_ma_points))
+          setRsiMarkers(prev => mergePoints(prev, data.rsi_markers))
         } else {
           // Update last bar in-place (price may have changed within the same candle)
           const latest = data.bars[data.bars.length - 1]
@@ -912,9 +930,9 @@ export default function TradingView() {
             })
           }
           if (data.rsi != null) setRsi(data.rsi)
-          setRsiPoints(Array.isArray(data.rsi_points) ? data.rsi_points : [])
-          setRsiMaPoints(Array.isArray(data.rsi_ma_points) ? data.rsi_ma_points : [])
-          setRsiMarkers(Array.isArray(data.rsi_markers) ? data.rsi_markers : [])
+          setRsiPoints(prev => mergePoints(prev, data.rsi_points))
+          setRsiMaPoints(prev => mergePoints(prev, data.rsi_ma_points))
+          setRsiMarkers(prev => mergePoints(prev, data.rsi_markers))
         }
       } catch (_) {}
     }
@@ -1981,6 +1999,7 @@ export default function TradingView() {
             rsiMeanReversionMarkers={rsiMeanReversionMarkers}
             fitKey={selected.symbol + '_' + interval}
             livePrice={livePrice}
+            barDurationSec={BAR_DURATION_SEC[interval] ?? 60}
           />
         </div>
 
@@ -2064,17 +2083,25 @@ export default function TradingView() {
                     {recentTicks.map((tick, idx) => {
                       const isOrder = tick.source === 'order_placed' || tick.source === 'order_replaced'
                       const isSell = tick.source === 'sell'
-                      const src = String(isSell ? (tick.exit_reason || 'sell') : (tick.source || 'tick')).toUpperCase()
+                      const isExitFilled = tick.source === 'exit_filled'
+                      const src = String(
+                        isSell ? (tick.exit_reason || 'sell') :
+                        isExitFilled ? 'EXIT_FILLED' :
+                        (tick.source || 'tick')
+                      ).toUpperCase()
                       const orderStatusAt = tick.status_at || tick.filled_at || tick.canceled_at || tick.updated_at || tick.submitted_at || tick.ts
                       const peakPct = toNum(tick.max_pnl_pct)
                       const peakPx = fillPx != null && peakPct != null ? fillPx * (1 + peakPct / 100) : null
+                      const exitFilledIsProfit = isExitFilled && tick.order_type === 'TP_LIMIT'
                       const rowBg = isSell
                         ? 'rgba(239,68,68,0.08)'
-                        : isOrder
-                          ? 'rgba(217,119,6,0.06)'
-                          : idx % 2 === 0
-                            ? '#fff'
-                            : '#fcfcfc'
+                        : isExitFilled
+                          ? (exitFilledIsProfit ? 'rgba(34,197,94,0.12)' : 'rgba(239,68,68,0.12)')
+                          : isOrder
+                            ? 'rgba(217,119,6,0.06)'
+                            : idx % 2 === 0
+                              ? '#fff'
+                              : '#fcfcfc'
                       const orderBadges = [tick.live_qp ? 'QP' : '', tick.live_sl ? 'SL' : '', tick.live_tsl ? 'TSL' : '']
                         .filter(Boolean)
                         .join(', ')
@@ -2099,15 +2126,15 @@ export default function TradingView() {
                       return (
                         <tr key={`${tick.ts || idx}-${idx}`} style={{ borderBottom: '1px solid rgba(0,0,0,0.04)', background: rowBg }}>
                           <td style={{ padding: '0.26rem 0.38rem', fontFamily: 'monospace', color: '#555', whiteSpace: 'nowrap' }}>{fmtTickTime(tick.ts)}</td>
-                          <td style={{ padding: '0.26rem 0.38rem', fontFamily: 'monospace', color: isSell ? '#ef4444' : '#6b7280', fontWeight: 700, whiteSpace: 'nowrap' }}>{src}</td>
+                          <td style={{ padding: '0.26rem 0.38rem', fontFamily: 'monospace', color: isSell ? '#ef4444' : isExitFilled ? (exitFilledIsProfit ? '#16a34a' : '#ef4444') : '#6b7280', fontWeight: 700, whiteSpace: 'nowrap' }}>{src}</td>
                           <td style={{ padding: '0.26rem 0.38rem', fontFamily: 'monospace', color: '#111', fontWeight: 700, whiteSpace: 'nowrap' }}>
-                            {!isOrder ? fmtMoneyMaybe(tick.sellable_price) : (tick.fill_price != null ? fmtMoneyMaybe(tick.fill_price) : fmtMoneyMaybe(tick.limit_price))}
+                            {isExitFilled ? fmtMoneyMaybe(tick.fill_price) : !isOrder ? fmtMoneyMaybe(tick.sellable_price) : (tick.fill_price != null ? fmtMoneyMaybe(tick.fill_price) : fmtMoneyMaybe(tick.limit_price))}
                           </td>
                           <td style={{ padding: '0.26rem 0.38rem', fontFamily: 'monospace', color: '#666', whiteSpace: 'nowrap' }}>
-                            {!isOrder ? fmtMoneyMaybe(tick.bid_price) : (tick.stop_price != null ? `stop ${fmtMoneyMaybe(tick.stop_price)}` : '—')}
+                            {isExitFilled ? `trig@${fmtTickTime(tick.triggered_at)}` : !isOrder ? fmtMoneyMaybe(tick.bid_price) : (tick.stop_price != null ? `stop ${fmtMoneyMaybe(tick.stop_price)}` : '—')}
                           </td>
                           <td style={{ padding: '0.26rem 0.38rem', fontFamily: 'monospace', color: '#666', whiteSpace: 'nowrap' }}>
-                            {!isOrder ? fmtMoneyMaybe(tick.mid_price) : (tick.limit_price != null ? `lmt ${fmtMoneyMaybe(tick.limit_price)}` : '—')}
+                            {isExitFilled ? (tick.order_type || '—') : !isOrder ? fmtMoneyMaybe(tick.mid_price) : (tick.limit_price != null ? `lmt ${fmtMoneyMaybe(tick.limit_price)}` : '—')}
                           </td>
                           <td style={{ padding: '0.26rem 0.38rem', fontFamily: 'monospace', color: Number(tick.pnl_pct ?? tick.pct ?? 0) >= 0 ? '#16a34a' : '#dc2626', fontWeight: 700, whiteSpace: 'nowrap' }}>
                             {fmtPctMaybe(tick.pnl_pct ?? tick.pct)}
@@ -2117,22 +2144,26 @@ export default function TradingView() {
                           <td style={{ padding: '0.26rem 0.38rem', fontFamily: 'monospace', color: '#ef4444', whiteSpace: 'nowrap' }}>{fmtPctMaybe(tick.sl_dynamic_pct)}</td>
                           <td style={{ padding: '0.26rem 0.38rem', fontFamily: 'monospace', color: '#6366f1', whiteSpace: 'nowrap' }}>{fmtPctMaybe(tick.max_pnl_pct)}</td>
                           <td style={{ padding: '0.26rem 0.38rem', fontFamily: 'monospace', color: '#6366f1', whiteSpace: 'nowrap' }}>{peakPx != null ? fmtMoneyMaybe(peakPx) : '—'}</td>
-                          <td style={{ padding: '0.26rem 0.38rem', fontFamily: 'monospace', color: '#666', whiteSpace: 'nowrap' }}>{tick.tp_action || 'NO_CHANGE'}</td>
-                          <td style={{ padding: '0.26rem 0.38rem', fontFamily: 'monospace', color: tick.sl_action === 'UPDATED' ? '#dc2626' : '#666', fontWeight: 700, whiteSpace: 'nowrap' }}>
-                            {isOrder ? String(tick.order_type || 'ORDER').toUpperCase() : (tick.sl_action || 'NO_CHANGE')}
+                          <td style={{ padding: '0.26rem 0.38rem', fontFamily: 'monospace', color: '#666', whiteSpace: 'nowrap' }}>{tick.tp_action || (isExitFilled ? '—' : 'NO_CHANGE')}</td>
+                          <td style={{ padding: '0.26rem 0.38rem', fontFamily: 'monospace', color: isExitFilled ? (exitFilledIsProfit ? '#16a34a' : '#ef4444') : tick.sl_action === 'UPDATED' ? '#dc2626' : '#666', fontWeight: 700, whiteSpace: 'nowrap' }}>
+                            {isExitFilled ? 'EXECUTED' : isOrder ? String(tick.order_type || 'ORDER').toUpperCase() : (tick.sl_action || 'NO_CHANGE')}
                           </td>
                           <td style={{ padding: '0.26rem 0.38rem', fontFamily: 'monospace', color: '#555', whiteSpace: 'nowrap' }}>
-                            {isOrder
-                              ? `${String(tick.status || 'live').toUpperCase()}${tick.order_id ? ` · ${String(tick.order_id).slice(0, 8)}…` : ''} @ ${fmtTickTime(orderStatusAt)}`
-                              : tick.sl_action === 'UPDATED'
-                                ? `${fmtMoneyMaybe(tick.sl_prev_price)} -> ${fmtMoneyMaybe(tick.sl_new_price)}`
-                                : 'No change'}
+                            {isExitFilled
+                              ? `${String(tick.order_id || '').slice(0, 8)}… · filled@${fmtTickTime(tick.filled_at)}`
+                              : isOrder
+                                ? `${String(tick.status || 'live').toUpperCase()}${tick.order_id ? ` · ${String(tick.order_id).slice(0, 8)}…` : ''} @ ${fmtTickTime(orderStatusAt)}`
+                                : tick.sl_action === 'UPDATED'
+                                  ? `${fmtMoneyMaybe(tick.sl_prev_price)} -> ${fmtMoneyMaybe(tick.sl_new_price)}`
+                                  : 'No change'}
                           </td>
                           <td style={{ padding: '0.26rem 0.38rem', textAlign: 'center', color: '#d97706', fontWeight: 800 }}>{tick.qp_armed ? '✓' : '—'}</td>
                           <td style={{ padding: '0.26rem 0.38rem', fontFamily: 'monospace', color: '#666', whiteSpace: 'nowrap' }}>
-                            {isOrder
-                              ? (String(tick.order_count || '').trim() ? `#${tick.order_count}` : '—')
-                              : (entryBracketInfo || orderBadges || '—')}
+                            {isExitFilled
+                              ? (tick.exit_reason || '—')
+                              : isOrder
+                                ? (String(tick.order_count || '').trim() ? `#${tick.order_count}` : '—')
+                                : (entryBracketInfo || orderBadges || '—')}
                           </td>
                         </tr>
                       )
@@ -3253,29 +3284,41 @@ export default function TradingView() {
                       {ticks.map((tick, idx) => {
                         const isOrder = tick.source === 'order_placed' || tick.source === 'order_replaced'
                         const isSell = tick.source === 'sell'
-                        const srcBase = String(isSell ? (tick.exit_reason || 'sell') : (tick.source || 'tick')).toUpperCase()
+                        const isExitFilled = tick.source === 'exit_filled'
+                        const srcBase = String(
+                          isSell ? (tick.exit_reason || 'sell') :
+                          isExitFilled ? 'EXIT_FILLED' :
+                          (tick.source || 'tick')
+                        ).toUpperCase()
                         const statusAt = tick.status_at || tick.filled_at || tick.canceled_at || tick.updated_at || tick.submitted_at || tick.ts
-                        const src = isOrder
-                          ? `${srcBase}:${String(tick.status || 'live').toUpperCase()} @ ${fmtTickTime(statusAt)}`
-                          : srcBase
-                        const price = !isOrder
-                          ? (tick.sellable_price ?? tick.mid_price ?? tick.bid_price)
-                          : (tick.fill_price ?? tick.limit_price)
+                        const src = isExitFilled
+                          ? `${srcBase}:${tick.order_type || '?'}·id:${String(tick.order_id || '').slice(0, 8)}…·@${fmtTickTime(tick.filled_at)}`
+                          : isOrder
+                            ? `${srcBase}:${String(tick.status || 'live').toUpperCase()} @ ${fmtTickTime(statusAt)}`
+                            : srcBase
+                        const price = isExitFilled
+                          ? tick.fill_price
+                          : !isOrder
+                            ? (tick.sellable_price ?? tick.mid_price ?? tick.bid_price)
+                            : (tick.fill_price ?? tick.limit_price)
                         const pnlRaw = tick.pnl_pct ?? tick.pct
                         const peakPct = toNum(tick.max_pnl_pct)
                         const peakPx = fillPx != null && peakPct != null ? fillPx * (1 + peakPct / 100) : null
+                        const exitFilledIsProfit = isExitFilled && tick.order_type === 'TP_LIMIT'
                         const rowBg = isSell
                           ? 'rgba(239,68,68,0.08)'
-                          : isOrder
-                            ? 'rgba(217,119,6,0.06)'
-                            : idx % 2 === 0
-                              ? '#fff'
-                              : '#fcfcfc'
+                          : isExitFilled
+                            ? (exitFilledIsProfit ? 'rgba(34,197,94,0.12)' : 'rgba(239,68,68,0.12)')
+                            : isOrder
+                              ? 'rgba(217,119,6,0.06)'
+                              : idx % 2 === 0
+                                ? '#fff'
+                                : '#fcfcfc'
 
                         return (
                           <tr key={`${tick.ts || idx}-${idx}`} style={{ background: rowBg, borderBottom: '1px solid rgba(0,0,0,0.04)' }}>
                             <td style={{ padding: '0.22rem 0.35rem', fontFamily: 'monospace', color: '#555', whiteSpace: 'nowrap' }}>{fmtTickTime(tick.ts)}</td>
-                            <td style={{ padding: '0.22rem 0.35rem', fontFamily: 'monospace', color: isSell ? '#ef4444' : '#6b7280', fontWeight: 700, whiteSpace: 'nowrap' }}>{src}</td>
+                            <td style={{ padding: '0.22rem 0.35rem', fontFamily: 'monospace', color: isSell ? '#ef4444' : isExitFilled ? (exitFilledIsProfit ? '#16a34a' : '#ef4444') : '#6b7280', fontWeight: 700, whiteSpace: 'nowrap' }}>{src}</td>
                             <td style={{ padding: '0.22rem 0.35rem', fontFamily: 'monospace', color: '#111', fontWeight: 700, whiteSpace: 'nowrap' }}>{fmtMoneyMaybe(price)}</td>
                             <td style={{ padding: '0.22rem 0.35rem', fontFamily: 'monospace', color: Number(pnlRaw ?? 0) >= 0 ? '#16a34a' : '#dc2626', fontWeight: 700, whiteSpace: 'nowrap' }}>{fmtPctMaybe(pnlRaw)}</td>
                             <td style={{ padding: '0.22rem 0.35rem', fontFamily: 'monospace', color: '#6366f1', whiteSpace: 'nowrap' }}>{fmtPctMaybe(tick.max_pnl_pct)}</td>

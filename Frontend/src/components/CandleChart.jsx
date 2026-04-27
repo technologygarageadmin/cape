@@ -74,6 +74,7 @@ const CandleChart = ({
   onPointLeave,
   fitKey,
   livePrice,
+  barDurationSec = 60,
 }) => {
   const containerRef = useRef(null);
   const chartRef = useRef(null);
@@ -529,6 +530,14 @@ const CandleChart = ({
     if (!lastTime) return
     const price = Number(livePrice)
     if (!isFinite(price) || price <= 0) return
+
+    // Only inject the live price into the bar that is still OPEN (within its period).
+    // If the last bar in data is a completed historical bar (older than 2 bar periods),
+    // skip the update — injecting a stale live price would create a spike candle and
+    // distort the Y-axis, making the chart freeze on scroll.
+    const nowSec = Math.floor(Date.now() / 1000)
+    if (nowSec - lastTime > barDurationSec * 2) return
+
     try {
       candleSeriesRef.current.update({
         time: lastTime,

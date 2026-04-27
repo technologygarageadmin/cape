@@ -619,15 +619,21 @@ def _place_sl_stop_order(tc, exit_state: dict, contract_symbol: str | None, qty:
         if (
             "40310000" in low
             or "account not eligible to trade uncovered option contracts" in low
-            or "position intent mismatch" in low
         ):
             exit_state["sl_broker_disabled"] = True
             info(f"[{label} STOP] Broker SL disabled for {contract_symbol} (will use internal fallback exits)")
             return {"operation": "disabled", "error": err_str}
 
+        # "position intent mismatch" (42210000) on a fresh placement means the position is
+        # already being closed (race between SL fill detection and the next ratchet tick).
+        # Skip this tick without disabling broker SL — it is a timing issue, not a capability one.
+        if not existing_id and ("42210000" in low or "position intent mismatch" in low):
+            info(f"[{label} STOP] Fresh SL skipped for {contract_symbol} — position likely closing (intent mismatch)")
+            return {"operation": "skipped", "error": err_str}
+
         # If replace failed because the existing order is no longer open,
         # attempt to place a fresh stop-limit order before other fallbacks.
-        if existing_id and ("order is not open" in low or "42210000" in low or "order not open" in low):
+        if existing_id and ("order is not open" in low or "42210000" in low or "order not open" in low or "position intent mismatch" in low):
             try:
                 # Try placing a fresh StopLimitOrderRequest using the normal path
                 try:

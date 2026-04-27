@@ -1262,6 +1262,7 @@ def _ait_run_straddle(
             "ORDER_SYSTEM_FAILURE_MARKET_EXIT",
             "QP_SL_REPLACE_FAILED_MARKET_EXIT",
         }
+        _exit_order_type = "UNKNOWN"
         try:
             while True:
                 # Enforce configured minimum trade duration for this leg
@@ -1287,6 +1288,7 @@ def _ait_run_straddle(
                     sell_price = float(exit_state.get("tp_order_fill_price") or opt_price)
                     sell_order_id = exit_state.get("tp_order_id_filled") or ""
                     sell_filled_time_iso = datetime.now(CDT).isoformat(timespec="seconds")
+                    _exit_order_type = "TP_LIMIT"
                     mark_selling(buy_order_id, sell_order_id)
                     close_position(buy_order_id)
                     break
@@ -1295,6 +1297,7 @@ def _ait_run_straddle(
                     sell_price = float(exit_state.get("sl_order_fill_price") or opt_price)
                     sell_order_id = exit_state.get("sl_order_id_filled") or ""
                     sell_filled_time_iso = datetime.now(CDT).isoformat(timespec="seconds")
+                    _exit_order_type = "SL_STOP_LIMIT"
                     mark_selling(buy_order_id, sell_order_id)
                     close_position(buy_order_id)
                     break
@@ -1326,6 +1329,7 @@ def _ait_run_straddle(
                         _to_iso(getattr(filled_sell, "filled_at", None))
                         or datetime.now(CDT).isoformat(timespec="seconds")
                     )
+                    _exit_order_type = "MARKET_SELL"
                     close_position(buy_order_id)
                     break
 
@@ -1339,6 +1343,17 @@ def _ait_run_straddle(
             pnl_pct = (sell_price - fill_price) / fill_price * 100
             pnl_dollar = round((sell_price - fill_price) * QTY * 100, 2)
             result = "WIN" if pnl_pct > 0 else "LOSS" if pnl_pct < 0 else "BREAKEVEN"
+            if exit_state is not None:
+                exit_state.setdefault("timeline", []).append({
+                    "ts": sell_filled_time_iso or datetime.now(CDT).isoformat(timespec="seconds"),
+                    "source": "exit_filled",
+                    "exit_reason": exit_reason,
+                    "order_id": sell_order_id,
+                    "order_type": _exit_order_type,
+                    "fill_price": sell_price,
+                    "triggered_at": exit_signal_time_iso,
+                    "filled_at": sell_filled_time_iso,
+                })
 
             print(
                 f"[AIT:{symbol}] Straddle {leg_name} SOLD: {sell_price:.4f} "
@@ -1386,6 +1401,12 @@ def _ait_run_straddle(
                     "qp_arm_pnl_pct": exit_state.get("qp_arm_pnl_pct"),
                     "qp_arm_peak_pct":exit_state.get("qp_arm_peak_pct"),
                     "timeline":       exit_state.get("timeline") or [],
+                    # Exit order execution details
+                    "exit_order_id":           sell_order_id,
+                    "exit_order_type":         _exit_order_type,
+                    "exit_order_triggered_at": exit_signal_time_iso,
+                    "exit_order_filled_at":    sell_filled_time_iso,
+                    "exit_order_fill_price":   sell_price,
                 }
                 _options_log_col.insert_one(_straddle_doc)
                 log_trade("STRADDLE", _straddle_doc)
@@ -1592,6 +1613,7 @@ def _ait_trade_loop(
                 "ORDER_SYSTEM_FAILURE_MARKET_EXIT",
                 "QP_SL_REPLACE_FAILED_MARKET_EXIT",
             }
+            _exit_order_type = "UNKNOWN"
 
             while True:
                 exit_reason, opt_price, exit_state = monitor_with_websocket(
@@ -1623,6 +1645,7 @@ def _ait_trade_loop(
                     rsi_sell_order_id = exit_state.get("tp_order_id_filled") or ""
                     sell_price = float(exit_state.get("tp_order_fill_price") or exit_signal_price or opt_price or 0)
                     sell_filled_time_iso = datetime.now(CDT).isoformat(timespec="seconds")
+                    _exit_order_type = "TP_LIMIT"
                     mark_selling(rsi_buy_order_id, rsi_sell_order_id)
                     close_position(rsi_buy_order_id)
                     print(f"[AIT:{symbol}] TAKE_PROFIT_EXIT via Alpaca TP limit order filled at {sell_price:.4f}")
@@ -1632,6 +1655,7 @@ def _ait_trade_loop(
                     rsi_sell_order_id = exit_state.get("sl_order_id_filled") or ""
                     sell_price = float(exit_state.get("sl_order_fill_price") or exit_signal_price or opt_price or 0)
                     sell_filled_time_iso = datetime.now(CDT).isoformat(timespec="seconds")
+                    _exit_order_type = "SL_STOP_LIMIT"
                     mark_selling(rsi_buy_order_id, rsi_sell_order_id)
                     close_position(rsi_buy_order_id)
                     print(f"[AIT:{symbol}] {exit_reason} via Alpaca SL stop-limit order filled at {sell_price:.4f}")
@@ -1663,6 +1687,7 @@ def _ait_trade_loop(
                         _to_iso(getattr(filled_sell, "filled_at", None))
                         or datetime.now(CDT).isoformat(timespec="seconds")
                     )
+                    _exit_order_type = "MARKET_SELL"
                     close_position(rsi_buy_order_id)
                     break
 
@@ -1678,6 +1703,17 @@ def _ait_trade_loop(
             pnl_dollar = round((sell_price - fill_price) * QTY * 100, 2)
             result = "WIN" if pnl_pct > 0 else "LOSS" if pnl_pct < 0 else "BREAKEVEN"
             print(f"[AIT:{symbol}] SELL: {sell_price:.4f} | PnL: {pnl_pct:+.2f}% | {exit_reason} | buy_order_id={rsi_buy_order_id} sell_order_id={rsi_sell_order_id}")
+            if exit_state is not None:
+                exit_state.setdefault("timeline", []).append({
+                    "ts": sell_filled_time_iso or datetime.now(CDT).isoformat(timespec="seconds"),
+                    "source": "exit_filled",
+                    "exit_reason": exit_reason,
+                    "order_id": rsi_sell_order_id,
+                    "order_type": _exit_order_type,
+                    "fill_price": sell_price,
+                    "triggered_at": exit_signal_time_iso,
+                    "filled_at": sell_filled_time_iso,
+                })
 
             if _options_log_col is not None:
                 now_cdt = datetime.now(CDT)
@@ -1733,6 +1769,12 @@ def _ait_trade_loop(
                     "qp_arm_peak_pct":exit_state.get("qp_arm_peak_pct"),
                     # Full tick-by-tick lifecycle timeline
                     "timeline":       exit_state.get("timeline") or [],
+                    # Exit order execution details
+                    "exit_order_id":           rsi_sell_order_id,
+                    "exit_order_type":         _exit_order_type,
+                    "exit_order_triggered_at": exit_signal_time_iso,
+                    "exit_order_filled_at":    sell_filled_time_iso,
+                    "exit_order_fill_price":   sell_price,
                     # Entry indicators (RSI, EMA, volume, candle data at signal time)
                     "entry_rsi": _indicators.get("rsi"),
                     "entry_rsi_ma": round(float(rsi_result.get("latest_rsi_ma", 0)), 2),
@@ -1920,6 +1962,7 @@ def _recovery_monitor_thread(
     rsi_sell_order_id = None
     exit_signal_time_iso = None
     exit_signal_price = None
+    _exit_order_type = "UNKNOWN"
     market_fallback_reasons = {
         "SL_MISSED_GAPDOWN_MARKET_EXIT",
         "ORDER_SYSTEM_FAILURE_MARKET_EXIT",
@@ -1966,6 +2009,7 @@ def _recovery_monitor_thread(
             sell_price = float(exit_state.get("tp_order_fill_price") or opt_price or 0)
             rsi_sell_order_id = exit_state.get("tp_order_id_filled") or ""
             sell_filled_time_iso = datetime.now(CDT).isoformat(timespec="seconds")
+            _exit_order_type = "TP_LIMIT"
             mark_selling(buy_order_id, rsi_sell_order_id)
             close_position(buy_order_id)
             print(f"[RECOVERY:{underlying}] TAKE_PROFIT_EXIT via Alpaca TP limit order at {sell_price:.4f}")
@@ -1975,6 +2019,7 @@ def _recovery_monitor_thread(
             sell_price = float(exit_state.get("sl_order_fill_price") or opt_price or 0)
             rsi_sell_order_id = exit_state.get("sl_order_id_filled") or ""
             sell_filled_time_iso = datetime.now(CDT).isoformat(timespec="seconds")
+            _exit_order_type = "SL_STOP_LIMIT"
             mark_selling(buy_order_id, rsi_sell_order_id)
             close_position(buy_order_id)
             print(f"[RECOVERY:{underlying}] {exit_reason} via Alpaca SL stop-limit order at {sell_price:.4f}")
@@ -2006,6 +2051,7 @@ def _recovery_monitor_thread(
                 _to_iso(getattr(filled_sell, "filled_at", None))
                 or datetime.now(CDT).isoformat(timespec="seconds")
             )
+            _exit_order_type = "MARKET_SELL"
             close_position(buy_order_id)
             break
 
@@ -2028,6 +2074,17 @@ def _recovery_monitor_thread(
     pnl_pct = (sell_price - entry_price) / entry_price * 100
     pnl_dollar = round((sell_price - entry_price) * qty * 100, 2)
     result = "WIN" if pnl_pct > 0 else "LOSS" if pnl_pct < 0 else "BREAKEVEN"
+    if exit_state is not None:
+        exit_state.setdefault("timeline", []).append({
+            "ts": sell_filled_time_iso or datetime.now(CDT).isoformat(timespec="seconds"),
+            "source": "exit_filled",
+            "exit_reason": exit_reason,
+            "order_id": rsi_sell_order_id,
+            "order_type": _exit_order_type,
+            "fill_price": sell_price,
+            "triggered_at": exit_signal_time_iso,
+            "filled_at": sell_filled_time_iso,
+        })
 
     print(
         f"[RECOVERY:{underlying}] SOLD {contract_symbol}: {sell_price:.4f} "
@@ -2077,6 +2134,12 @@ def _recovery_monitor_thread(
             "qp_arm_pnl_pct": exit_state.get("qp_arm_pnl_pct"),
             "qp_arm_peak_pct":exit_state.get("qp_arm_peak_pct"),
             "timeline":       exit_state.get("timeline") or [],
+            # Exit order execution details
+            "exit_order_id":           rsi_sell_order_id,
+            "exit_order_type":         _exit_order_type,
+            "exit_order_triggered_at": exit_signal_time_iso,
+            "exit_order_filled_at":    sell_filled_time_iso,
+            "exit_order_fill_price":   sell_price,
             "log_source": "startup_recovery",
         })
 
@@ -2328,29 +2391,44 @@ def get_bars(
     symbol: str = Query(default=SYMBOL),
     timeframe: str = Query(default="1Min"),
     limit: int = Query(default=200, ge=5, le=1000),
+    since: str | None = Query(default=None),
 ) -> dict[str, Any]:
     ticker = symbol.upper().strip()
     tf = _parse_timeframe(timeframe)
     end = datetime.now(timezone.utc)
 
-    # Alpaca returns bars oldest-first; passing `limit` cuts the window at the
-    # START (oldest) side, meaning recent bars get dropped when the window spans
-    # more trading sessions than `limit` can cover.  Fix: request without a
-    # `limit`, fetch the full window, then slice the TAIL to get the most-recent
-    # `limit` bars.
-    #
-    # Window sizing: ensure the window holds at least `limit` worth of bars.
-    #   1m/800 bars → 800min ÷ 390min/day ≈ 2.1 trading days → 7 cal days
-    #   5m/200 bars → 1000min ÷ 78bars/day ≈ 2.6 trading days → 7 cal days
-    #   Others: 7 cal days is comfortably enough.
-    timeframe_key = str(timeframe or "").lower()
-    if "day" in timeframe_key or timeframe_key in {"1d", "day", "d"}:
-        days_back = max(365, int(limit * 2.2))
-    elif "hour" in timeframe_key or timeframe_key in {"1h", "4h"}:
-        days_back = max(30, int(limit / 6))
-    else:
-        days_back = 7
-    start = end - timedelta(days=days_back)
+    since_dt: datetime | None = None
+
+    if since:
+        try:
+            since_dt = datetime.fromisoformat(since.replace("Z", "+00:00"))
+            if since_dt.tzinfo is None:
+                since_dt = since_dt.replace(tzinfo=timezone.utc)
+            # Fetch a 2-hour lookback before `since` so RSI has enough history.
+            # This is far cheaper than fetching 7 days, but ensures RSI_PERIOD bars.
+            start = since_dt - timedelta(hours=2)
+        except Exception:
+            since_dt = None
+
+    if since_dt is None:
+        # Alpaca returns bars oldest-first; passing `limit` cuts the window at the
+        # START (oldest) side, meaning recent bars get dropped when the window spans
+        # more trading sessions than `limit` can cover.  Fix: request without a
+        # `limit`, fetch the full window, then slice the TAIL to get the most-recent
+        # `limit` bars.
+        #
+        # Window sizing: ensure the window holds at least `limit` worth of bars.
+        #   1m/800 bars → 800min ÷ 390min/day ≈ 2.1 trading days → 7 cal days
+        #   5m/200 bars → 1000min ÷ 78bars/day ≈ 2.6 trading days → 7 cal days
+        #   Others: 7 cal days is comfortably enough.
+        timeframe_key = str(timeframe or "").lower()
+        if "day" in timeframe_key or timeframe_key in {"1d", "day", "d"}:
+            days_back = max(365, int(limit * 2.2))
+        elif "hour" in timeframe_key or timeframe_key in {"1h", "4h"}:
+            days_back = max(30, int(limit / 6))
+        else:
+            days_back = 7
+        start = end - timedelta(days=days_back)
 
     try:
         response = stock_client.get_stock_bars(
@@ -2370,10 +2448,17 @@ def get_bars(
     if not bars:
         raise HTTPException(status_code=404, detail=f"No bars found for symbol {ticker}")
 
-    # Keep full bars for indicator calculations, then slice return rows at the tail.
+    # Keep full bars for RSI calculation, then slice return rows.
+    # For incremental polls (since_dt set): RSI is calculated over the full 2-hour
+    # lookback window but only bars newer than since_dt are returned to the client.
     all_bars = list(bars)
-    bars = all_bars[-limit:]
-    start_idx = max(0, len(all_bars) - len(bars))
+    if since_dt is not None:
+        bars = [b for b in all_bars if getattr(b, "timestamp", None) and getattr(b, "timestamp") > since_dt]
+        bars = bars[-limit:]
+    else:
+        bars = all_bars[-limit:]
+    since_iso = _to_iso(since_dt) if since_dt is not None else None
+    start_idx = max(0, len(all_bars) - len(bars)) if since_dt is None else 0
 
     all_closes = [float(getattr(bar, "close", 0.0) or 0.0) for bar in all_bars]
     all_timestamps = [_to_iso(getattr(bar, "timestamp", None)) for bar in all_bars]
@@ -2387,6 +2472,10 @@ def get_bars(
         ts = all_timestamps[i]
         if ts is None:
             continue
+        # For incremental polls, only return RSI points newer than `since` so the
+        # frontend can append them rather than replacing the full series.
+        if since_iso is not None and ts <= since_iso:
+            continue
         rv = rsi_series[i]
         mv = rsi_ma_series[i]
         if rv is not None:
@@ -2399,6 +2488,8 @@ def get_bars(
     for i in range(max(2, start_idx), len(all_bars)):
         ts = all_timestamps[i]
         if ts is None:
+            continue
+        if since_iso is not None and ts <= since_iso:
             continue
 
         r2, r1, r0 = rsi_series[i - 2], rsi_series[i - 1], rsi_series[i]
@@ -3325,6 +3416,7 @@ def _manual_trade_monitor_thread(
     sell_price = None
     sell_order_id = None
     sell_filled_time_iso = None
+    _exit_order_type = "UNKNOWN"
     market_fallback_reasons = {
         "SL_MISSED_GAPDOWN_MARKET_EXIT",
         "ORDER_SYSTEM_FAILURE_MARKET_EXIT",
@@ -3366,6 +3458,7 @@ def _manual_trade_monitor_thread(
             sell_price = float(exit_state.get("tp_order_fill_price") or opt_price or 0)
             sell_order_id = exit_state.get("tp_order_id_filled") or ""
             sell_filled_time_iso = datetime.now(CDT).isoformat(timespec="seconds")
+            _exit_order_type = "TP_LIMIT"
             mark_selling(buy_order_id, sell_order_id)
             close_position(buy_order_id)
             print(f"[MT:{underlying}] TAKE_PROFIT_EXIT via Alpaca TP limit order at {sell_price:.4f}")
@@ -3375,6 +3468,7 @@ def _manual_trade_monitor_thread(
             sell_price = float(exit_state.get("sl_order_fill_price") or opt_price or 0)
             sell_order_id = exit_state.get("sl_order_id_filled") or ""
             sell_filled_time_iso = datetime.now(CDT).isoformat(timespec="seconds")
+            _exit_order_type = "SL_STOP_LIMIT"
             mark_selling(buy_order_id, sell_order_id)
             close_position(buy_order_id)
             print(f"[MT:{underlying}] {exit_reason} via Alpaca SL stop-limit order at {sell_price:.4f}")
@@ -3401,6 +3495,7 @@ def _manual_trade_monitor_thread(
                         _to_iso(getattr(filled_sell, "filled_at", None))
                         or datetime.now(CDT).isoformat(timespec="seconds")
                     )
+                    _exit_order_type = "MARKET_SELL"
                     close_position(buy_order_id)
                     break
 
@@ -3445,6 +3540,17 @@ def _manual_trade_monitor_thread(
     pnl_pct = (sell_price - entry_price) / entry_price * 100
     pnl_dollar = round((sell_price - entry_price) * qty * 100, 2)
     result = "WIN" if pnl_pct > 0 else "LOSS" if pnl_pct < 0 else "BREAKEVEN"
+    if exit_state is not None:
+        exit_state.setdefault("timeline", []).append({
+            "ts": sell_filled_time_iso or datetime.now(CDT).isoformat(timespec="seconds"),
+            "source": "exit_filled",
+            "exit_reason": exit_reason,
+            "order_id": sell_order_id,
+            "order_type": _exit_order_type,
+            "fill_price": sell_price,
+            "triggered_at": exit_signal_time_iso,
+            "filled_at": sell_filled_time_iso,
+        })
 
     # Correct key reads — exit_state uses max_pnl_pct/sl_dynamic_pct/qp_dynamic_pct/tp_pct
     peak_pnl_pct = round(float(exit_state.get("max_pnl_pct", 0.0)), 4)
@@ -3494,6 +3600,12 @@ def _manual_trade_monitor_thread(
                 "qp_arm_peak_pct":exit_state.get("qp_arm_peak_pct"),
                 # Full tick-by-tick lifecycle timeline
                 "timeline":       exit_state.get("timeline") or [],
+                # Exit order execution details
+                "exit_order_id":           sell_order_id,
+                "exit_order_type":         _exit_order_type,
+                "exit_order_triggered_at": exit_signal_time_iso,
+                "exit_order_filled_at":    sell_filled_time_iso,
+                "exit_order_fill_price":   sell_price,
                 "created_at": datetime.now(CDT),
             }
             _manual_trades_col.insert_one(_manual_doc)
