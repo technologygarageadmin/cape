@@ -8,9 +8,10 @@ Use port 8002 for chart/history/summary traffic.
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from typing import Any
 
-import requests
+import httpx
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -39,8 +40,20 @@ DISPLAY_ALLOWLIST = {
     "/api/straddle/trades",
 }
 
+# Persistent async client — shared across all requests, reuses TCP connections.
+_client: httpx.AsyncClient | None = None
 
-app = FastAPI(title="Cape Display Backend", version="1.0.0")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global _client
+    _client = httpx.AsyncClient(base_url=TRADING_BASE, timeout=30.0)
+    yield
+    await _client.aclose()
+    _client = None
+
+
+app = FastAPI(title="Cape Display Backend", version="1.0.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -51,21 +64,21 @@ app.add_middleware(
 )
 
 
-def _forward(
+async def _forward(
     method: str,
     path: str,
     query: dict[str, Any] | None = None,
     payload: dict[str, Any] | None = None,
 ) -> Response:
-    url = f"{TRADING_BASE}{path}"
+    assert _client is not None, "httpx client not initialised"
     try:
         if method == "GET":
-            r = requests.get(url, params=query, timeout=30)
+            r = await _client.get(path, params=query)
         elif method == "POST":
-            r = requests.post(url, params=query, json=payload, timeout=30)
+            r = await _client.post(path, params=query, json=payload)
         else:
             raise HTTPException(status_code=405, detail=f"Method not allowed: {method}")
-    except requests.RequestException as ex:
+    except httpx.RequestError as ex:
         raise HTTPException(status_code=502, detail=f"Display proxy failed: {str(ex)}") from ex
 
     content_type = r.headers.get("content-type", "application/json")
@@ -80,64 +93,64 @@ async def _request_log(request: Request, call_next):
 
 
 @app.get("/health")
-def health() -> Response:
-    return _forward("GET", "/health")
+async def health() -> Response:
+    return await _forward("GET", "/health")
 
 
 @app.get("/api/bars")
-def get_bars(request: Request) -> Response:
-    return _forward("GET", "/api/bars", query=dict(request.query_params))
+async def get_bars(request: Request) -> Response:
+    return await _forward("GET", "/api/bars", query=dict(request.query_params))
 
 
 @app.get("/api/quotes")
-def get_quotes(request: Request) -> Response:
-    return _forward("GET", "/api/quotes", query=dict(request.query_params))
+async def get_quotes(request: Request) -> Response:
+    return await _forward("GET", "/api/quotes", query=dict(request.query_params))
 
 
 @app.get("/api/account")
-def get_account(request: Request) -> Response:
-    return _forward("GET", "/api/account", query=dict(request.query_params))
+async def get_account(request: Request) -> Response:
+    return await _forward("GET", "/api/account", query=dict(request.query_params))
 
 
 @app.get("/api/positions")
-def get_positions(request: Request) -> Response:
-    return _forward("GET", "/api/positions", query=dict(request.query_params))
+async def get_positions(request: Request) -> Response:
+    return await _forward("GET", "/api/positions", query=dict(request.query_params))
 
 
 @app.get("/api/live-positions")
-def get_live_positions(request: Request) -> Response:
-    return _forward("GET", "/api/live-positions", query=dict(request.query_params))
+async def get_live_positions(request: Request) -> Response:
+    return await _forward("GET", "/api/live-positions", query=dict(request.query_params))
 
 
 @app.get("/api/orders/history")
-def get_orders_history(request: Request) -> Response:
-    return _forward("GET", "/api/orders/history", query=dict(request.query_params))
+async def get_orders_history(request: Request) -> Response:
+    return await _forward("GET", "/api/orders/history", query=dict(request.query_params))
 
 
 @app.get("/api/orders/{order_id}/status")
-def get_order_status(order_id: str, request: Request) -> Response:
-    return _forward("GET", f"/api/orders/{order_id}/status", query=dict(request.query_params))
+async def get_order_status(order_id: str, request: Request) -> Response:
+    return await _forward("GET", f"/api/orders/{order_id}/status", query=dict(request.query_params))
 
 
 @app.get("/api/options/price")
-def get_option_price(request: Request) -> Response:
-    return _forward("GET", "/api/options/price", query=dict(request.query_params))
+async def get_option_price(request: Request) -> Response:
+    return await _forward("GET", "/api/options/price", query=dict(request.query_params))
 
 
 @app.get("/api/options-log")
-def get_options_log(request: Request) -> Response:
-    return _forward("GET", "/api/options-log", query=dict(request.query_params))
+async def get_options_log(request: Request) -> Response:
+    return await _forward("GET", "/api/options-log", query=dict(request.query_params))
 
 
 @app.get("/api/manual-trades")
-def get_manual_trades(request: Request) -> Response:
-    return _forward("GET", "/api/manual-trades", query=dict(request.query_params))
+async def get_manual_trades(request: Request) -> Response:
+    return await _forward("GET", "/api/manual-trades", query=dict(request.query_params))
 
 
 @app.post("/api/manual-trades")
 async def post_manual_trades(request: Request) -> Response:
     body = await request.json()
-    return _forward("POST", "/api/manual-trades", query=dict(request.query_params), payload=body)
+    return await _forward("POST", "/api/manual-trades", query=dict(request.query_params), payload=body)
 
 
 @app.post("/api/positions/{symbol}/close")
@@ -145,59 +158,58 @@ async def post_close_position(symbol: str, request: Request) -> Response:
     """Forward position close requests to the trading backend so the UI's
     Liquidate button works when the display server is fronting traffic.
     """
-    # Body is optional for this endpoint; forward any JSON payload if present
     try:
         body = await request.json()
     except Exception:
         body = None
-    return _forward("POST", f"/api/positions/{symbol}/close", query=dict(request.query_params), payload=body)
+    return await _forward("POST", f"/api/positions/{symbol}/close", query=dict(request.query_params), payload=body)
 
 
 @app.get("/api/config")
-def get_config(request: Request) -> Response:
-    return _forward("GET", "/api/config", query=dict(request.query_params))
+async def get_config(request: Request) -> Response:
+    return await _forward("GET", "/api/config", query=dict(request.query_params))
 
 
 @app.get("/api/config/trading-modes")
-def get_trading_modes(request: Request) -> Response:
-    return _forward("GET", "/api/config/trading-modes", query=dict(request.query_params))
+async def get_trading_modes(request: Request) -> Response:
+    return await _forward("GET", "/api/config/trading-modes", query=dict(request.query_params))
 
 
 @app.get("/api/strategies")
-def get_entry_strategies(request: Request) -> Response:
-    return _forward("GET", "/api/strategies", query=dict(request.query_params))
+async def get_entry_strategies(request: Request) -> Response:
+    return await _forward("GET", "/api/strategies", query=dict(request.query_params))
 
 
 @app.post("/api/strategies/toggle")
 async def toggle_entry_strategy(request: Request) -> Response:
     body = await request.json()
-    return _forward("POST", "/api/strategies/toggle", query=dict(request.query_params), payload=body)
+    return await _forward("POST", "/api/strategies/toggle", query=dict(request.query_params), payload=body)
 
 
 @app.get("/api/symbol/mode")
-def get_symbol_mode(request: Request) -> Response:
-    return _forward("GET", "/api/symbol/mode", query=dict(request.query_params))
+async def get_symbol_mode(request: Request) -> Response:
+    return await _forward("GET", "/api/symbol/mode", query=dict(request.query_params))
 
 
 @app.get("/api/symbol/modes")
-def get_symbol_modes(request: Request) -> Response:
-    return _forward("GET", "/api/symbol/modes", query=dict(request.query_params))
+async def get_symbol_modes(request: Request) -> Response:
+    return await _forward("GET", "/api/symbol/modes", query=dict(request.query_params))
 
 
 @app.post("/api/symbol/mode")
 async def set_symbol_mode(request: Request) -> Response:
     body = await request.json()
-    return _forward("POST", "/api/symbol/mode", query=dict(request.query_params), payload=body)
+    return await _forward("POST", "/api/symbol/mode", query=dict(request.query_params), payload=body)
 
 
 @app.get("/api/signal-readiness")
-def get_signal_readiness(request: Request) -> Response:
-    return _forward("GET", "/api/signal-readiness", query=dict(request.query_params))
+async def get_signal_readiness(request: Request) -> Response:
+    return await _forward("GET", "/api/signal-readiness", query=dict(request.query_params))
 
 
 @app.get("/api/straddle/trades")
-def get_straddle_trades(request: Request) -> Response:
-    return _forward("GET", "/api/straddle/trades", query=dict(request.query_params))
+async def get_straddle_trades(request: Request) -> Response:
+    return await _forward("GET", "/api/straddle/trades", query=dict(request.query_params))
 
 
 if __name__ == "__main__":

@@ -1457,15 +1457,22 @@ def _update_dynamic_thresholds(
     if sl_candidate_price is not None:
         sl_candidate_pct = _price_to_pct(sl_candidate_price)
         if sl_candidate_pct is not None:
+            # Buffer zone guard: don't let the stop cross into the profit zone until it is
+            # far enough above buy price that even the worst-case limit fill
+            # (stop × (1 − SL_STOP_LIMIT_BUFFER_PCT/100)) lands at or above break-even.
+            # A stop at +1 % with a 3 % limit buffer fills at 0.97× fill — a loss.
+            # Hold the stop at its current level until the candidate clears the buffer.
+            # '>=' (not '>') is intentional: when qp_price == fill_price exactly (first profit
+            # tick where live = fill + $0.01), sl_candidate_pct == 0.0, which is the boundary.
+            # Using strict '>' would let sl_dynamic_pct jump from -5 % to 0 %, then the LOSS
+            # mode replacement path (current_sl > sl_last_placed) would fire and move the
+            # broker SL to fill_price, whose limit = fill × 0.97 — a guaranteed loss fill.
+            if 0.0 <= sl_candidate_pct <= SL_STOP_LIMIT_BUFFER_PCT:
+                sl_candidate_pct = existing_sl_pct
             exit_state["sl_dynamic_pct"] = max(existing_sl_pct, sl_candidate_pct)
 
     current_sl_pct = float(exit_state.get("sl_dynamic_pct", sl_static_pct))
-    profit_sl_moved = (
-        mode == "PROFIT"
-        and qp_price is not None
-        and existing_sl_price is not None
-        and qp_price > existing_sl_price
-    )
+    profit_sl_moved = mode == "PROFIT" and current_sl_pct > prev_sl_pct
     loss_sl_moved = mode != "PROFIT" and current_sl_pct > prev_sl_pct
     if profit_sl_moved or loss_sl_moved:
         tick_actions["sl_action"] = "UPDATED"
@@ -1488,6 +1495,7 @@ def _update_dynamic_thresholds(
         and qp_price is not None
         and sl_last_placed_price is not None
         and qp_price > sl_last_placed_price
+        and current_sl_pct > SL_STOP_LIMIT_BUFFER_PCT
     )
     sl_order_result = None
     if SL_STOP_ORDERS_ENABLED and not bool(exit_state.get("sl_broker_disabled", False)):
@@ -1693,6 +1701,48 @@ def monitor_with_polling(
             _append_sell_tick(exit_state, sl_exit, sl_fill, fill_price)
             return sl_exit, sl_fill, exit_state
 
+        # ── Minimum trade duration hold gate ─────────────────────────────────
+        # Checked before fallback and internal exits so it applies in bracket
+        # mode too. Broker TP/SL fills (checked above) are always allowed.
+        now_ts = time.time()
+        if min_exit_epoch_ts is not None and now_ts < min_exit_epoch_ts:
+            if (
+                EXIT_ALLOW_POSITIVE_PNL_IN_ENTRY_CANDLE
+                and same_candle_pnl_pct >= EXIT_SAME_CANDLE_MIN_PNL_PCT
+            ):
+                info(
+                    f"{label}SAME_CANDLE_POSITIVE_EXIT - exiting {signal} "
+                    f"position at {same_candle_price:.4f} "
+                    f"(pnl={same_candle_pnl_pct:+.2f}% threshold={EXIT_SAME_CANDLE_MIN_PNL_PCT:+.2f}%)"
+                )
+                _cancel_exit_orders(tc, exit_state)
+                _append_sell_tick(exit_state, "SAME_CANDLE_POSITIVE_EXIT", same_candle_price, fill_price, bid_price=bid_price if bid_price > 0 else None, mid_price=price)
+                return "SAME_CANDLE_POSITIVE_EXIT", same_candle_price, exit_state
+
+            remaining = int(max(0.0, min_exit_epoch_ts - now_ts))
+            info(
+                f"{label}[HOLD {remaining}s] {contract_symbol} "
+                f"price={price:.4f} sellable={sellable_price:.4f} pnl={pnl_pct:+.2f}%"
+            )
+            _append_timeline_tick(
+                exit_state,
+                source="poll",
+                tick_ts=tick_ts,
+                fill_price=fill_price,
+                mid_price=price,
+                bid_price=bid_price if bid_price > 0 else None,
+                sellable_price=sellable_price,
+                pnl_pct=pnl_pct,
+            )
+            if buy_order_id:
+                update_live_exit_state(buy_order_id, exit_state, pnl_pct, sellable_price)
+            hold_notice_emitted = True
+            continue
+
+        if hold_notice_emitted:
+            info(f"{label}Exit hold window completed; exits are now active")
+            hold_notice_emitted = False
+
         fallback_reason, fallback_detail = _detect_market_fallback_reason(tc, exit_state, sellable_price)
         if fallback_reason:
             if buy_order_id:
@@ -1732,35 +1782,6 @@ def monitor_with_polling(
         # stop-limit orders that are ratcheted up each tick by _update_dynamic_thresholds.
         if bool(exit_state.get("use_bracket_exit", False)):
             continue
-
-        now_ts = time.time()
-
-        if min_exit_epoch_ts is not None and now_ts < min_exit_epoch_ts:
-            if (
-                EXIT_ALLOW_POSITIVE_PNL_IN_ENTRY_CANDLE
-                and same_candle_pnl_pct >= EXIT_SAME_CANDLE_MIN_PNL_PCT
-            ):
-                info(
-                    f"{label}SAME_CANDLE_POSITIVE_EXIT - exiting {signal} "
-                    f"position at {same_candle_price:.4f} "
-                    f"(pnl={same_candle_pnl_pct:+.2f}% threshold={EXIT_SAME_CANDLE_MIN_PNL_PCT:+.2f}%)"
-                )
-                _cancel_exit_orders(tc, exit_state)
-                _append_sell_tick(exit_state, "SAME_CANDLE_POSITIVE_EXIT", same_candle_price, fill_price, bid_price=bid_price if bid_price > 0 else None, mid_price=price)
-                return "SAME_CANDLE_POSITIVE_EXIT", same_candle_price, exit_state
-
-            if not hold_notice_emitted:
-                remaining = int(max(0.0, min_exit_epoch_ts - now_ts))
-                info(
-                    f"{label}Exit hold active ({remaining}s left); "
-                    "will evaluate exits from next candle"
-                )
-                hold_notice_emitted = True
-            continue
-
-        if hold_notice_emitted:
-            info(f"{label}Exit hold window completed; exits are now active")
-            hold_notice_emitted = False
 
         # ── Bad entry detection: exit early if trade shows no momentum ──
         if (
@@ -2066,32 +2087,81 @@ def monitor_with_websocket(
                     stop_stream(stream)
                     return
 
-                fallback_reason, fallback_detail = _detect_market_fallback_reason(
-                    tc,
-                    state["exit_state"],
-                    sellable_price,
-                )
-                if fallback_reason:
-                    if buy_order_id:
-                        set_live_exit_reason(buy_order_id, fallback_reason)
+                if not (min_exit_epoch_ts is not None and now < min_exit_epoch_ts):
+                    fallback_reason, fallback_detail = _detect_market_fallback_reason(
+                        tc,
+                        state["exit_state"],
+                        sellable_price,
+                    )
+                    if fallback_reason:
+                        if buy_order_id:
+                            set_live_exit_reason(buy_order_id, fallback_reason)
+                        info(
+                            f"{label}{fallback_reason} - {fallback_detail} - "
+                            f"forcing market-exit fallback at {sellable_price:.4f}"
+                        )
+                        _cancel_exit_orders(tc, state["exit_state"])
+                        state["last_price"] = sellable_price
+                        state["exit_reason"] = fallback_reason
+                        _append_sell_tick(
+                            state["exit_state"],
+                            fallback_reason,
+                            sellable_price,
+                            fill_price,
+                            bid_price=bid if bid > 0 else None,
+                            mid_price=price,
+                        )
+                        done.set()
+                        stop_stream(stream)
+                        return
+            # ── Minimum trade duration hold gate ─────────────────────────────
+            # Runs before _evaluate_priority_exit so it applies in bracket mode
+            # too. Broker TP/SL fills (checked above in throttled block) pass through.
+            same_candle_price = sellable_price if EXIT_SAME_CANDLE_USE_BID_PRICE else price
+            same_candle_pnl_pct = (same_candle_price - fill_price) / fill_price * 100
+
+            if min_exit_epoch_ts is not None and now < min_exit_epoch_ts:
+                if (
+                    EXIT_ALLOW_POSITIVE_PNL_IN_ENTRY_CANDLE
+                    and same_candle_pnl_pct >= EXIT_SAME_CANDLE_MIN_PNL_PCT
+                ):
                     info(
-                        f"{label}{fallback_reason} - {fallback_detail} - "
-                        f"forcing market-exit fallback at {sellable_price:.4f}"
+                        f"{label}SAME_CANDLE_POSITIVE_EXIT - exiting {signal} "
+                        f"position at {same_candle_price:.4f} "
+                        f"(pnl={same_candle_pnl_pct:+.2f}% threshold={EXIT_SAME_CANDLE_MIN_PNL_PCT:+.2f}%)"
                     )
                     _cancel_exit_orders(tc, state["exit_state"])
-                    state["last_price"] = sellable_price
-                    state["exit_reason"] = fallback_reason
-                    _append_sell_tick(
-                        state["exit_state"],
-                        fallback_reason,
-                        sellable_price,
-                        fill_price,
-                        bid_price=bid if bid > 0 else None,
-                        mid_price=price,
-                    )
+                    state["last_price"] = same_candle_price
+                    state["exit_reason"] = "SAME_CANDLE_POSITIVE_EXIT"
+                    _append_sell_tick(state["exit_state"], "SAME_CANDLE_POSITIVE_EXIT", same_candle_price, fill_price, bid_price=bid if bid > 0 else None, mid_price=price)
                     done.set()
                     stop_stream(stream)
                     return
+
+                remaining = int(max(0.0, min_exit_epoch_ts - now))
+                info(
+                    f"{label}[HOLD {remaining}s] {contract_symbol} "
+                    f"price={price:.4f} sellable={sellable_price:.4f} pnl={pnl_pct:+.2f}%"
+                )
+                _append_timeline_tick(
+                    state["exit_state"],
+                    source="ws",
+                    tick_ts=tick_ts,
+                    fill_price=fill_price,
+                    mid_price=price,
+                    bid_price=bid if bid > 0 else None,
+                    sellable_price=sellable_price,
+                    pnl_pct=pnl_pct,
+                )
+                if buy_order_id:
+                    update_live_exit_state(buy_order_id, state["exit_state"], pnl_pct, sellable_price)
+                state["hold_notice_emitted"] = True
+                return
+
+            if state["hold_notice_emitted"]:
+                info(f"{label}Exit hold window completed; exits are now active")
+                state["hold_notice_emitted"] = False
+
             # Evaluate absolute-price TP/SL preference here as well. If TP triggered
             # in price mode but no TP order exists, attempt to place one and wait.
             pnl_pct = (sellable_price - fill_price) / fill_price * 100
@@ -2177,40 +2247,6 @@ def monitor_with_websocket(
             # stop-limit orders that are ratcheted up each tick by _update_dynamic_thresholds.
             if bool(state["exit_state"].get("use_bracket_exit", False)):
                 return
-
-            same_candle_price = sellable_price if EXIT_SAME_CANDLE_USE_BID_PRICE else price
-            same_candle_pnl_pct = (same_candle_price - fill_price) / fill_price * 100
-
-            if min_exit_epoch_ts is not None and now < min_exit_epoch_ts:
-                if (
-                    EXIT_ALLOW_POSITIVE_PNL_IN_ENTRY_CANDLE
-                    and same_candle_pnl_pct >= EXIT_SAME_CANDLE_MIN_PNL_PCT
-                ):
-                    info(
-                        f"{label}SAME_CANDLE_POSITIVE_EXIT - exiting {signal} "
-                        f"position at {same_candle_price:.4f} "
-                        f"(pnl={same_candle_pnl_pct:+.2f}% threshold={EXIT_SAME_CANDLE_MIN_PNL_PCT:+.2f}%)"
-                    )
-                    _cancel_exit_orders(tc, state["exit_state"])
-                    state["last_price"] = same_candle_price
-                    state["exit_reason"] = "SAME_CANDLE_POSITIVE_EXIT"
-                    _append_sell_tick(state["exit_state"], "SAME_CANDLE_POSITIVE_EXIT", same_candle_price, fill_price, bid_price=bid if bid > 0 else None, mid_price=price)
-                    done.set()
-                    stop_stream(stream)
-                    return
-
-                if not state["hold_notice_emitted"]:
-                    remaining = int(max(0.0, min_exit_epoch_ts - now))
-                    info(
-                        f"{label}Exit hold active ({remaining}s left); "
-                        "will evaluate exits from next candle"
-                    )
-                    state["hold_notice_emitted"] = True
-                return
-
-            if state["hold_notice_emitted"]:
-                info(f"{label}Exit hold window completed; exits are now active")
-                state["hold_notice_emitted"] = False
 
             # ── Bad entry detection: exit early if trade shows no momentum ──
             if (

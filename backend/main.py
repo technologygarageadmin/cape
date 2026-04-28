@@ -81,6 +81,7 @@ from config import (
     POST_TRADE_COOLDOWN_BARS,
     QTY,
     MIN_TRADE_DURATION_SEC,
+    MIN_TRADE_DURATION_ENABLED,
     SECRET_KEY,
     STOCK_DATA_FEED,
     STOP_LOSS_PCT,
@@ -499,7 +500,10 @@ def execute_startup_straddle(
             info(f" Startup {leg_name}: monitoring {contract.symbol} for RSI marker SELL")
             if leg_name == "CALL":
                 try:
-                    min_exit_epoch_ts = time.time() + float(MIN_TRADE_DURATION_SEC or 0)
+                    min_exit_epoch_ts = (
+                        time.time() + float(MIN_TRADE_DURATION_SEC or 0)
+                        if MIN_TRADE_DURATION_ENABLED else None
+                    )
                 except Exception:
                     min_exit_epoch_ts = None
 
@@ -954,7 +958,10 @@ def main() -> None:
 
             info(" Monitoring for RSI marker SELL...")
             try:
-                min_exit_epoch_ts = time.time() + float(MIN_TRADE_DURATION_SEC or 0)
+                min_exit_epoch_ts = (
+                    time.time() + float(MIN_TRADE_DURATION_SEC or 0)
+                    if MIN_TRADE_DURATION_ENABLED else None
+                )
             except Exception:
                 min_exit_epoch_ts = None
 

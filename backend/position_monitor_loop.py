@@ -26,6 +26,7 @@ from config import (
     compute_tp_price,
     compute_sl_price,
     MIN_TRADE_DURATION_SEC,
+    MIN_TRADE_DURATION_ENABLED,
 )
 from logger import debug, info
 from monitoring import (
@@ -260,7 +261,10 @@ def monitor_position_loop(tc: TradingClient, odc: OptionHistoricalDataClient, sy
     if underlying and signal:
         # Option contract path: full monitor stack (TP/SL, dynamic QP, trailing SL, RSI opposite cross).
         try:
-            min_exit_epoch_ts = time.time() + float(MIN_TRADE_DURATION_SEC or 0)
+            min_exit_epoch_ts = (
+                time.time() + float(MIN_TRADE_DURATION_SEC or 0)
+                if MIN_TRADE_DURATION_ENABLED else None
+            )
         except Exception:
             min_exit_epoch_ts = None
 

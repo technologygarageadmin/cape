@@ -37,7 +37,7 @@ function App() {
   const [activeTab, setActiveTab] = useState('dashboard')
   const [isUnlocked, setIsUnlocked] = useState(() => {
     try {
-      return sessionStorage.getItem(LOCK_SESSION_KEY) === '1'
+      return localStorage.getItem(LOCK_SESSION_KEY) === '1'
     } catch (_) {
       return false
     }
@@ -45,14 +45,14 @@ function App() {
 
   const handleUnlock = () => {
     try {
-      sessionStorage.setItem(LOCK_SESSION_KEY, '1')
+      localStorage.setItem(LOCK_SESSION_KEY, '1')
     } catch (_) {}
     setIsUnlocked(true)
   }
 
   const handleLogout = () => {
     try {
-      sessionStorage.removeItem(LOCK_SESSION_KEY)
+      localStorage.removeItem(LOCK_SESSION_KEY)
     } catch (_) {}
     setIsUnlocked(false)
   }

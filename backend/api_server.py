@@ -162,7 +162,7 @@ from config import (
     EXIT_TAKE_PROFIT_ENABLED, EXIT_STOP_LOSS_ENABLED, PRICE_POLL_SEC,
     AIT_ENABLED, MT_ENABLED,
     AIT_ENTRY_ENABLED, AIT_EXIT_ENABLED,
-    MONGO_COLLECTION_NAME, MIN_TRADE_DURATION_SEC,
+    MONGO_COLLECTION_NAME, MIN_TRADE_DURATION_SEC, MIN_TRADE_DURATION_ENABLED,
 )
 from market_data import fetch_current_price_1m, fetch_obr, get_option_price, select_best_contract
 from strategy_helpers import determine_signal, get_expiry_date, ny_trading_date
@@ -439,15 +439,34 @@ def _serialize_position(position: Any) -> dict[str, Any]:
     }
 
 
+_orders_cache: list[Any] = []
+_orders_cache_ts: float = 0.0
+_ORDERS_CACHE_TTL: float = 60.0  # seconds
+
+
+def _get_cached_orders() -> list[Any]:
+    """Return closed orders, refreshing at most once per minute."""
+    global _orders_cache, _orders_cache_ts
+    import time as _time
+    if _time.monotonic() - _orders_cache_ts < _ORDERS_CACHE_TTL:
+        return _orders_cache
+    try:
+        _orders_cache = trading_client.get_orders(
+            filter=GetOrdersRequest(status=QueryOrderStatus.CLOSED, limit=500)
+        )
+        _orders_cache_ts = _time.monotonic()
+    except Exception:
+        pass  # Return stale cache on failure
+    return _orders_cache
+
+
 def _position_entry_time_map(positions: list[Any]) -> dict[str, str]:
     """Best-effort map: position symbol -> last fill time that opened current side."""
     if not positions:
         return {}
 
     try:
-        orders = trading_client.get_orders(
-            filter=GetOrdersRequest(status=QueryOrderStatus.CLOSED, limit=500)
-        )
+        orders = _get_cached_orders()
     except Exception:
         return {}
 
@@ -535,6 +554,10 @@ def _init_straddle_mongo() -> None:
         _straddle_col.create_index([("symbol", 1), ("date", -1)])
         _options_log_col.create_index([("symbol", 1), ("created_at", -1)])
         _options_log_col.create_index([("trade_type", 1), ("created_at", -1)])
+        # Standalone descending index for global sort (no symbol/type filter)
+        _options_log_col.create_index([("created_at", -1)])
+        # Compound index for result-filtered queries
+        _options_log_col.create_index([("result", 1), ("created_at", -1)])
         print("[straddle] MongoDB connected — all trades → options_log")
     except Exception as ex:
         print(f"[straddle] MongoDB unavailable ({ex}) — trades will not be persisted")
@@ -1267,7 +1290,10 @@ def _ait_run_straddle(
             while True:
                 # Enforce configured minimum trade duration for this leg
                 try:
-                    min_exit_epoch_ts = time.time() + float(MIN_TRADE_DURATION_SEC or 0)
+                    min_exit_epoch_ts = (
+                        time.time() + float(MIN_TRADE_DURATION_SEC or 0)
+                        if MIN_TRADE_DURATION_ENABLED else None
+                    )
                 except Exception:
                     min_exit_epoch_ts = None
 
@@ -1580,7 +1606,7 @@ def _ait_trade_loop(
 
             # Enforce minimum trade duration if configured in `config.py`.
             try:
-                if MIN_TRADE_DURATION_SEC and float(MIN_TRADE_DURATION_SEC) > 0:
+                if MIN_TRADE_DURATION_ENABLED and MIN_TRADE_DURATION_SEC and float(MIN_TRADE_DURATION_SEC) > 0:
                     hold_ts = time.time() + float(MIN_TRADE_DURATION_SEC)
                     if min_exit_epoch_ts is None or hold_ts > float(min_exit_epoch_ts):
                         min_exit_epoch_ts = hold_ts
@@ -1970,7 +1996,10 @@ def _recovery_monitor_thread(
     }
     # Enforce configured minimum trade duration for recovery monitoring
     try:
-        min_exit_epoch_ts = time.time() + float(MIN_TRADE_DURATION_SEC or 0)
+        min_exit_epoch_ts = (
+            time.time() + float(MIN_TRADE_DURATION_SEC or 0)
+            if MIN_TRADE_DURATION_ENABLED else None
+        )
     except Exception:
         min_exit_epoch_ts = None
 
@@ -3423,9 +3452,18 @@ def _manual_trade_monitor_thread(
         "QP_SL_REPLACE_FAILED_MARKET_EXIT",
     }
     try:
-        min_exit_epoch_ts = time.time() + float(MIN_TRADE_DURATION_SEC or 0)
+        min_exit_epoch_ts = (
+            time.time() + float(MIN_TRADE_DURATION_SEC or 0)
+            if MIN_TRADE_DURATION_ENABLED else None
+        )
     except Exception:
         min_exit_epoch_ts = None
+
+    if MIN_TRADE_DURATION_ENABLED and MIN_TRADE_DURATION_SEC:
+        print(
+            f"[MT:{underlying}] Hold gate active — exits blocked for "
+            f"{MIN_TRADE_DURATION_SEC}s | broker TP/SL fills always pass through"
+        )
 
     while True:
         exit_reason, opt_price, exit_state = monitor_with_websocket(
@@ -3566,6 +3604,14 @@ def _manual_trade_monitor_thread(
     # 3. Log to manual_trade_history
     if _manual_trades_col is not None:
         try:
+            _m_dur_sec = None
+            try:
+                if entry_time_iso and sell_filled_time_iso:
+                    _m_dur_sec = round(
+                        (datetime.fromisoformat(sell_filled_time_iso) - datetime.fromisoformat(entry_time_iso)).total_seconds()
+                    )
+            except Exception:
+                pass
             _manual_doc = {
                 "symbol": underlying,
                 "name": underlying,
@@ -3582,6 +3628,7 @@ def _manual_trade_monitor_thread(
                 "result": result,
                 "exit_reason": exit_reason,
                 "trade_type": "MANUAL",
+                "trade_duration_sec": _m_dur_sec,
                 "buy_order_id": buy_order_id,
                 "sell_order_id": sell_order_id,
                 "entry_time": entry_time_iso,

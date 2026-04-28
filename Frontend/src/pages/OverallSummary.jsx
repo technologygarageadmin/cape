@@ -430,7 +430,44 @@ function TradeTimeline({ timeline, fillPrice, qpArmed, qpArmTime, qpArmPrice, qp
                   const isPeak = peakIdx === idx
                   const isEntry = tick.source === 'entry'
                   const isSell = tick.source === 'sell'
+                  const isExitFilled = tick.source === 'exit_filled'
                   const isOrder = tick.source === 'order_placed' || tick.source === 'order_replaced'
+
+                  if (isExitFilled) {
+                    const isProfit = tick.order_type === 'TP_LIMIT'
+                    const rowColor = isProfit ? '#16a34a' : '#ef4444'
+                    const rowBg = isProfit ? 'rgba(22,163,74,0.10)' : 'rgba(239,68,68,0.10)'
+                    return (
+                      <tr key={idx} style={{ background: rowBg, fontWeight: 700, borderLeft: `3px solid ${rowColor}` }}>
+                        <td style={{ padding: '2px 6px', fontFamily: 'monospace', color: '#555', whiteSpace: 'nowrap' }}>{fmtTickTime(tick.ts)}</td>
+                        <td style={{ padding: '2px 6px', color: rowColor, fontSize: '9px', fontWeight: 800, textTransform: 'uppercase' }}>EXIT_FILLED</td>
+                        <td style={{ padding: '2px 6px', fontFamily: 'monospace', color: rowColor, fontWeight: 700 }}>
+                          {tick.fill_price != null ? `$${fmt2(tick.fill_price)}` : '—'}
+                        </td>
+                        <td style={{ padding: '2px 6px', fontFamily: 'monospace', color: '#777' }}>
+                          {tick.triggered_at ? `trig@${fmtTickTime(tick.triggered_at)}` : '—'}
+                        </td>
+                        <td style={{ padding: '2px 6px', fontFamily: 'monospace', color: '#777' }}>{tick.order_type || '—'}</td>
+                        <td style={{ padding: '2px 6px', fontFamily: 'monospace', color: '#777' }}>—</td>
+                        <td style={{ padding: '2px 6px', fontFamily: 'monospace', color: '#777' }}>—</td>
+                        <td style={{ padding: '2px 6px', fontFamily: 'monospace', color: '#777' }}>—</td>
+                        <td style={{ padding: '2px 6px', fontFamily: 'monospace', color: '#777' }}>—</td>
+                        <td style={{ padding: '2px 6px', fontFamily: 'monospace', color: '#777' }}>—</td>
+                        <td style={{ padding: '2px 6px', fontFamily: 'monospace', color: '#777' }}>—</td>
+                        <td style={{ padding: '2px 6px', fontFamily: 'monospace', color: '#777' }}>—</td>
+                        <td style={{ padding: '2px 6px', fontFamily: 'monospace', color: rowColor, fontWeight: 700 }}>EXECUTED</td>
+                        <td style={{ padding: '2px 6px', fontFamily: 'monospace', color: '#555', whiteSpace: 'nowrap', fontSize: '9px' }}>
+                          {`${String(tick.order_id || '').slice(0, 8)}… · filled@${fmtTickTime(tick.filled_at)}`}
+                        </td>
+                        <td style={{ padding: '2px 6px', textAlign: 'center' }}>
+                          <span style={{ color: rowColor, fontSize: '10px' }}>{isProfit ? '✓' : '✕'}</span>
+                        </td>
+                        <td style={{ padding: '2px 6px', fontFamily: 'monospace', color: rowColor, fontSize: '9px', fontWeight: 700 }}>
+                          {tick.exit_reason || '—'}
+                        </td>
+                      </tr>
+                    )
+                  }
 
                   if (isOrder) {
                     const isQP = tick.order_type === 'QP_LIMIT'
@@ -765,20 +802,18 @@ export default function OverallSummary() {
   const alertedPositionKeysRef = useRef(new Set())
   const lastDingAtRef = useRef(0)
 
-  // ── Fetch all data ───────────────────────────────────────────────────────
-  const fetchAll = useCallback(async (silent = false) => {
+  // ── Fetch history (trades + positions + config) — refreshes every 30s ──────
+  const fetchHistory = useCallback(async (silent = false) => {
     try {
-      const [aitRes, manualRes, posRes, cfgRes, liveRes] = await Promise.allSettled([
-        fetch(`${API_DISPLAY}/api/options-log?limit=500`),
-        fetch(`${API_DISPLAY}/api/manual-trades?limit=500`),
+      const [aitRes, manualRes, posRes, cfgRes] = await Promise.allSettled([
+        fetch(`${API_DISPLAY}/api/options-log?limit=200`),
+        fetch(`${API_DISPLAY}/api/manual-trades?limit=200`),
         fetch(`${API_DISPLAY}/api/positions`),
         fetch(`${API_DISPLAY}/api/config`),
-        fetch(`${API_DISPLAY}/api/live-positions`),
       ])
 
       if (aitRes.status === 'fulfilled' && aitRes.value.ok) {
         const d = await aitRes.value.json()
-        // /api/options-log excludes MANUAL types by backend design.
         const all = (d.trades || []).map(t => {
           const tt = String(t.tradeType || t.trade_type || '').toUpperCase()
           const contractName = t.contractName || t.contract_name || t.symbol
@@ -838,19 +873,31 @@ export default function OverallSummary() {
       if (cfgRes.status === 'fulfilled' && cfgRes.value.ok) {
         setCfg(await cfgRes.value.json())
       }
-      if (liveRes.status === 'fulfilled' && liveRes.value.ok) {
-        const d = await liveRes.value.json()
-        setLivePositions(d.positions || [])
-      }
     } catch (_) {}
     setSpinning(false)
   }, [])
 
+  // ── Fetch live positions — refreshes every 5s ────────────────────────────
+  const fetchLive = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_DISPLAY}/api/live-positions`)
+      if (res.ok) {
+        const d = await res.json()
+        setLivePositions(d.positions || [])
+      }
+    } catch (_) {}
+  }, [])
+
+  const fetchAll = useCallback(async (silent = false) => {
+    await Promise.all([fetchHistory(silent), fetchLive()])
+  }, [fetchHistory, fetchLive])
+
   useEffect(() => {
     fetchAll()
-    const id = setInterval(() => fetchAll(true), 5_000)
-    return () => clearInterval(id)
-  }, [fetchAll])
+    const histId = setInterval(() => fetchHistory(true), 30_000)
+    const liveId = setInterval(() => fetchLive(), 5_000)
+    return () => { clearInterval(histId); clearInterval(liveId) }
+  }, [fetchAll, fetchHistory, fetchLive])
 
   // ── Sell position handler ────────────────────────────────────────────────
   const handleSellPosition = async (symbol) => {
@@ -1300,7 +1347,7 @@ export default function OverallSummary() {
               Open Positions
               <span style={S.cardCount}>{filteredPositions.length}</span>
             </div>
-            <span style={{ fontSize: '0.72rem', color: '#bbb', fontWeight: 600 }}>Live synced · refreshes every 5 s</span>
+            <span style={{ fontSize: '0.72rem', color: '#bbb', fontWeight: 600 }}>Live positions every 5s · history every 30s</span>
           </div>
 
           {filteredPositions.length === 0 ? (
