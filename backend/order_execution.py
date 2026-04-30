@@ -71,7 +71,7 @@ def register_position(
             "buy_order_id": buy_order_id,
             "symbol": symbol,
             "contract_symbol": contract_symbol,
-            "qty": qty,
+            "qty": int(qty),
             "fill_price": fill_price,
             "tp_price": tp_price,
             "sl_price": sl_price,

@@ -60,6 +60,7 @@ _SL_PLACEMENT_LOCK = threading.Lock()   # serialises SL place/replace calls acro
 _WS_FIRST_QUOTE_TIMEOUT_SEC = 12
 _WS_COOLDOWN_AFTER_FAIL_SEC = 15 * 60
 _ws_cooldown_until = 0.0
+_PROCESS_START_TS = time.time()
 
 # Prevent repeated Alpaca websocket auth tracebacks from flooding console/logs.
 logging.getLogger("alpaca.data.live.websocket").setLevel(logging.CRITICAL)
@@ -458,12 +459,84 @@ def _place_sl_stop_order(tc, exit_state: dict, contract_symbol: str | None, qty:
     fill_price = float(exit_state.get("fill_price", 0))
     if fill_price <= 0:
         return None
-    try:
-        _qty_check = int(qty or 0)
-    except Exception:
-        _qty_check = 0
-    if _qty_check <= 0:
-        log_and_print("error", f"[CRITICAL] qty invalid ({qty!r}) for {contract_symbol} — skipping SL placement")
+    # Resolve qty once from position registry (single source of truth), fall back to arg only
+    # when the ID is genuinely absent (restart/race). If the ID is present but qty is broken,
+    # hard-stop — falling back to arg would hide a real data corruption bug.
+    _qty_source = "unknown"
+    resolved_qty: int | None = None
+    _registry_size: int = 0
+    _registry_keys_sample: list = []
+    _id_present: bool = False
+    _pos_record: dict = {}
+    if buy_order_id:
+        try:
+            from order_execution import get_open_positions, _positions as _pos_registry
+            _registry_size = len(_pos_registry)
+            _registry_keys_sample = list(_pos_registry.keys())[:5]
+            _id_present = buy_order_id in _pos_registry
+            if _id_present:
+                _pos_record = dict(_pos_registry.get(buy_order_id) or {})
+            for _rp in get_open_positions():
+                if str(_rp.get("buy_order_id") or "") == str(buy_order_id):
+                    _rq = _rp.get("qty")
+                    if _rq is not None:
+                        _rq_int = int(_rq)
+                        if _rq_int > 0:
+                            resolved_qty = _rq_int
+                            _qty_source = "registry"
+                    break
+        except Exception:
+            pass
+
+    # ID present but qty unusable → data corruption; do not mask with arg fallback.
+    if _id_present and (resolved_qty is None or resolved_qty <= 0):
+        log_and_print(
+            "error",
+            f"[QTY CRITICAL] buy_order_id in registry but qty is invalid — hard stop, not falling back to arg\n"
+            f"  buy_order_id={buy_order_id!r}\n"
+            f"  contract={contract_symbol}\n"
+            f"  record_qty={_pos_record.get('qty')!r}\n"
+            f"  record_keys={list(_pos_record.keys())}\n"
+            f"  registry_size={_registry_size}\n"
+            f"  uptime_sec={round(time.time() - _PROCESS_START_TS, 1)}",
+        )
+        return {"operation": "error", "error": "qty_invalid_in_registry"}
+
+    # ID absent → arg fallback is safe (state not yet populated or position closed).
+    if resolved_qty is None and qty is not None:
+        try:
+            _arg_int = int(qty)
+            if _arg_int > 0:
+                resolved_qty = _arg_int
+                _qty_source = "arg"
+                log_and_print(
+                    "error",
+                    f"[QTY WARNING] ID not in registry — falling back to arg\n"
+                    f"  buy_order_id={buy_order_id!r}\n"
+                    f"  contract={contract_symbol}\n"
+                    f"  id_present={_id_present}\n"
+                    f"  arg_qty={resolved_qty}\n"
+                    f"  registry_size={_registry_size}\n"
+                    f"  registry_keys_sample={_registry_keys_sample}\n"
+                    f"  uptime_sec={round(time.time() - _PROCESS_START_TS, 1)}\n"
+                    f"  (causes: restart without restore / race on close / ID mismatch)",
+                )
+        except Exception:
+            pass
+
+    print("QTY SOURCE TRACE:", {
+        "raw_qty": qty,
+        "resolved_qty": resolved_qty,
+        "source": _qty_source,
+        "id_present": _id_present,
+        "record_qty": _pos_record.get("qty") if _id_present else None,
+        "registry_size": _registry_size,
+        "uptime_sec": round(time.time() - _PROCESS_START_TS, 1),
+        "buy_order_id": buy_order_id,
+        "contract": contract_symbol,
+    })
+    if not resolved_qty or resolved_qty <= 0:
+        log_and_print("error", f"[CRITICAL] qty unresolvable ({qty!r}) for {contract_symbol} — skipping SL placement")
         return {"operation": "error", "error": "qty_invalid"}
     stop_price = round(round(fill_price * (1.0 + sl_dynamic_pct / 100.0), 4), 2)
     label = "TRAIL SL" if is_trailing else "SL"
@@ -598,31 +671,8 @@ def _place_sl_stop_order(tc, exit_state: dict, contract_symbol: str | None, qty:
             }
 
         # Fresh stop-market placement (StopLossRequest = stop-market, guarantees execution).
-        try:
-            qty_int = int(qty or 0)
-        except Exception:
-            qty_int = 0
-
-        if qty_int <= 0:
-            try:
-                from order_execution import get_open_positions
-
-                pos_qty = 0
-                for p in get_open_positions():
-                    if str(p.get("contract_symbol") or "") == str(contract_symbol):
-                        try:
-                            pos_qty = int(p.get("qty", 0) or 0)
-                            break
-                        except Exception:
-                            continue
-                if pos_qty > 0:
-                    qty_int = pos_qty
-            except Exception:
-                pass
-
-        if qty_int <= 0:
-            log_and_print("error", f"[CRITICAL] qty invalid ({qty!r}) after position lookup — abort SL for {contract_symbol}")
-            return {"operation": "error", "error": "qty_invalid_no_fallback"}
+        # resolved_qty is already validated at function entry — use it directly.
+        qty_int = resolved_qty
 
         extra_intent = {}
         if PositionIntent is not None and _is_option_contract_symbol(contract_symbol):
@@ -630,7 +680,7 @@ def _place_sl_stop_order(tc, exit_state: dict, contract_symbol: str | None, qty:
 
         req = StopLossRequest(
             symbol=contract_symbol,
-            notional=round(fill_price * qty_int * 100, 2),
+            qty=qty_int,
             side=OrderSide.SELL,
             time_in_force=TimeInForce.DAY,
             stop_price=stop_price,
@@ -641,6 +691,8 @@ def _place_sl_stop_order(tc, exit_state: dict, contract_symbol: str | None, qty:
         except Exception:
             pass
 
+        print("FINAL QTY USED:", qty_int, type(qty_int))
+        assert qty_int > 0, "FATAL: qty is zero before order"
         order = tc.submit_order(req)
         new_order_id = str(order.id)
 
@@ -769,35 +821,14 @@ def _place_sl_stop_order(tc, exit_state: dict, contract_symbol: str | None, qty:
         # attempt to place a fresh stop-market order before other fallbacks.
         if existing_id and ("order is not open" in low or "42210000" in low or "order not open" in low or "position intent mismatch" in low):
             try:
-                try:
-                    qty_int = int(qty or 0)
-                except Exception:
-                    qty_int = 0
-                if qty_int <= 0:
-                    try:
-                        from order_execution import get_open_positions
-                        pos_qty = 0
-                        for p in get_open_positions():
-                            if str(p.get("contract_symbol") or "") == str(contract_symbol):
-                                try:
-                                    pos_qty = int(p.get("qty", 0) or 0)
-                                    break
-                                except Exception:
-                                    continue
-                        if pos_qty > 0:
-                            qty_int = pos_qty
-                    except Exception:
-                        pass
-                if qty_int <= 0:
-                    log_and_print("error", f"[CRITICAL] qty invalid in replace->fresh for {contract_symbol} — abort")
-                    return {"operation": "error", "error": "qty_invalid_replace_fresh"}
+                qty_int = resolved_qty
                 extra_intent = {}
                 if PositionIntent is not None and _is_option_contract_symbol(contract_symbol):
                     extra_intent["position_intent"] = PositionIntent.SELL_TO_CLOSE
 
                 req_fresh = StopLossRequest(
                     symbol=contract_symbol,
-                    notional=round(fill_price * qty_int * 100, 2),
+                    qty=qty_int,
                     side=OrderSide.SELL,
                     time_in_force=TimeInForce.DAY,
                     stop_price=stop_price,
@@ -807,6 +838,8 @@ def _place_sl_stop_order(tc, exit_state: dict, contract_symbol: str | None, qty:
                     info(f"[{label} STOP] replace failed (not open) — submitting fresh stop-market: {req_fresh.__dict__}")
                 except Exception:
                     pass
+                print("FINAL QTY USED:", qty_int, type(qty_int))
+                assert qty_int > 0, "FATAL: qty is zero before order"
                 order = tc.submit_order(req_fresh)
                 _fresh_id = str(order.id)
                 _fresh_verified = _verify_sl_order(tc, _fresh_id, stop_price, label)
@@ -893,22 +926,18 @@ def _place_sl_stop_order(tc, exit_state: dict, contract_symbol: str | None, qty:
                 if PositionIntent is not None and _is_option_contract_symbol(contract_symbol):
                     extra_intent["position_intent"] = PositionIntent.SELL_TO_CLOSE
 
-                try:
-                    qty_retry = int(qty or 0)
-                except Exception:
-                    qty_retry = 0
-                if qty_retry <= 0:
-                    log_and_print("error", f"[CRITICAL] qty invalid in held-retry for {contract_symbol} — abort")
-                    return {"operation": "error", "error": "qty_invalid_held_retry"}
+                qty_retry = resolved_qty
 
                 req_retry = StopLossRequest(
                     symbol=contract_symbol,
-                    notional=round(fill_price * qty_retry * 100, 2),
+                    qty=qty_retry,
                     side=OrderSide.SELL,
                     time_in_force=TimeInForce.DAY,
                     stop_price=stop_price,
                     **extra_intent,
                 )
+                print("FINAL QTY USED:", qty_retry, type(qty_retry))
+                assert qty_retry > 0, "FATAL: qty is zero before order"
                 order = tc.submit_order(req_retry)
                 _retry_id = str(order.id)
                 _retry_verified = _verify_sl_order(tc, _retry_id, stop_price, label)
@@ -961,7 +990,7 @@ def _place_sl_stop_order(tc, exit_state: dict, contract_symbol: str | None, qty:
         
         if "qty or notional" in low or "qty or notional is required" in low:
             try:
-                notional = round(float(stop_price) * 100.0 * float(qty), 2)
+                notional = round(float(stop_price) * 100.0 * float(resolved_qty), 2)
                 extra_intent = {}
                 if PositionIntent is not None and _is_option_contract_symbol(contract_symbol):
                     extra_intent["position_intent"] = PositionIntent.SELL_TO_CLOSE
@@ -1103,12 +1132,15 @@ def _place_sl_stop_order(tc, exit_state: dict, contract_symbol: str | None, qty:
                     # stop-limit flows failed. This ensures the trade has at least one
                     # broker-protected order recorded if possible.
                     from order_execution import upsert_broker_safety_sl
-                    try:
-                        safe_qty = int(qty or 0)
-                    except Exception:
-                        safe_qty = 0
+                    safe_qty = resolved_qty or 0
                     if safe_qty <= 0:
                         safe_qty = 1
+                        log_and_print(
+                            "error",
+                            f"[QTY CRITICAL] {contract_symbol} — resolved_qty={resolved_qty!r} was unusable in safety SL; "
+                            f"falling back to safe_qty=1. Position may have {resolved_qty or 'unknown'} contracts — "
+                            f"broker SL will only cover 1. Investigate immediately.",
+                        )
                     fill_price = float(exit_state.get("fill_price", 0) or 0)
                     safety_id = None
                     if buy_order_id and fill_price > 0:
@@ -1176,24 +1208,20 @@ def _place_sl_stop_order(tc, exit_state: dict, contract_symbol: str | None, qty:
             except Exception as _ex_cancel:
                 info(f"[{label} STOP] Cancel of {existing_id} failed: {_ex_cancel}")
             try:
-                try:
-                    _qty_ctf = int(qty or 0)
-                except Exception:
-                    _qty_ctf = 0
-                if _qty_ctf <= 0:
-                    log_and_print("error", f"[CRITICAL] qty invalid in cancel-then-fresh for {contract_symbol} — abort")
-                    return {"operation": "error", "error": "qty_invalid_cancel_then_fresh"}
+                _qty_ctf = resolved_qty
                 _extra_ctf: dict = {}
                 if PositionIntent is not None and _is_option_contract_symbol(contract_symbol):
                     _extra_ctf["position_intent"] = PositionIntent.SELL_TO_CLOSE
                 _req_ctf = StopLossRequest(
                     symbol=contract_symbol,
-                    notional=round(fill_price * _qty_ctf * 100, 2),
+                    qty=_qty_ctf,
                     side=OrderSide.SELL,
                     time_in_force=TimeInForce.DAY,
                     stop_price=stop_price,
                     **_extra_ctf,
                 )
+                print("FINAL QTY USED:", _qty_ctf, type(_qty_ctf))
+                assert _qty_ctf > 0, "FATAL: qty is zero before order"
                 _order = tc.submit_order(_req_ctf)
                 _ctf_id = str(_order.id)
                 _ctf_verified = _verify_sl_order(tc, _ctf_id, stop_price, label)
@@ -1670,7 +1698,11 @@ def _update_dynamic_thresholds(
         if sl_last_placed is None or profit_sl_replace or (mode != "PROFIT" and current_sl_pct > float(sl_last_placed)):
             log_and_print("debug", f"[QTY DEBUG] qty={qty} contract={contract_symbol}")
             with _SL_PLACEMENT_LOCK:
-                sl_order_result = _place_sl_stop_order(tc, exit_state, contract_symbol, qty, buy_order_id)
+                try:
+                    sl_order_result = _place_sl_stop_order(tc, exit_state, contract_symbol, qty, buy_order_id)
+                except Exception as _sl_ex:
+                    log_and_print("error", f"[SL ERROR] _place_sl_stop_order raised for {contract_symbol}: {_sl_ex}")
+                    sl_order_result = {"operation": "error", "error": str(_sl_ex)}
 
     # Emit per-tick SL sync state for real-time terminal tracing.
     log_and_print(
@@ -1909,7 +1941,10 @@ def monitor_with_polling(
     _seed_bracket_exit_orders(tc, exit_state, buy_entry_order_id or buy_order_id)
     if not bool(exit_state.get("sl_broker_disabled", False)):
         if not (exit_state.get("sl_order_ids") or []):
-            _place_sl_stop_order(tc, exit_state, contract_symbol, qty, buy_order_id)
+            try:
+                _place_sl_stop_order(tc, exit_state, contract_symbol, qty, buy_order_id)
+            except Exception as _sl_ex:
+                log_and_print("error", f"[SL ERROR] _place_sl_stop_order raised for {contract_symbol}: {_sl_ex}")
     hold_notice_emitted = False
     entry_ts = time.time()
     bad_entry_fired = False
@@ -2315,7 +2350,10 @@ def monitor_with_websocket(
         _seed_bracket_exit_orders(tc, state["exit_state"], buy_entry_order_id or buy_order_id)
         if not bool(state["exit_state"].get("sl_broker_disabled", False)):
             if not (state["exit_state"].get("sl_order_ids") or []):
-                _place_sl_stop_order(tc, state["exit_state"], contract_symbol, qty, buy_order_id)
+                try:
+                    _place_sl_stop_order(tc, state["exit_state"], contract_symbol, qty, buy_order_id)
+                except Exception as _sl_ex:
+                    log_and_print("error", f"[SL ERROR] _place_sl_stop_order raised for {contract_symbol}: {_sl_ex}")
         _append_timeline_tick(
             state["exit_state"],
             source="entry",
