@@ -437,12 +437,22 @@ export default function TradingView() {
 
     // Notify backend so main.py respects the new mode immediately
     try {
-      await fetch(`${API_DISPLAY}/api/symbol/mode`, {
+      const res = await fetch(`${API_DISPLAY}/api/symbol/mode`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ symbol: sym, mode: newMode }),
       })
-    } catch (_) {}
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}))
+        pushToast(err.detail || `Mode change failed (${res.status})`, 'error')
+        setSymbolMode(prev => ({ ...prev, [sym]: currentMode }))
+        return
+      }
+    } catch (_) {
+      pushToast('Mode change failed — backend unreachable', 'error')
+      setSymbolMode(prev => ({ ...prev, [sym]: currentMode }))
+      return
+    }
 
     // Sync right-panel tradeMode when acting on the currently selected symbol
     if (sym === selected.symbol) {
@@ -1510,7 +1520,10 @@ export default function TradingView() {
 
   // ── Switch trade mode; stop AI trade if one is active ──
   const handleSetTradeMode = async (mode) => {
-    if (mode === tradeMode) return
+    const backendMode = mode === 'ai' ? 'auto' : 'manual'
+    // Use backend-persisted symbolMode as source of truth for the no-op guard,
+    // not tradeMode (UI state) which can lag behind the 30s poll.
+    if (symbolMode[selected.symbol] === backendMode && mode === tradeMode) return
     // Config gate
     if (mode === 'ai' && !tradingConfig.ait_enabled) {
       pushToast('AIT is disabled in config.py — cannot switch to AI Trade mode', 'error')
@@ -1532,21 +1545,24 @@ export default function TradingView() {
       setLastTrade(t => t ? { ...t, status: 'CLOSED' } : t)
     }
     setTradeMode(mode)
-    // Sync left watchlist symbolMode for the selected symbol
-    const backendMode = mode === 'ai' ? 'auto' : 'manual'
-    setSymbolMode(prev => ({
-      ...prev,
-      [selected.symbol]: backendMode,
-    }))
-    // Persist to backend — without this, config polling resets tradeMode back to 'ai'
-    // every 30s, causing the Buy button to disappear after sell
+    setSymbolMode(prev => ({ ...prev, [selected.symbol]: backendMode }))
+    // Persist to backend
     try {
-      await fetch(`${API_DISPLAY}/api/symbol/mode`, {
+      const res = await fetch(`${API_DISPLAY}/api/symbol/mode`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ symbol: selected.symbol, mode: backendMode }),
       })
-    } catch (_) {}
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}))
+        pushToast(err.detail || `Mode change failed (${res.status})`, 'error')
+        // Revert optimistic update on failure
+        setTradeMode(mode === 'ai' ? 'manual' : 'ai')
+        setSymbolMode(prev => ({ ...prev, [selected.symbol]: mode === 'ai' ? 'manual' : 'auto' }))
+      }
+    } catch (_) {
+      pushToast('Mode change failed — backend unreachable', 'error')
+    }
   }
 
   // Auto-suggest ON: refresh form + quotes every minute.
