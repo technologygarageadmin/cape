@@ -2,11 +2,6 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## Detailed Reference Docs
-
-- [backend/BACKEND.md](backend/BACKEND.md) — Full backend reference: file map, all API endpoints, config table, exit state machine, QP ratchet mechanics, replacement chain, fallback conditions, invariants, log diagnostics
-- [Frontend/FRONTEND.md](Frontend/FRONTEND.md) — Full frontend reference: routing, every page + component, API calls, chart props, dev setup
-
 ## What This Project Is
 
 Cape is a production-grade automated options scalper for US markets (SPY, TSLA) using Alpaca as broker and MongoDB for trade lifecycle logging. It supports both Automated Intelligence Trading (AIT) and Manual Trading (MT) modes, with a React frontend for monitoring.
