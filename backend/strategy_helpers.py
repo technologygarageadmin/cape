@@ -2,47 +2,25 @@ from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from alpaca.trading.enums import ContractType, OrderSide
 from config import (
-    ENTRY_ALLOW_PREV_BAR_CROSS,
-    ENTRY_CANDLE_BREAKOUT_ENABLED,
-    ENTRY_EMA_CROSS_ENABLED,
-    ENTRY_EMA_TRIPLE_STACK_ENABLED,
-    ENTRY_MIN_BODY_RANGE_RATIO,
-    ENTRY_PULLBACK_ENABLED,
-    ENTRY_PULLBACK_EMA_TOLERANCE_PCT,
-    ENTRY_RSI_CALL_MIN,
-    ENTRY_RSI_PUT_MAX,
-    ENTRY_RSI_THRESHOLD_ENABLED,
-    ENTRY_STRONG_CANDLE_ENABLED,
-    ENTRY_RSI_MOMENTUM_ENABLED,
-    ENTRY_RSI_MIN_DELTA,
-    ENTRY_VOLUME_CONFIRMATION_ENABLED,
-    ENTRY_VOLUME_MIN_RATIO,
-    ENTRY_RSI_EXTREME_FILTER_ENABLED,
-    ENTRY_RSI_CALL_MAX,
-    ENTRY_RSI_PUT_MIN,
-    ENTRY_RSI_STREAK_ENABLED,
-    ENTRY_RSI_MIN_STREAK,
-    ENTRY_RSI_MAX_STREAK,
-    ENTRY_VWAP_FILTER_ENABLED,
-    ENTRY_PRICE_STRUCTURE_ENABLED,
+    ENTRY_CONFLUENCE_CANDLE_BODY_MIN,
+    ENTRY_CONFLUENCE_MIN_SCORE,
+    ENTRY_CONFLUENCE_VOLUME_RATIO_MIN,
+    ENTRY_RSI_VETO_CALL_MAX,
+    ENTRY_RSI_VETO_PUT_MIN,
+    ENTRY_SETUP_A_ENABLED,
+    ENTRY_SETUP_A_PULLBACK_MAX_PCT,
+    ENTRY_SETUP_B_BODY_MIN_RATIO,
+    ENTRY_SETUP_B_ENABLED,
+    ENTRY_SETUP_C_ENABLED,
+    ENTRY_SETUP_C_RSI_DELTA_MIN,
+    ENTRY_SETUP_C_RSI_GAP_MIN,
     ENTRY_TIME_WINDOW_ENABLED,
     ENTRY_TIME_WINDOWS,
-    MIN_RSI_MA_GAP,
 )
 from logger import info
-from strategy_mode import get_enabled_strategies, STRATEGY_LABELS
-from strategy_rsi_crossover import detect as rsi_crossover_detect
-from strategy_ema_crossover import detect as ema_crossover_detect
-from strategy_rsi_mean_reversion import detect as rsi_mr_detect
-from strategy_macd_crossover import detect as macd_detect
-from strategy_bollinger_bands import detect as bb_detect
-
-RSI_MR_OVERSOLD = 40.0
-RSI_MR_OVERBOUGHT = 70.0
 
 
-def _strategy_label(strategy_id: str) -> str:
-    return STRATEGY_LABELS.get(strategy_id, strategy_id)
+# ── Utility helpers (used by market_data.py, api_server.py, main.py) ─────────
 
 def market_open_today_utc():
     now_et = datetime.now(tz=ZoneInfo("America/New_York"))
@@ -63,14 +41,16 @@ def get_expiry_date(today=None):
 
     if weekday == 0:
         return current + timedelta(days=4)
-    if weekday in (1,2,3):
-        return current + timedelta(days=(4-weekday)+7)
+    if weekday in (1, 2, 3):
+        return current + timedelta(days=(4 - weekday) + 7)
     if weekday == 4:
         return current + timedelta(days=7)
 
     days_to_friday = (4 - weekday) % 7
     return current + timedelta(days=days_to_friday)
 
+
+# ── Trade time window ─────────────────────────────────────────────────────────
 
 def _in_trade_window() -> bool:
     """Return True if current ET clock is inside any configured trade window."""
@@ -81,150 +61,292 @@ def _in_trade_window() -> bool:
     return any(start <= mins < end for start, end in ENTRY_TIME_WINDOWS)
 
 
-def determine_signal(rsi_result, current_price: float):
-    # ── Filter 0: Trade time window — Tier 1 hard requirement ──
-    if not _in_trade_window():
-        info("  Signal rejected: outside trade windows (9:45–10:45 AM / 1:15–2:15 PM ET)")
-        return None, None, None, None
+# ── Tier 1 — Regime classification ───────────────────────────────────────────
 
-    rsi_ma_cross_up = bool(rsi_result.get("rsi_ma_cross_up"))
-    rsi_ma_cross_down = bool(rsi_result.get("rsi_ma_cross_down"))
-    prev_cross_up = bool(rsi_result.get("prev_rsi_ma_cross_up"))
-    prev_cross_down = bool(rsi_result.get("prev_rsi_ma_cross_down"))
+def classify_regime(rsi_result: dict) -> str:
+    """Return BULL, BEAR, or CHOP.
 
-    # RSI MA cross (original logic)
-    if ENTRY_ALLOW_PREV_BAR_CROSS:
-        cross_up_signal = rsi_ma_cross_up or prev_cross_up
-        cross_down_signal = rsi_ma_cross_down or prev_cross_down
-    else:
-        cross_up_signal = rsi_ma_cross_up
-        cross_down_signal = rsi_ma_cross_down
-
-    # ── RSI-MA gap filter for RSI_CROSSOVER strategy only ──
+    BULL requires: price > VWAP AND EMA9 > EMA21 > EMA55 AND RSI > 50
+    BEAR requires: price < VWAP AND EMA9 < EMA21 < EMA55 AND RSI < 50
+    Falls back to EMA-stack + RSI when VWAP is unavailable (IEX feed gaps).
+    """
     latest_rsi = float(rsi_result.get("latest_rsi", 50))
-    previous_rsi = float(rsi_result.get("previous_rsi", latest_rsi))
+    ema_triple_bull = bool(rsi_result.get("ema_triple_bull", False))
+    ema_triple_bear = bool(rsi_result.get("ema_triple_bear", False))
+    price_above_vwap = rsi_result.get("price_above_vwap")
+    vwap = rsi_result.get("vwap")
+
+    if vwap is None or price_above_vwap is None:
+        # VWAP unavailable — fall back to EMA stack + RSI side only
+        if ema_triple_bull and latest_rsi > 50:
+            return "BULL"
+        if ema_triple_bear and latest_rsi < 50:
+            return "BEAR"
+        return "CHOP"
+
+    if bool(price_above_vwap) and ema_triple_bull and latest_rsi > 50:
+        return "BULL"
+    if (not bool(price_above_vwap)) and ema_triple_bear and latest_rsi < 50:
+        return "BEAR"
+    return "CHOP"
+
+
+# ── Tier 2 — Setup detectors ──────────────────────────────────────────────────
+
+def _setup_a_pullback(rsi_result: dict, direction: str) -> bool:
+    """Setup A: Pullback-to-EMA9 — trend-following entry.
+
+    Fires when the PREVIOUS bar kissed EMA9 (within ENTRY_SETUP_A_PULLBACK_MAX_PCT)
+    and the CURRENT bar bounces in the trend direction and breaks prior structure.
+    """
+    previous_close = float(rsi_result.get("previous_close", 0))
+    prev_ema_fast = float(rsi_result.get("prev_ema_fast", 0))
+    if prev_ema_fast <= 0:
+        return False
+
+    prev_pullback_pct = abs(previous_close - prev_ema_fast) / prev_ema_fast * 100
+    if prev_pullback_pct > ENTRY_SETUP_A_PULLBACK_MAX_PCT:
+        return False
+
+    if direction == "CALL":
+        return (
+            bool(rsi_result.get("candle_is_bullish", False))
+            and bool(rsi_result.get("candle_breaks_prev_high", False))
+        )
+    else:
+        return (
+            bool(rsi_result.get("candle_is_bearish", False))
+            and bool(rsi_result.get("candle_breaks_prev_low", False))
+        )
+
+
+def _setup_b_bb_break(rsi_result: dict, direction: str) -> bool:
+    """Setup B: Bollinger Band breakout in trend direction.
+
+    CALL: previous close was inside the band; current close breaks above upper band.
+    PUT:  previous close was inside the band; current close breaks below lower band.
+    Both require a strong-bodied candle to filter wick-only breaks.
+    """
+    body_ratio = float(rsi_result.get("candle_body_ratio", 0))
+    if body_ratio < ENTRY_SETUP_B_BODY_MIN_RATIO:
+        return False
+
+    previous_close = float(rsi_result.get("previous_close", 0))
+    candle_close = float(rsi_result.get("candle_close", 0))
+
+    if direction == "CALL":
+        prev_bb_upper = float(rsi_result.get("prev_bb_upper", 0))
+        bb_upper = float(rsi_result.get("bb_upper", 0))
+        return (
+            bool(rsi_result.get("candle_is_bullish", False))
+            and prev_bb_upper > 0
+            and previous_close < prev_bb_upper
+            and candle_close > bb_upper
+        )
+    else:
+        prev_bb_lower = float(rsi_result.get("prev_bb_lower", 0))
+        bb_lower = float(rsi_result.get("bb_lower", 0))
+        return (
+            bool(rsi_result.get("candle_is_bearish", False))
+            and prev_bb_lower > 0
+            and previous_close > prev_bb_lower
+            and candle_close < bb_lower
+        )
+
+
+def _setup_c_rsi_momentum(rsi_result: dict, direction: str) -> bool:
+    """Setup C: RSI momentum cross — stricter replacement for the old RSI_CROSSOVER.
+
+    The cross must fire on THIS bar (no previous-bar carryover), originate from the
+    opposite side of RSI=50, have a gap >= ENTRY_SETUP_C_RSI_GAP_MIN between RSI
+    and its MA, and be actively accelerating (|delta| >= ENTRY_SETUP_C_RSI_DELTA_MIN).
+    """
+    latest_rsi = float(rsi_result.get("latest_rsi", 50))
+    previous_rsi = float(rsi_result.get("previous_rsi", 50))
     latest_rsi_ma = float(rsi_result.get("latest_rsi_ma", 50))
+    delta = float(rsi_result.get("delta", 0))
     rsi_gap = abs(latest_rsi - latest_rsi_ma)
 
-    enabled_strategies = get_enabled_strategies()
-    call_triggers: list[str] = []
-    put_triggers: list[str] = []
+    if rsi_gap < ENTRY_SETUP_C_RSI_GAP_MIN:
+        return False
 
-    if "RSI_CROSSOVER" in enabled_strategies:
-        calls, puts = rsi_crossover_detect(rsi_result, current_price, cross_up_signal, cross_down_signal)
-        if not calls and not puts and (cross_up_signal or cross_down_signal) and rsi_gap < MIN_RSI_MA_GAP:
-            info(f"  RSI_CROSSOVER rejected: gap {rsi_gap:.2f} < {MIN_RSI_MA_GAP} (RSI={latest_rsi:.1f}, MA={latest_rsi_ma:.1f})")
-        call_triggers.extend(calls)
-        put_triggers.extend(puts)
+    if direction == "CALL":
+        return (
+            bool(rsi_result.get("rsi_ma_cross_up", False))
+            and previous_rsi < 50
+            and latest_rsi > 50
+            and delta >= ENTRY_SETUP_C_RSI_DELTA_MIN
+        )
+    else:
+        return (
+            bool(rsi_result.get("rsi_ma_cross_down", False))
+            and previous_rsi > 50
+            and latest_rsi < 50
+            and delta <= -ENTRY_SETUP_C_RSI_DELTA_MIN
+        )
 
-    if "EMA_CROSSOVER" in enabled_strategies:
-        calls, puts = ema_crossover_detect(rsi_result, current_price)
-        call_triggers.extend(calls)
-        put_triggers.extend(puts)
 
-    if "RSI_MEAN_REVERSION" in enabled_strategies:
-        calls, puts = rsi_mr_detect(rsi_result, current_price)
-        call_triggers.extend(calls)
-        put_triggers.extend(puts)
+# ── Tier 3 — Confluence scoring ───────────────────────────────────────────────
 
-    if "MACD_CROSSOVER" in enabled_strategies:
-        calls, puts = macd_detect(rsi_result, current_price)
-        call_triggers.extend(calls)
-        put_triggers.extend(puts)
+def _confluence_score(rsi_result: dict, direction: str) -> tuple[int, list[str]]:
+    """Score directional confluence 0–4 and collect hard veto reasons.
 
-    if "BOLLINGER_BANDS" in enabled_strategies:
-        calls, puts = bb_detect(rsi_result, current_price)
-        call_triggers.extend(calls)
-        put_triggers.extend(puts)
-
-    call_candidate = len(call_triggers) > 0
-    put_candidate = len(put_triggers) > 0
-
-    if call_candidate and put_candidate:
-        info("  Signal rejected: conflicting CALL and PUT triggers in same bar")
-        return None, None, None, None
-
-    if not (call_candidate or put_candidate):
-        return None, None, None, None
-
-    # Extract new indicators from rsi_result (latest_rsi already extracted above)
-    ema_bullish = bool(rsi_result.get("ema_bullish_regime", False))
-    ema_bearish = bool(rsi_result.get("ema_bearish_regime", False))
-    ema_fast_above = bool(rsi_result.get("ema_fast_above_slow", False))
-    pullback_pct = float(rsi_result.get("pullback_to_ema_pct", 999))
+    Returns (score, vetoes). A non-empty vetoes list blocks the entry regardless
+    of score. Items that add to score:
+      1. Strong directional candle body (>= ENTRY_CONFLUENCE_CANDLE_BODY_MIN)
+      2. MACD agrees with direction and is accelerating
+      3. Volume confirms (>= ENTRY_CONFLUENCE_VOLUME_RATIO_MIN) or unavailable
+      4. Price-structure pattern (engulfing / hammer / pin bar) agrees
+    """
+    latest_rsi = float(rsi_result.get("latest_rsi", 50))
     body_ratio = float(rsi_result.get("candle_body_ratio", 0))
-    is_bullish_candle = bool(rsi_result.get("candle_is_bullish", False))
-    is_bearish_candle = bool(rsi_result.get("candle_is_bearish", False))
-    breaks_prev_high = bool(rsi_result.get("candle_breaks_prev_high", False))
-    breaks_prev_low = bool(rsi_result.get("candle_breaks_prev_low", False))
-    rsi_delta = float(rsi_result.get("delta", 0))
+    macd_line = float(rsi_result.get("macd_line") or 0)
+    macd_signal_val = float(rsi_result.get("macd_signal") or 0)
+    prev_macd_line = float(rsi_result.get("prev_macd_line") or macd_line)
     volume_ratio = float(rsi_result.get("volume_ratio", 0))
     volume_unavailable = bool(rsi_result.get("volume_unavailable", False))
-    up_streak = int(rsi_result.get("up_streak", 0))
-    down_streak = int(rsi_result.get("down_streak", 0))
+    ps_bullish = bool(rsi_result.get("price_structure_bullish", False))
+    ps_bearish = bool(rsi_result.get("price_structure_bearish", False))
+    ps_neutral = bool(rsi_result.get("price_structure_neutral", False))
+
+    # Hard vetoes — block regardless of score
+    vetoes: list[str] = []
+    if ps_neutral:
+        vetoes.append("INSIDE_BAR")
+    if direction == "CALL" and latest_rsi >= ENTRY_RSI_VETO_CALL_MAX:
+        vetoes.append(f"RSI_OVEREXTENDED({latest_rsi:.1f}>={ENTRY_RSI_VETO_CALL_MAX})")
+    if direction == "PUT" and latest_rsi <= ENTRY_RSI_VETO_PUT_MIN:
+        vetoes.append(f"RSI_OVEREXTENDED({latest_rsi:.1f}<={ENTRY_RSI_VETO_PUT_MIN})")
+    if vetoes:
+        return 0, vetoes
+
+    score = 0
+
+    # 1. Strong directional candle
+    if direction == "CALL":
+        if bool(rsi_result.get("candle_is_bullish", False)) and body_ratio >= ENTRY_CONFLUENCE_CANDLE_BODY_MIN:
+            score += 1
+    else:
+        if bool(rsi_result.get("candle_is_bearish", False)) and body_ratio >= ENTRY_CONFLUENCE_CANDLE_BODY_MIN:
+            score += 1
+
+    # 2. MACD momentum aligned and accelerating
+    if direction == "CALL":
+        if macd_line > macd_signal_val and macd_line > prev_macd_line:
+            score += 1
+    else:
+        if macd_line < macd_signal_val and macd_line < prev_macd_line:
+            score += 1
+
+    # 3. Volume confirms (or data unavailable — don't penalise IEX gaps)
+    if volume_unavailable or volume_ratio >= ENTRY_CONFLUENCE_VOLUME_RATIO_MIN:
+        score += 1
+
+    # 4. Price-structure candle pattern agrees
+    if direction == "CALL" and ps_bullish:
+        score += 1
+    elif direction == "PUT" and ps_bearish:
+        score += 1
+
+    return score, []
+
+
+# ── Entry signal — three-tier pipeline ───────────────────────────────────────
+
+def determine_signal(rsi_result, current_price: float):
+    """Three-tier entry: Regime → Trigger → Confluence.
+
+    Returns (signal, contract_type, order_side, entry_info) or (None, None, None, None).
+    """
+    # ── Filter 0: Trade time window ────────────────────────────────────────────
+    if not _in_trade_window():
+        info("  Signal rejected: outside configured trade windows (ET)")
+        return None, None, None, None
+
+    # ── Tier 1: Regime ─────────────────────────────────────────────────────────
+    regime = classify_regime(rsi_result)
+
+    latest_rsi = float(rsi_result.get("latest_rsi", 50))
+    latest_rsi_ma = float(rsi_result.get("latest_rsi_ma", 50))
+    rsi_delta = float(rsi_result.get("delta", 0))
     vwap = rsi_result.get("vwap")
     price_above_vwap = rsi_result.get("price_above_vwap")
-    price_structure          = rsi_result.get("price_structure", "NONE")
-    price_structure_bullish  = bool(rsi_result.get("price_structure_bullish", False))
-    price_structure_bearish  = bool(rsi_result.get("price_structure_bearish", False))
-    price_structure_neutral  = bool(rsi_result.get("price_structure_neutral", False))
     ema_triple_bull = bool(rsi_result.get("ema_triple_bull", False))
     ema_triple_bear = bool(rsi_result.get("ema_triple_bear", False))
 
-    # ── CALL entry (filters removed) ──
-    if call_candidate:
-        entry_info = {
-            "signal": "CALL",
-            "filters_passed": [],
-            "reasons": [f"Entry trigger(s): {', '.join(_strategy_label(s) for s in call_triggers)}"],
-            "entry_strategies": list(call_triggers),
-            "indicators": {
-                "rsi": round(latest_rsi, 1),
-                "rsi_delta": round(rsi_delta, 2),
-                "volume_ratio": volume_ratio,
-                "up_streak": up_streak,
-                "ema_fast_above_slow": ema_fast_above,
-                "pullback_pct": round(pullback_pct, 2),
-                "body_ratio": round(body_ratio, 2),
-                "is_bullish_candle": is_bullish_candle,
-                "breaks_prev_high": breaks_prev_high,
-                "vwap": round(vwap, 2) if vwap is not None else None,
-                "price_above_vwap": price_above_vwap,
-                "macd_line": rsi_result.get("macd_line"),
-                "macd_signal": rsi_result.get("macd_signal"),
-                "bb_upper": rsi_result.get("bb_upper"),
-                "bb_lower": rsi_result.get("bb_lower"),
-            },
-        }
-        entry_info["filters_passed"].append(f"triggered by: {', '.join(_strategy_label(s) for s in call_triggers)}")
-        return "CALL", ContractType.CALL, OrderSide.BUY, entry_info
+    info(
+        f"  Regime: {regime} | "
+        f"VWAP={round(vwap, 2) if vwap is not None else 'N/A'} "
+        f"PriceAboveVWAP={price_above_vwap} | "
+        f"EMA_TRIPLE_BULL={ema_triple_bull} EMA_TRIPLE_BEAR={ema_triple_bear} | "
+        f"RSI={latest_rsi:.1f} RSI_MA={latest_rsi_ma:.1f} delta={rsi_delta:+.2f}"
+    )
 
-    # ── PUT entry (filters removed) ──
-    if put_candidate:
-        entry_info = {
-            "signal": "PUT",
-            "filters_passed": [],
-            "reasons": [f"Entry trigger(s): {', '.join(_strategy_label(s) for s in put_triggers)}"],
-            "entry_strategies": list(put_triggers),
-            "indicators": {
-                "rsi": round(latest_rsi, 1),
-                "rsi_delta": round(rsi_delta, 2),
-                "volume_ratio": volume_ratio,
-                "down_streak": down_streak,
-                "ema_fast_above_slow": ema_fast_above,
-                "pullback_pct": round(pullback_pct, 2),
-                "body_ratio": round(body_ratio, 2),
-                "is_bearish_candle": is_bearish_candle,
-                "breaks_prev_low": breaks_prev_low,
-                "vwap": round(vwap, 2) if vwap is not None else None,
-                "price_above_vwap": price_above_vwap,
-                "macd_line": rsi_result.get("macd_line"),
-                "macd_signal": rsi_result.get("macd_signal"),
-                "bb_upper": rsi_result.get("bb_upper"),
-                "bb_lower": rsi_result.get("bb_lower"),
-            },
-        }
-        entry_info["filters_passed"].append(f"triggered by: {', '.join(_strategy_label(s) for s in put_triggers)}")
-        return "PUT", ContractType.PUT, OrderSide.BUY, entry_info
+    if regime == "CHOP":
+        info("  Signal rejected: REGIME=CHOP — no aligned EMA stack + VWAP + RSI")
+        return None, None, None, None
 
-    return None, None, None, None
+    direction = "CALL" if regime == "BULL" else "PUT"
+
+    # ── Tier 2: Setup detection — priority A > B > C ───────────────────────────
+    setup_fired: str | None = None
+
+    if ENTRY_SETUP_A_ENABLED and _setup_a_pullback(rsi_result, direction):
+        setup_fired = "SETUP_A_PULLBACK"
+    elif ENTRY_SETUP_B_ENABLED and _setup_b_bb_break(rsi_result, direction):
+        setup_fired = "SETUP_B_BB_BREAK"
+    elif ENTRY_SETUP_C_ENABLED and _setup_c_rsi_momentum(rsi_result, direction):
+        setup_fired = "SETUP_C_RSI_MOMENTUM"
+
+    if setup_fired is None:
+        info(f"  Signal rejected: REGIME={regime} ({direction}) — no setup matched (A/B/C)")
+        return None, None, None, None
+
+    info(f"  Setup: {setup_fired} matched for {direction}")
+
+    # ── Tier 3: Confluence ─────────────────────────────────────────────────────
+    score, vetoes = _confluence_score(rsi_result, direction)
+
+    if vetoes:
+        info(f"  Signal rejected: {direction} vetoed — {', '.join(vetoes)}")
+        return None, None, None, None
+
+    if score < ENTRY_CONFLUENCE_MIN_SCORE:
+        info(f"  Signal rejected: confluence {score}/4 < {ENTRY_CONFLUENCE_MIN_SCORE} required")
+        return None, None, None, None
+
+    info(f"  Signal approved: {direction} | {setup_fired} | confluence {score}/4")
+
+    contract_type = ContractType.CALL if direction == "CALL" else ContractType.PUT
+    order_side = OrderSide.BUY
+
+    entry_info = {
+        "signal": direction,
+        "filters_passed": [
+            f"regime={regime}",
+            f"setup={setup_fired}",
+            f"confluence={score}/4",
+        ],
+        "reasons": [f"Regime {regime} | {setup_fired} | Confluence {score}/4"],
+        "entry_strategies": [setup_fired],
+        "indicators": {
+            "regime": regime,
+            "setup": setup_fired,
+            "confluence_score": score,
+            "rsi": round(latest_rsi, 1),
+            "rsi_delta": round(rsi_delta, 2),
+            "rsi_ma": round(latest_rsi_ma, 1),
+            "ema_triple_bull": ema_triple_bull,
+            "ema_triple_bear": ema_triple_bear,
+            "price_above_vwap": price_above_vwap,
+            "vwap": round(vwap, 2) if vwap is not None else None,
+            "macd_line": rsi_result.get("macd_line"),
+            "macd_signal": rsi_result.get("macd_signal"),
+            "bb_upper": rsi_result.get("bb_upper"),
+            "bb_lower": rsi_result.get("bb_lower"),
+            "volume_ratio": float(rsi_result.get("volume_ratio", 0)),
+            "price_structure": rsi_result.get("price_structure", "NONE"),
+        },
+    }
+
+    return direction, contract_type, order_side, entry_info

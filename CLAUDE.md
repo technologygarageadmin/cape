@@ -2,6 +2,15 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Before Modifying Any Code
+
+Always run `git pull` in the `cape/` directory before making any code changes. Other developers are actively working on this project.
+
+```bash
+cd cape
+git pull
+```
+
 ## What This Project Is
 
 Cape is a production-grade automated options scalper for US markets (SPY, TSLA) using Alpaca as broker and MongoDB for trade lifecycle logging. It supports both Automated Intelligence Trading (AIT) and Manual Trading (MT) modes, with a React frontend for monitoring.
