@@ -3,7 +3,7 @@ import threading
 import re
 from datetime import datetime, timezone
 from alpaca.trading.enums import OrderClass, OrderSide, OrderStatus, TimeInForce
-from alpaca.trading.requests import LimitOrderRequest, MarketOrderRequest, ReplaceOrderRequest, StopLimitOrderRequest, StopLossRequest, TakeProfitRequest
+from alpaca.trading.requests import LimitOrderRequest, MarketOrderRequest, ReplaceOrderRequest, StopLimitOrderRequest, StopLossRequest, StopOrderRequest, TakeProfitRequest
 from config import (
     ENTRY_LIMIT_OFFSET_PCT,
     ENTRY_ORDER_TYPE,
@@ -296,12 +296,12 @@ def upsert_broker_safety_sl(
                 qty_int = 1
                 info(f"[REGISTRY] Safety SL qty invalid ({qty}) — falling back to qty=1 for {contract_symbol}")
 
-            # Use stop-market (StopLossRequest) to reduce gap-down miss risk.
+            # Use stop-market (StopOrderRequest) to reduce gap-down miss risk.
             extra_intent: dict = {}
             if PositionIntent is not None and _is_option_contract_symbol(contract_symbol):
                 extra_intent["position_intent"] = PositionIntent.SELL_TO_CLOSE
 
-            req = StopLossRequest(
+            req = StopOrderRequest(
                 symbol=contract_symbol,
                 qty=qty_int,
                 side=OrderSide.SELL,
@@ -310,37 +310,14 @@ def upsert_broker_safety_sl(
                 **extra_intent,
             )
             try:
-                info(f"[REGISTRY] Submitting Safety StopLossRequest payload: {req.__dict__}")
+                info(f"[REGISTRY] Submitting Safety StopOrderRequest payload: {req.__dict__}")
             except Exception:
                 pass
             order = trading_client.submit_order(req)
             new_order_id = str(getattr(order, "id", "") or "")
         except Exception as ex:
             info(f"[REGISTRY] Safety SL submit failed for {buy_order_id}: {ex}")
-            # Attempt fallback using notional if broker requires it
-            err = str(ex or "").lower()
-            if "qty or notional" in err or "qty or notional is required" in err:
-                try:
-                    notional = round(float(stop_price) * 100.0 * float(qty_int), 2)
-                    req2 = StopLossRequest(
-                        symbol=contract_symbol,
-                        notional=notional,
-                        side=OrderSide.SELL,
-                        time_in_force=TimeInForce.DAY,
-                        stop_price=stop_price,
-                        **extra_intent,
-                    )
-                    try:
-                        info(f"[REGISTRY] Submitting Safety StopLossRequest (notional fallback): {req2.__dict__}")
-                    except Exception:
-                        pass
-                    order = trading_client.submit_order(req2)
-                    new_order_id = str(getattr(order, "id", "") or "")
-                except Exception as ex2:
-                    info(f"[REGISTRY] Safety SL notional fallback failed for {buy_order_id}: {ex2}")
-                    return None
-            else:
-                return None
+            return None
 
     with _live_exit_lock:
         live = _live_exit_states.get(buy_order_id)

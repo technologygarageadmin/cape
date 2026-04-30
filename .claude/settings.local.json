@@ -7,7 +7,13 @@
       "Bash(python tools/backtest.py --window 5 --fail-after 2 --grace-bars 1)",
       "Bash(python tools/backtest.py --window 5 --fail-after 1 --grace-bars 1)",
       "Bash(python tools/backtest.py --window 5 --fail-after 2 --grace-bars 1 --verbose)",
-      "Bash(findstr /C:\"FAIL\" /C:\"TRADE:\" /C:\"Bar \" /C:\"===\")"
+      "Bash(findstr /C:\"FAIL\" /C:\"TRADE:\" /C:\"Bar \" /C:\"===\")",
+      "Bash(python -c \"from alpaca.trading.requests import StopLossRequest, StopOrderRequest; import inspect; print\\('=== StopLossRequest fields ==='\\); print\\([f for f in StopLossRequest.__fields__]\\); print\\(\\); print\\('=== StopOrderRequest fields ==='\\); print\\([f for f in StopOrderRequest.__fields__]\\)\")",
+      "Bash(python -c ' *)",
+      "Bash(python -m py_compile order_execution.py)",
+      "Bash(python -m py_compile api_server.py)",
+      "Bash(dir /s /b \"c:\\\\Users\\\\MuthamizhS\\\\OneDrive - Technology Garage\\\\Desktop\\\\Cape New UI\\\\monitoring_debug.log\")",
+      "Bash(dir /s /b \"c:\\\\Users\\\\MuthamizhS\\\\OneDrive - Technology Garage\\\\Desktop\\\\Cape New UI\\\\backend\\\\monitoring_debug.log\")"
     ]
   }
 }

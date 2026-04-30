@@ -1284,6 +1284,7 @@ def _ait_run_straddle(
             "SL_MISSED_GAPDOWN_MARKET_EXIT",
             "ORDER_SYSTEM_FAILURE_MARKET_EXIT",
             "QP_SL_REPLACE_FAILED_MARKET_EXIT",
+            "SL_PRICE_BREACH_MARKET_EXIT",
         }
         _exit_order_type = "UNKNOWN"
         try:
@@ -1638,6 +1639,8 @@ def _ait_trade_loop(
                 "SL_MISSED_GAPDOWN_MARKET_EXIT",
                 "ORDER_SYSTEM_FAILURE_MARKET_EXIT",
                 "QP_SL_REPLACE_FAILED_MARKET_EXIT",
+                "SL_PRICE_BREACH_MARKET_EXIT",
+                "BROKER_SL_DISABLED_MARKET_EXIT",
             }
             _exit_order_type = "UNKNOWN"
 
@@ -1993,6 +1996,8 @@ def _recovery_monitor_thread(
         "SL_MISSED_GAPDOWN_MARKET_EXIT",
         "ORDER_SYSTEM_FAILURE_MARKET_EXIT",
         "QP_SL_REPLACE_FAILED_MARKET_EXIT",
+        "SL_PRICE_BREACH_MARKET_EXIT",
+        "BROKER_SL_DISABLED_MARKET_EXIT",
     }
     # Enforce configured minimum trade duration for recovery monitoring
     try:
@@ -2957,6 +2962,8 @@ def get_live_positions_api() -> dict[str, Any]:
         "SL_MISSED_GAPDOWN_MARKET_EXIT": "SL stop-limit could not fill during a gap-down (market below SL limit). Forced market sell was used.",
         "ORDER_SYSTEM_FAILURE_MARKET_EXIT": "Broker TP/SL order state was missing or invalid. Forced market sell was used as recovery.",
         "QP_SL_REPLACE_FAILED_MARKET_EXIT": "QP ratcheted to profit level but broker SL replacement failed. Forced market sell to lock in profit before price eroded to original stop-loss.",
+        "SL_PRICE_BREACH_MARKET_EXIT": "Market price fell to or below the confirmed SL stop price and broker did not fill within 2 seconds. Local backup exit triggered.",
+        "BROKER_SL_DISABLED_MARKET_EXIT": "Broker SL was permanently disabled (all placement attempts rejected). Price fell to the calculated SL level with no broker order active. Synthetic market exit triggered.",
         "FORCED_EXIT_NO_SIGNAL": "Forced exit due to timeout or market close. No clear signal to hold longer.",
     }
 
@@ -3450,6 +3457,8 @@ def _manual_trade_monitor_thread(
         "SL_MISSED_GAPDOWN_MARKET_EXIT",
         "ORDER_SYSTEM_FAILURE_MARKET_EXIT",
         "QP_SL_REPLACE_FAILED_MARKET_EXIT",
+        "SL_PRICE_BREACH_MARKET_EXIT",
+        "BROKER_SL_DISABLED_MARKET_EXIT",
     }
     try:
         min_exit_epoch_ts = (
