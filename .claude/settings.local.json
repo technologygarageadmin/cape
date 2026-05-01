@@ -13,7 +13,9 @@
       "Bash(python -m py_compile order_execution.py)",
       "Bash(python -m py_compile api_server.py)",
       "Bash(dir /s /b \"c:\\\\Users\\\\MuthamizhS\\\\OneDrive - Technology Garage\\\\Desktop\\\\Cape New UI\\\\monitoring_debug.log\")",
-      "Bash(dir /s /b \"c:\\\\Users\\\\MuthamizhS\\\\OneDrive - Technology Garage\\\\Desktop\\\\Cape New UI\\\\backend\\\\monitoring_debug.log\")"
+      "Bash(dir /s /b \"c:\\\\Users\\\\MuthamizhS\\\\OneDrive - Technology Garage\\\\Desktop\\\\Cape New UI\\\\backend\\\\monitoring_debug.log\")",
+      "Read(//c/c/Users/MuthamizhS/OneDrive - Technology Garage/Desktop/Cape New UI/backend/**)",
+      "Bash(grep -v '^--$')"
     ]
   }
 }

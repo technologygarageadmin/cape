@@ -2753,6 +2753,25 @@ def close_position_endpoint(symbol: str) -> dict[str, Any]:
             except Exception:
                 buy_order_id_for_contract = None
 
+            # Cancel any open TP/SL bracket orders for this contract first.
+            # Without this the market sell is rejected with "held_for_orders"
+            # because the bracket's TP/SL children already commit the full qty.
+            try:
+                _open_orders = trading_client.get_orders(
+                    filter=GetOrdersRequest(status=QueryOrderStatus.OPEN, symbols=[ticker])
+                )
+                _cancelled_any = False
+                for _oo in _open_orders or []:
+                    try:
+                        trading_client.cancel_order_by_id(str(getattr(_oo, "id", "") or ""))
+                        _cancelled_any = True
+                    except Exception:
+                        pass
+                if _cancelled_any:
+                    time.sleep(0.5)
+            except Exception:
+                pass
+
             # Submit a market order immediately (do not attach TP/SL here)
             try:
                 order = place_market_order(trading_client, ticker, qty, sell_side, allow_limit=False)

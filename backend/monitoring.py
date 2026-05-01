@@ -551,7 +551,9 @@ def _place_sl_stop_order(tc, exit_state: dict, contract_symbol: str | None, qty:
     stop_price = round(round(fill_price * (1.0 + sl_dynamic_pct / 100.0), 4), 2)
     if current_price is not None and stop_price >= current_price:
         clamped_from = stop_price
-        stop_price = round(current_price - 0.01, 2)
+        # Use a 0.05 buffer (vs 0.01) to absorb option bid movement during the
+        # API round-trip between the price read and the order reaching the broker.
+        stop_price = round(current_price - 0.05, 2)
         log_and_print("debug", f"[SL CLAMP] stop_price clamped {clamped_from} → {stop_price} (current={current_price})")
     label = "TRAIL SL" if is_trailing else "SL"
     timeline = exit_state.setdefault("timeline", [])
@@ -814,22 +816,28 @@ def _place_sl_stop_order(tc, exit_state: dict, contract_symbol: str | None, qty:
             "error": err_str,
         })
 
-        # "40310000" / "account not eligible" on a REPLACE means the bracket child order
-        # cannot be modified in place. Clear the stale ID and queue a fresh standalone
-        # StopOrderRequest for the next tick — do NOT disable broker SL permanently.
-        # Only disable when a FRESH placement (existing_id is None) is rejected, which
-        # means the account genuinely cannot place this order type.
+        # "40310000" / "account not eligible" means the account cannot place or modify
+        # standalone SL sell orders. On a replace failure, the OLD approach was to clear
+        # sl_order_ids and queue a fresh standalone StopOrderRequest — but that fresh order
+        # also fails with the same uncovered rejection (existing_id=None at that point trips
+        # the else branch below and sets sl_broker_disabled). Skip that wasted cycle:
+        # keep the existing bracket child intact as a backstop, disable replacements now.
+        # Synthetic trigger (condition 7) guards sl_dynamic_pct; the original bracket child
+        # at sl_static_pct provides a final-floor stop. _check_sl_order_filled still polls
+        # the bracket child's order ID so a broker-side fill is still detected.
         if (
             "40310000" in low
             or "account not eligible to trade uncovered option contracts" in low
         ):
+            exit_state["sl_broker_disabled"] = True
             if existing_id:
-                exit_state["sl_order_ids"] = []
-                exit_state["sl_last_placed_pct"] = None
-                info(f"[{label} STOP] 40310000 on replace {existing_id} — cleared, fresh placement queued for next tick")
-                return {"operation": "skipped_40310000_replace", "prev_order_id": existing_id}
+                info(
+                    f"[{label} STOP] 40310000 on replace {existing_id} — bracket SL non-modifiable; "
+                    f"keeping original child as backstop, disabling further replacements. "
+                    f"Synthetic trigger active at sl_dynamic_pct={exit_state.get('sl_dynamic_pct', 0):.2f}%"
+                )
+                return {"operation": "disabled_40310000_replace", "prev_order_id": existing_id, "error": err_str}
             else:
-                exit_state["sl_broker_disabled"] = True
                 info(f"[{label} STOP] Broker SL permanently disabled for {contract_symbol} — fresh placement rejected (40310000)")
                 return {"operation": "disabled", "error": err_str}
 
