@@ -64,6 +64,8 @@ _WS_FIRST_QUOTE_TIMEOUT_SEC = 12
 _WS_COOLDOWN_AFTER_FAIL_SEC = 15 * 60
 _ws_cooldown_until = 0.0
 _PROCESS_START_TS = time.time()
+_BROKER_POSITION_WAIT_TIMEOUT_SEC = 2.0
+_BROKER_POSITION_WAIT_POLL_SEC = 0.25
 
 # Prevent repeated Alpaca websocket auth tracebacks from flooding console/logs.
 logging.getLogger("alpaca.data.live.websocket").setLevel(logging.CRITICAL)
@@ -74,18 +76,40 @@ logging.getLogger("alpaca.data.live.websocket").setLevel(logging.CRITICAL)
 _LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "monitoring_debug.log")
 _dbg_logger = logging.getLogger("monitoring_debug")
 _dbg_logger.setLevel(logging.DEBUG)
+
+_LOG_FMT = "%(asctime)s ET | %(levelname)-5s | %(message)s"
+_LOG_DATEFMT = "%Y-%m-%d %H:%M:%S"
+# Use US/Eastern via pytz (bundles its own DST data, immune to Windows ZoneInfo issues).
+import pytz as _pytz
+_LOG_TZ = _pytz.timezone("US/Eastern")
+
+
+class _ETFormatter(logging.Formatter):
+    def formatTime(self, record, datefmt=None):
+        ct = datetime.fromtimestamp(record.created, tz=_pytz.utc).astimezone(_LOG_TZ)
+        return ct.strftime(datefmt or _LOG_DATEFMT)
+
+
+def _attach_debug_log_handler() -> None:
+    fh = logging.FileHandler(_LOG_FILE)
+    fh.setLevel(logging.DEBUG)
+    fh.setFormatter(_ETFormatter(_LOG_FMT, _LOG_DATEFMT))
+    _dbg_logger.addHandler(fh)
+
+
 if not _dbg_logger.handlers:
-    _fh = logging.FileHandler(_LOG_FILE)
-    _fh.setLevel(logging.DEBUG)
-    _ET = ZoneInfo("America/New_York")
+    _attach_debug_log_handler()
 
-    class _ETFormatter(logging.Formatter):
-        def formatTime(self, record, datefmt=None):
-            ct = datetime.fromtimestamp(record.created, tz=_ET)
-            return ct.strftime(datefmt or "%Y-%m-%d %H:%M:%S")
 
-    _fh.setFormatter(_ETFormatter("%(asctime)s ET | %(levelname)-5s | %(message)s", "%Y-%m-%d %H:%M:%S"))
-    _dbg_logger.addHandler(_fh)
+def _clear_debug_log() -> None:
+    """Truncate monitoring_debug.log and reattach a fresh handler. Called at each trade entry."""
+    for h in list(_dbg_logger.handlers):
+        if isinstance(h, logging.FileHandler):
+            _dbg_logger.removeHandler(h)
+            h.close()
+    with open(_LOG_FILE, "w"):
+        pass
+    _attach_debug_log_handler()
 # ──────────────────────────────────────────────────────────────────────────────
 
 try:
@@ -100,6 +124,72 @@ _OPTION_CONTRACT_RE = re.compile(r"^[A-Z]{1,6}\d{6}[CP]\d{8}$")
 def _is_option_contract_symbol(sym: str | None) -> bool:
     s = str(sym or "").strip().upper()
     return bool(s and _OPTION_CONTRACT_RE.match(s))
+
+
+def _extract_broker_error_code(ex: Exception, err_str: str) -> str | None:
+    """Best-effort extraction of Alpaca JSON error code from exception payload."""
+    try:
+        _resp = getattr(ex, "response", None) or getattr(ex, "resp", None)
+        if _resp is not None:
+            _body = _resp.json() if callable(getattr(_resp, "json", None)) else {}
+            _code = _body.get("code")
+            if _code is not None:
+                return str(_code)
+    except Exception:
+        pass
+    try:
+        _m = re.search(r'"code"\s*:\s*"?(\d+)"?', str(err_str), re.IGNORECASE)
+        if _m:
+            return str(_m.group(1))
+    except Exception:
+        pass
+    return None
+
+
+def _broker_position_exists(tc, contract_symbol: str | None) -> bool:
+    """Return True when broker reports an open position for this contract symbol."""
+    if tc is None or not contract_symbol:
+        return False
+
+    # Preferred direct lookup.
+    try:
+        pos = tc.get_open_position(contract_symbol)
+        qty = float(getattr(pos, "qty", 0) or 0)
+        if qty != 0:
+            return True
+    except Exception:
+        pass
+
+    # Fallback scan for SDK variants where get_open_position may not be available/reliable.
+    try:
+        for pos in tc.get_all_positions() or []:
+            sym = str(getattr(pos, "symbol", "") or "")
+            if sym != str(contract_symbol):
+                continue
+            qty = float(getattr(pos, "qty", 0) or 0)
+            return qty != 0
+    except Exception:
+        pass
+    return False
+
+
+def _wait_until_broker_position_exists(
+    tc,
+    contract_symbol: str | None,
+    timeout_sec: float = _BROKER_POSITION_WAIT_TIMEOUT_SEC,
+    poll_sec: float = _BROKER_POSITION_WAIT_POLL_SEC,
+) -> bool:
+    """Wait briefly for broker position visibility after entry fill confirmation."""
+    if tc is None or not contract_symbol:
+        return True
+
+    deadline = time.time() + max(0.0, float(timeout_sec))
+    while True:
+        if _broker_position_exists(tc, contract_symbol):
+            return True
+        if time.time() >= deadline:
+            return False
+        time.sleep(max(0.05, float(poll_sec)))
 
 
 def _init_exit_state(fill_price: float, tp_price: float, sl_price: float) -> dict:
@@ -136,12 +226,97 @@ def _init_exit_state(fill_price: float, tp_price: float, sl_price: float) -> dic
         "sl_order_fill_price": None,
         "sl_order_exit_reason": None,
         "sl_last_placed_pct": None,    # sl_dynamic_pct value at which the last SL order was placed
-        "confirmed_sl_price": None,    # stop_price confirmed by broker GET verification
+        # Do not assume a broker SL exists at entry; set only after broker confirms
+        # an SL order placement/adoption. This avoids false confidence in diagnostics.
+        "confirmed_sl_price": None,
         # If broker rejects protective SL orders (common on accounts without stop support),
         # we keep monitoring internally and will exit via market fallback on trigger.
         "sl_broker_disabled": False,
         "timeline": [],
     }
+
+
+def _adopt_existing_broker_sl(
+    tc,
+    contract_symbol: str | None,
+    exit_state: dict,
+    label: str = "",
+) -> bool:
+    """Scan broker open orders for contract_symbol and adopt any existing stop-sell orders
+    into exit_state. Returns True if at least one SL was adopted.
+
+    Called when:
+    - _seed_bracket_exit_orders finds no child legs (bracket ID capture race)
+    - held_for_orders fires with no tracked SL ID (broker already holds the qty)
+    - 40310000 provides related_orders in the error response
+
+    Adopting the existing broker order means we track it correctly and can poll
+    it for fills, replace it via ratchet, and cancel it on TP fill. This breaks
+    the 403 loop: instead of fighting the broker, we handshake with it.
+    """
+    if tc is None or not contract_symbol:
+        return False
+    try:
+        from alpaca.trading.requests import GetOrdersRequest
+        from alpaca.trading.enums import QueryOrderStatus
+
+        open_orders = tc.get_orders(
+            filter=GetOrdersRequest(status=QueryOrderStatus.OPEN, symbols=[contract_symbol])
+        )
+        adopted_sl: list[tuple[str, float]] = []
+        for oo in open_orders or []:
+            side = str(getattr(oo, "side", "") or "").lower()
+            if not side.endswith("sell"):
+                continue
+            stop_price = float(getattr(oo, "stop_price", None) or 0)
+            if stop_price <= 0:
+                continue  # limit order (TP child), not a stop — skip
+            oid = str(getattr(oo, "id", "") or "")
+            if not oid:
+                continue
+            adopted_sl.append((oid, stop_price))
+
+        if not adopted_sl:
+            return False
+
+        # Adopt the highest-stop SL (most protective floor)
+        adopted_sl.sort(key=lambda x: x[1], reverse=True)
+        best_id, best_stop = adopted_sl[0]
+
+        exit_state["sl_order_ids"] = [best_id]
+        exit_state["sl_order_exit_reason"] = "STOP_LOSS_EXIT"
+        if not exit_state.get("confirmed_sl_price"):
+            exit_state["confirmed_sl_price"] = best_stop
+        # Only initialise sl_last_placed_pct if it has never been set; replacements
+        # must not silently reset a ratcheted value to static_pct.
+        if exit_state.get("sl_last_placed_pct") is None:
+            fill_price = float(exit_state.get("fill_price") or 0)
+            if fill_price > 0 and best_stop > 0:
+                exit_state["sl_last_placed_pct"] = round((best_stop / fill_price - 1) * 100, 4)
+            else:
+                exit_state["sl_last_placed_pct"] = float(
+                    exit_state.get("sl_static_pct", exit_state.get("sl_dynamic_pct", 0))
+                )
+
+        timeline = exit_state.setdefault("timeline", [])
+        timeline.append({
+            "ts": _iso_now_utc(),
+            "source": "order_adopted",
+            "order_type": "ADOPTED_BROKER_SL",
+            "order_id": best_id,
+            "stop_price": best_stop,
+            "status": "live",
+            "adopted_count": len(adopted_sl),
+        })
+        info(
+            f"[{label}ADOPT SL] Adopted existing broker SL for {contract_symbol}: "
+            f"id={best_id} stop={best_stop:.4f} "
+            f"(found {len(adopted_sl)} stop-sell order(s) in broker)"
+        )
+        return True
+    except Exception as ex:
+        info(f"[{label}ADOPT SL] Failed to scan open orders for {contract_symbol}: {ex}")
+        return False
 
 
 def _seed_bracket_exit_orders(tc, exit_state: dict, buy_order_id: str | None) -> None:
@@ -166,6 +341,19 @@ def _seed_bracket_exit_orders(tc, exit_state: dict, buy_order_id: str | None) ->
 
     if not legs:
         debug(f"[BRACKET] Parent {buy_order_id} has no child legs yet")
+        # Fallback: try to adopt an existing broker stop-sell order for the contract.
+        # This handles race conditions where the broker created the bracket child but the
+        # parent legs endpoint hasn't propagated the IDs within our retry window.
+        # The symbol is fetched from the parent we already retrieved, or from exit_state.
+        _fb_symbol = (
+            str(getattr(parent, "symbol", "") or "")
+            if parent is not None
+            else None
+        )
+        if _fb_symbol:
+            _adopted = _adopt_existing_broker_sl(tc, _fb_symbol, exit_state, label="SEED ")
+            if not _adopted:
+                debug(f"[BRACKET] Adopt fallback found no open stop-sell for {_fb_symbol}; fresh SL will be placed")
         return
 
     tp_ids: list[str] = []
@@ -396,6 +584,7 @@ def _check_tp_order_filled(tc, exit_state: dict) -> bool:
     filled_id = None
     filled_price = None
     filled_snapshot = None
+    terminal_non_filled = []
     for oid in order_ids:
         try:
             order = tc.get_order_by_id(oid)
@@ -406,10 +595,16 @@ def _check_tp_order_filled(tc, exit_state: dict) -> bool:
                 filled_price = fp if fp > 0 else None
                 filled_snapshot = _fetch_order_snapshot(tc, oid)
                 break
+            elif any(s in status for s in ("cancel", "expired", "rejected")):
+                # TP child was cancelled (e.g., by held_for_orders handler) — prune it
+                terminal_non_filled.append(oid)
         except Exception:
             pass
 
     if not filled_id:
+        if terminal_non_filled:
+            # Remove stale cancelled TP order IDs so bracket guard can detect the gap
+            exit_state["tp_order_ids"] = [o for o in order_ids if o not in terminal_non_filled]
         return False
 
     timeline = exit_state.setdefault("timeline", [])
@@ -469,6 +664,22 @@ def _place_sl_stop_order(tc, exit_state: dict, contract_symbol: str | None, qty:
     fill_price = float(exit_state.get("fill_price", 0))
     if fill_price <= 0:
         return None
+    # If a standalone TP limit order is open (but not yet filled) AND there is currently
+    # no tracked SL order, skip this SL placement tick — the broker will reject it with
+    # 40310000 / "uncovered" because the open TP limit is already occupying the sell slot.
+    # The existing TP limit provides upside capture; the monitoring loop acts as safety net.
+    # A fresh SL will be placed automatically once the TP is either filled or cancelled.
+    # If there IS an existing SL id, we let the normal replace path run — it already handles
+    # the case where the replace fails (keeps old id, retries next tick).
+    _tp_live = bool(exit_state.get("tp_order_ids")) and not bool(exit_state.get("tp_order_filled", False))
+    _sl_exists = bool(exit_state.get("sl_order_ids"))
+    if _tp_live and not _sl_exists:
+        info(
+            f"[SL STOP] Skipping fresh SL placement for {contract_symbol} — "
+            f"TP limit order is live and no existing SL to replace. "
+            f"Broker would reject (40310000). Monitor loop is active safety net."
+        )
+        return {"operation": "skipped_tp_live"}
     # Resolve qty once from position registry (single source of truth), fall back to arg only
     # when the ID is genuinely absent (restart/race). If the ID is present but qty is broken,
     # hard-stop — falling back to arg would hide a real data corruption bug.
@@ -490,7 +701,11 @@ def _place_sl_stop_order(tc, exit_state: dict, contract_symbol: str | None, qty:
                 if str(_rp.get("buy_order_id") or "") == str(buy_order_id):
                     _rq = _rp.get("qty")
                     if _rq is not None:
-                        _rq_int = int(_rq)
+                        try:
+                            # Normalize: handle int, float, Decimal, str "1", "1.0", etc.
+                            _rq_int = int(float(str(_rq)))
+                        except (TypeError, ValueError):
+                            _rq_int = 0
                         if _rq_int > 0:
                             resolved_qty = _rq_int
                             _qty_source = "registry"
@@ -559,6 +774,16 @@ def _place_sl_stop_order(tc, exit_state: dict, contract_symbol: str | None, qty:
     timeline = exit_state.setdefault("timeline", [])
     existing_ids = list(exit_state.get("sl_order_ids") or [])
     existing_id = existing_ids[0] if existing_ids else None
+
+    # Fresh SL placement must wait until broker position becomes visible.
+    # This avoids 42210000 "position intent mismatch" right after entry fill.
+    if not existing_id and not _broker_position_exists(tc, contract_symbol):
+        _now = time.time()
+        _last = float(exit_state.get("position_not_ready_logged_ts", 0.0) or 0.0)
+        if (_now - _last) >= 1.0:
+            exit_state["position_not_ready_logged_ts"] = _now
+            info(f"[{label} STOP] Position not ready for {contract_symbol}; retrying SL placement next tick")
+        return {"operation": "retry", "error": "position_not_ready"}
 
     log_and_print(
         "debug",
@@ -799,10 +1024,37 @@ def _place_sl_stop_order(tc, exit_state: dict, contract_symbol: str | None, qty:
             "sl_dynamic_pct": sl_dynamic_pct,
         }
     except Exception as ex:
-        log_and_print("error", f"[SL ERROR] Failed to upsert for {contract_symbol}: {ex}")
-        info(f"[{label} STOP] Failed to upsert for {contract_symbol}: {ex}")
         err_str = str(ex or "")
         low = err_str.lower()
+        err_code = _extract_broker_error_code(ex, err_str)
+        is_intent_mismatch = (
+            err_code == "42210000"
+            or "42210000" in low
+            or "position intent mismatch" in low
+        )
+
+        if is_intent_mismatch:
+            timeline.append({
+                "ts": _iso_now_utc(),
+                "source": "order_placed" if not existing_id else "order_replaced",
+                "order_type": "TRAIL_SL_STOP_MARKET" if is_trailing else "SL_STOP_MARKET",
+                "order_id": None,
+                "prev_order_id": existing_id,
+                "stop_price": stop_price,
+                "pct": round(sl_dynamic_pct, 4),
+                "order_count": len(exit_state.get("sl_order_ids") or []),
+                "status": "retry",
+                "error": err_str,
+                "error_code": "42210000",
+            })
+            info(
+                f"[{label} STOP] Position not ready for {contract_symbol} "
+                f"(42210000 intent mismatch) — retrying next tick"
+            )
+            return {"operation": "retry", "error": err_str, "code": "42210000"}
+
+        log_and_print("error", f"[SL ERROR] Failed to upsert for {contract_symbol}: {ex}")
+        info(f"[{label} STOP] Failed to upsert for {contract_symbol}: {ex}")
         timeline.append({
             "ts": _iso_now_utc(),
             "source": "order_placed" if not existing_id else "order_replaced",
@@ -838,15 +1090,80 @@ def _place_sl_stop_order(tc, exit_state: dict, contract_symbol: str | None, qty:
                 )
                 return {"operation": "disabled_40310000_replace", "prev_order_id": existing_id, "error": err_str}
             else:
-                info(f"[{label} STOP] Broker SL permanently disabled for {contract_symbol} — fresh placement rejected (40310000)")
-                return {"operation": "disabled", "error": err_str}
+                # No tracked order ID but 40310000 means a broker sell order is already active
+                # (the bracket SL child whose ID we lost, or a TP limit still open).
+                # Step 1: Try to extract related_orders from the error response body — Alpaca
+                #         sometimes returns the blocking order ID directly in the error JSON.
+                _related: list[str] = []
+                try:
+                    import json as _json
+                    _resp = getattr(ex, "response", None) or getattr(ex, "resp", None)
+                    if _resp is not None:
+                        _body = _resp.json() if callable(getattr(_resp, "json", None)) else {}
+                        _related = [str(r) for r in (_body.get("related_orders") or []) if r]
+                    if not _related:
+                        # Some SDK versions embed the JSON in the exception message
+                        _msg_json_match = re.search(r'\{.*\}', str(ex), re.DOTALL)
+                        if _msg_json_match:
+                            _parsed = _json.loads(_msg_json_match.group())
+                            _related = [str(r) for r in (_parsed.get("related_orders") or []) if r]
+                except Exception:
+                    pass
+                if _related:
+                    # Adopt the first related order as our tracked SL — verify it is a stop first.
+                    _adopted_related = False
+                    try:
+                        _rel_order = tc.get_order_by_id(_related[0])
+                        _rel_stop = float(getattr(_rel_order, "stop_price", None) or 0)
+                        if _rel_stop > 0:
+                            exit_state["sl_broker_disabled"] = False
+                            exit_state["sl_order_ids"] = [_related[0]]
+                            exit_state["sl_order_exit_reason"] = "STOP_LOSS_EXIT"
+                            if not exit_state.get("confirmed_sl_price"):
+                                exit_state["confirmed_sl_price"] = _rel_stop
+                            if exit_state.get("sl_last_placed_pct") is None:
+                                exit_state["sl_last_placed_pct"] = float(
+                                    exit_state.get("sl_static_pct", exit_state.get("sl_dynamic_pct", 0))
+                                )
+                            exit_state.setdefault("timeline", []).append({
+                                "ts": _iso_now_utc(),
+                                "source": "order_adopted",
+                                "order_type": "ADOPTED_FROM_ERROR_RELATED",
+                                "order_id": _related[0],
+                                "stop_price": _rel_stop,
+                                "status": "live",
+                            })
+                            info(
+                                f"[{label} STOP] 40310000 related_orders — adopted id={_related[0]} "
+                                f"stop={_rel_stop:.4f} as tracked SL for {contract_symbol}"
+                            )
+                            _adopted_related = True
+                    except Exception as _rel_ex:
+                        info(f"[{label} STOP] Could not verify related order {_related[0]}: {_rel_ex}")
+                    if _adopted_related:
+                        return {"operation": "adopted_from_related_orders", "order_id": _related[0], "error": err_str}
 
-        # "position intent mismatch" (42210000) on a fresh placement means the position is
-        # already being closed (race between SL fill detection and the next ratchet tick).
-        # Skip this tick without disabling broker SL — it is a timing issue, not a capability one.
-        if not existing_id and ("42210000" in low or "position intent mismatch" in low):
-            info(f"[{label} STOP] Fresh SL skipped for {contract_symbol} — position likely closing (intent mismatch)")
-            return {"operation": "skipped", "error": err_str}
+                # Step 2: related_orders not available — fall back to open-order scan.
+                _scan_adopted = _adopt_existing_broker_sl(tc, contract_symbol, exit_state, label=f"{label} ")
+                if _scan_adopted:
+                    exit_state["sl_broker_disabled"] = False
+                    info(
+                        f"[{label} STOP] 40310000 — adopted existing broker SL via open-order scan "
+                        f"for {contract_symbol}; id={exit_state['sl_order_ids']}"
+                    )
+                    return {"operation": "adopted_via_scan_40310000", "error": err_str}
+
+                # Step 3: No stop order found at all. The blocking order is likely a TP limit.
+                # Undo the disable, advance sl_last_placed_pct to suppress further retry
+                # attempts, and rely on Condition 8 / monitor loop as safety net.
+                exit_state["sl_broker_disabled"] = False
+                exit_state["sl_last_placed_pct"] = sl_dynamic_pct
+                info(
+                    f"[{label} STOP] 40310000 on fresh placement (no adoptable SL found) — "
+                    f"skipping permanent disable; sl_last_placed_pct advanced to {sl_dynamic_pct:.4f}%. "
+                    f"Condition 8 guards exit at sl_dynamic_pct level."
+                )
+                return {"operation": "skipped_40310000_bracket_assumed_active", "error": err_str}
 
         # If replace failed because the existing order is no longer open, do NOT submit a
         # fresh stop immediately — Alpaca interprets a standalone sell stop while a bracket
@@ -854,7 +1171,7 @@ def _place_sl_stop_order(tc, exit_state: dict, contract_symbol: str | None, qty:
         # "account not eligible to trade uncovered option contracts". Instead, clear the
         # stale order ID and sl_last_placed_pct so the next tick's fresh-placement path
         # (sl_last_placed is None) handles it cleanly with a full position-intent request.
-        if existing_id and ("order is not open" in low or "42210000" in low or "order not open" in low or "position intent mismatch" in low):
+        if existing_id and ("order is not open" in low or "order not open" in low):
             exit_state["sl_order_ids"] = []
             exit_state["sl_last_placed_pct"] = None
             info(f"[{label} STOP] order {existing_id} no longer open — cleared, fresh placement queued for next tick")
@@ -862,7 +1179,20 @@ def _place_sl_stop_order(tc, exit_state: dict, contract_symbol: str | None, qty:
 
         # Common after restarts: an old open SELL order is holding the entire position qty,
         # so a new protective SL cannot be submitted.
+        # FIRST: try to adopt the holding order as our tracked SL — if it is already a stop
+        # order, there is no need to cancel anything. Fighting it with a fresh order causes
+        # the 403 loop; adopting it breaks the loop immediately.
         if ("held_for_orders" in low) or ("insufficient qty available" in low):
+            _adopted = _adopt_existing_broker_sl(tc, contract_symbol, exit_state, label=f"{label} ")
+            if _adopted:
+                # The holding order is our SL — we are now tracking it. Return without
+                # cancelling anything; ratchet replacements will run normally from here.
+                info(
+                    f"[{label} STOP] held_for_orders resolved by adopting existing broker SL "
+                    f"for {contract_symbol} — no cancel needed, id={exit_state['sl_order_ids']}"
+                )
+                return {"operation": "adopted_existing_sl", "sl_order_ids": list(exit_state["sl_order_ids"])}
+            # Adoption found only limit (TP) orders, not a stop — safe to cancel-and-replace.
             try:
                 from alpaca.trading.requests import GetOrdersRequest
                 from alpaca.trading.enums import QueryOrderStatus
@@ -1116,8 +1446,12 @@ def _detect_market_fallback_reason(tc, exit_state: dict, sellable_price: float) 
     # replaced on the next tick — there is no reason to force an exit while the
     # position is above its stop level. Returning early here prevents ORDER_SYSTEM_FAILURE
     # from triggering prematurely when SL placement is reliable and price is safe.
+    # Exception: when sl_broker_disabled=True the confirmed_sl_price is frozen at the
+    # original bracket entry SL and cannot be updated, so skip the guard and let
+    # Condition 7 (synthetic trigger) evaluate at the ratcheted QP level.
     _confirmed_sl = float(exit_state.get("confirmed_sl_price") or 0)
-    if _confirmed_sl > 0 and sellable_price > _confirmed_sl + 0.01:
+    _broker_sl_disabled = bool(exit_state.get("sl_broker_disabled", False))
+    if _confirmed_sl > 0 and sellable_price > _confirmed_sl + 0.01 and not _broker_sl_disabled:
         return None, None
 
     tp_ids = list(exit_state.get("tp_order_ids") or [])
@@ -1280,12 +1614,28 @@ def _detect_market_fallback_reason(tc, exit_state: dict, sellable_price: float) 
     # they require sl_ids or confirmed_sl_price — neither of which exist when
     # the broker rejected every placement attempt. The QP ratchet may have
     # moved sl_dynamic_pct into profit territory but no broker order enforces it,
-    # creating an "immortal" position that can never exit via fallback. Use
-    # sl_dynamic_pct to compute a synthetic trigger and force a market exit when
-    # price falls to or below it (same 2-second grace as the QP guard).
+    # creating an "immortal" position that can never exit via fallback.
     if bool(exit_state.get("sl_broker_disabled", False)):
-        _sl_dyn = float(exit_state.get("sl_dynamic_pct", exit_state.get("sl_static_pct", 0.0)) or 0.0)
         _fill = float(exit_state.get("fill_price", 0.0) or 0.0)
+        if _fill > 0:
+            _pnl_pct = (sellable_price - _fill) / _fill * 100
+            if _pnl_pct > 0:
+                # In profit with no active broker SL — exit immediately on this tick.
+                # On restarts the exit_state is fresh so sl_dynamic_pct starts at the
+                # initial SL level (negative), meaning the synth-trigger path below
+                # would never fire. Exit at market now instead of sitting unprotected.
+                detail = (
+                    f"broker_sl_disabled_profitable_exit:"
+                    f"sellable={sellable_price:.4f}:"
+                    f"fill={_fill:.4f}:"
+                    f"pnl={_pnl_pct:+.4f}%"
+                )
+                log_and_print("info", f"\n[FALLBACK TRIGGER]\n  reason=BROKER_SL_DISABLED_MARKET_EXIT\n  detail={detail}\n  sell_price={sellable_price}\n")
+                return "BROKER_SL_DISABLED_MARKET_EXIT", detail
+
+        # In loss territory: use sl_dynamic_pct to compute a synthetic trigger and
+        # force a market exit when price falls to or below it (2-second grace).
+        _sl_dyn = float(exit_state.get("sl_dynamic_pct", exit_state.get("sl_static_pct", 0.0)) or 0.0)
         if _sl_dyn != 0.0 and _fill > 0:
             _synth_trigger = round(_fill * (1.0 + _sl_dyn / 100.0), 4)
             if sellable_price <= _synth_trigger:
@@ -1307,6 +1657,35 @@ def _detect_market_fallback_reason(tc, exit_state: dict, sellable_price: float) 
             else:
                 exit_state.pop("broker_disabled_sl_seen_ts", None)
 
+    # Condition 8 — no SL orders ever placed and price is at/below the SL threshold.
+    # Recovery positions use RECOVERY-{symbol}-{id} synthetic IDs so
+    # _seed_bracket_exit_orders fails and sl_order_ids stays []. Without this,
+    # bracket mode skips _evaluate_priority_exit and the position loops forever.
+    # Also catches any real trade where SL placement silently failed entirely.
+    if not sl_ids and not bool(exit_state.get("sl_broker_disabled", False)):
+        _fill8 = float(exit_state.get("fill_price", 0.0) or 0.0)
+        _sl_dyn8 = float(exit_state.get("sl_dynamic_pct", exit_state.get("sl_static_pct", 0.0)) or 0.0)
+        if _fill8 > 0 and _sl_dyn8 != 0.0:
+            _sl_threshold8 = round(_fill8 * (1.0 + _sl_dyn8 / 100.0), 4)
+            if sellable_price <= _sl_threshold8:
+                _no_order_key = "no_sl_order_seen_ts"
+                _first_seen8 = float(exit_state.get(_no_order_key, 0.0) or 0.0)
+                _now8 = time.time()
+                if _first_seen8 <= 0.0:
+                    exit_state[_no_order_key] = _now8
+                elif (_now8 - _first_seen8) >= trigger_grace_sec:
+                    detail = (
+                        f"no_sl_order_price_breach:"
+                        f"sellable={sellable_price:.4f}:"
+                        f"sl_threshold={_sl_threshold8:.4f}:"
+                        f"sl_dynamic={_sl_dyn8:+.4f}%:"
+                        f"waited={_now8 - _first_seen8:.2f}s"
+                    )
+                    log_and_print("info", f"\n[FALLBACK TRIGGER]\n  reason=ORDER_SYSTEM_FAILURE_MARKET_EXIT\n  detail={detail}\n  sell_price={sellable_price}\n")
+                    return "ORDER_SYSTEM_FAILURE_MARKET_EXIT", detail
+            else:
+                exit_state.pop("no_sl_order_seen_ts", None)
+
     return None, None
 
 
@@ -1320,6 +1699,12 @@ def _cancel_exit_orders(tc, exit_state: dict) -> None:
 def _attempt_place_tp_limit(tc, exit_state: dict, contract_symbol: str | None, qty: int) -> dict | None:
     """When TP is configured in 'price' mode and no TP child exists, place a limit
     sell at the configured absolute `tp_price`. Returns placement info or None.
+
+    Design principle: SL is the primary safety net. We NEVER cancel SL proactively
+    before placing a TP limit — the TP and SL must coexist whenever possible.
+    SL is only cancelled as a last resort if the broker rejects the TP placement due
+    to a held_for_orders / insufficient-qty conflict (single-sell-order accounts).
+    This prevents the lifecycle gap: TP placed → TP unfilled → price reverses → no SL.
     """
     if tc is None or not contract_symbol or qty <= 0:
         return None
@@ -1332,27 +1717,17 @@ def _attempt_place_tp_limit(tc, exit_state: dict, contract_symbol: str | None, q
     if tp_price <= 0:
         return None
 
-    try:
-        # To avoid "held_for_orders" qty errors (can only have one exit order on some accounts),
-        # cancel any existing broker SL child before placing the TP limit.
-        _cancel_sl_orders(tc, exit_state)
-        order = place_market_order(
-            tc,
-            contract_symbol,
-            qty,
-            OrderSide.SELL,
-            reference_price=tp_price,
-            allow_limit=True,
-            force_limit=True,
-        )
+    def _record_tp_order(order, sl_cancelled: bool) -> dict | None:
         order_id = str(getattr(order, "id", "") or "")
         if not order_id:
             return None
-
-        # record TP child id and timeline event
         exit_state["tp_order_ids"] = [order_id]
         timeline = exit_state.setdefault("timeline", [])
-        submitted_at = _to_iso(getattr(order, "submitted_at", None) or getattr(order, "created_at", None) or getattr(order, "updated_at", None))
+        submitted_at = _to_iso(
+            getattr(order, "submitted_at", None)
+            or getattr(order, "created_at", None)
+            or getattr(order, "updated_at", None)
+        )
         updated_at = _to_iso(getattr(order, "updated_at", None))
         raw_status = _order_status_value(order)
         status = _status_for_ui(raw_status)
@@ -1368,12 +1743,123 @@ def _attempt_place_tp_limit(tc, exit_state: dict, contract_symbol: str | None, q
             "status_at": event_ts,
             "submitted_at": submitted_at,
             "updated_at": updated_at,
+            "sl_cancelled_for_tp": sl_cancelled,
         })
-        info(f"[TP LIMIT] Placed TP limit {contract_symbol} @{tp_price:.4f} id={order_id}")
-        return {"operation": "placed", "order_id": order_id, "limit_price": tp_price}
-    except Exception as ex:
-        info(f"[TP LIMIT] Failed to place TP limit for {contract_symbol}: {ex}")
+        label = " (SL kept active)" if not sl_cancelled else " (SL cancelled to allow TP)"
+        info(f"[TP LIMIT] Placed TP limit {contract_symbol} @{tp_price:.4f} id={order_id}{label}")
+        return {"operation": "placed", "order_id": order_id, "limit_price": tp_price, "sl_cancelled": sl_cancelled}
+
+    # ── First attempt: place TP WITHOUT cancelling SL ──────────────────────
+    # This is the safe path — both TP and SL remain live so a price reversal
+    # before the TP fills is still protected by the active SL stop order.
+    try:
+        order = place_market_order(
+            tc,
+            contract_symbol,
+            qty,
+            OrderSide.SELL,
+            reference_price=tp_price,
+            allow_limit=True,
+            force_limit=True,
+        )
+        return _record_tp_order(order, sl_cancelled=False)
+    except Exception as first_ex:
+        first_err = str(first_ex).lower()
+        _held = "held_for_orders" in first_err or "insufficient qty available" in first_err
+        if not _held:
+            # Non-held error — not a qty conflict; do not cancel SL, just report failure.
+            info(f"[TP LIMIT] Failed to place TP limit for {contract_symbol} (keeping SL active): {first_ex}")
+            return None
+
+    # ── Second attempt: broker blocked TP due to open SL holding qty ───────
+    # Only now do we cancel SL and retry. This is intentional and the minimum
+    # necessary intervention. The SL was protecting us; without it, the only
+    # protection is the monitoring loop itself until the TP fills or times out.
+    # Guard: only attempt the SL-cancel-retry once per position to prevent an
+    # infinite loop if the retry also fails. On the next tick, idempotency at
+    # the top of this function (tp_order_ids check) prevents re-entry if TP was
+    # placed; if TP was not placed, tp_retry_done stays True and we return None
+    # so the position is protected by the monitoring loop only.
+    if exit_state.get("tp_retry_done"):
+        info(
+            f"[TP LIMIT] held_for_orders for {contract_symbol} — "
+            f"tp_retry_done already set, skipping SL cancel to avoid loop"
+        )
         return None
+    exit_state["tp_retry_done"] = True
+    info(
+        f"[TP LIMIT] First attempt held_for_orders for {contract_symbol} — "
+        f"cancelling SL and retrying TP placement (single-shot)"
+    )
+    _cancel_sl_orders(tc, exit_state)
+    time.sleep(0.3)
+    try:
+        order = place_market_order(
+            tc,
+            contract_symbol,
+            qty,
+            OrderSide.SELL,
+            reference_price=tp_price,
+            allow_limit=True,
+            force_limit=True,
+        )
+        return _record_tp_order(order, sl_cancelled=True)
+    except Exception as retry_ex:
+        info(f"[TP LIMIT] Retry also failed for {contract_symbol}: {retry_ex}")
+        return None
+
+
+def _ensure_exit_coverage(
+    tc,
+    exit_state: dict,
+    contract_symbol: str | None,
+    qty: int,
+    buy_order_id: str | None = None,
+    label: str = "",
+) -> None:
+    """Sanity check: guarantee at least one live exit order (TP or SL) is active.
+
+    Called each monitoring tick (polling: every PRICE_POLL_SEC, WS: every
+    WS_ORDER_CHECK_SEC) to detect and recover from states where both TP and SL
+    orders are absent — indicating a prior placement failure left the position
+    temporarily unprotected. When the gap is detected, SL re-placement is
+    attempted immediately. Log output is throttled to once per 10 s to avoid
+    flooding trade.log.
+
+    Invariants preserved:
+    - Only fires in bracket mode (use_bracket_exit = True).
+    - Never acts when the position is already closing or any fill is recorded.
+    - Never cancels or modifies an existing order — only places if both are absent.
+    """
+    if not bool(exit_state.get("use_bracket_exit", False)):
+        return  # non-bracket mode: internal exits handle protection
+    if bool(exit_state.get("is_closing", False)):
+        return
+    if bool(exit_state.get("tp_order_filled", False)):
+        return
+    if bool(exit_state.get("sl_order_filled", False)):
+        return
+    if bool(exit_state.get("sl_broker_disabled", False)):
+        return  # broker SL permanently disabled; internal monitor is sole safety net
+
+    _tp_ids = exit_state.get("tp_order_ids") or []
+    _sl_ids = exit_state.get("sl_order_ids") or []
+    if _tp_ids or _sl_ids:
+        return  # at least one active exit order — no action needed
+
+    # Both TP and SL absent: attempt SL recovery with throttled logging.
+    now_ts = time.time()
+    last_logged = float(exit_state.get("_coverage_gap_logged_ts") or 0)
+    if now_ts - last_logged >= 10.0:
+        exit_state["_coverage_gap_logged_ts"] = now_ts
+        info(
+            f"[EXIT COVERAGE] {label}WARNING: no active TP or SL for {contract_symbol} — "
+            f"attempting SL recovery to restore exit protection."
+        )
+    try:
+        _place_sl_stop_order(tc, exit_state, contract_symbol, qty, buy_order_id)
+    except Exception as _cov_ex:
+        info(f"[EXIT COVERAGE] {label}SL re-place failed for {contract_symbol}: {_cov_ex}")
 
 
 def _update_dynamic_thresholds(
@@ -1769,8 +2255,11 @@ def monitor_with_polling(
     if not isinstance(exit_state.get("timeline"), list):
         exit_state["timeline"] = []
     _seed_bracket_exit_orders(tc, exit_state, buy_entry_order_id or buy_order_id)
+    _pos_ready = _wait_until_broker_position_exists(tc, contract_symbol)
+    if not _pos_ready:
+        info(f"{label}[SL WAIT] Broker position not visible yet for {contract_symbol}; deferring initial SL placement")
     if not bool(exit_state.get("sl_broker_disabled", False)):
-        if not (exit_state.get("sl_order_ids") or []):
+        if _pos_ready and not (exit_state.get("sl_order_ids") or []):
             try:
                 _place_sl_stop_order(tc, exit_state, contract_symbol, qty, buy_order_id)
             except Exception as _sl_ex:
@@ -1778,6 +2267,7 @@ def monitor_with_polling(
     hold_notice_emitted = False
     entry_ts = time.time()
     bad_entry_fired = False
+    _clear_debug_log()
     log_and_print(
         "info",
         f"\n[TRADE ENTRY] POLLING\n"
@@ -1830,6 +2320,8 @@ def monitor_with_polling(
         )
         _update_dynamic_thresholds(exit_state, pnl_pct, current_price=sellable_price, tick_ts=tick_ts,
                         tc=tc, contract_symbol=contract_symbol, qty=qty, buy_order_id=buy_order_id)
+        # Sanity: ensure at least one active exit order (TP or SL) exists each tick.
+        _ensure_exit_coverage(tc, exit_state, contract_symbol, qty, buy_order_id, label=label)
         # Check if any exit protection order was already filled by Alpaca (auto-close)
         if _check_tp_order_filled(tc, exit_state):
             tp_fill = exit_state.get("tp_order_fill_price") or sellable_price
@@ -1931,6 +2423,20 @@ def monitor_with_polling(
         # The internal _evaluate_priority_exit is skipped — exits happen via broker-side
         # stop-limit orders that are ratcheted up each tick by _update_dynamic_thresholds.
         if bool(exit_state.get("use_bracket_exit", False)):
+            # TP miss guard: if price reached TP but no active TP order and no TP fill recorded,
+            # the bracket TP child was silently cancelled (e.g. held_for_orders handler).
+            # _evaluate_priority_exit is skipped in bracket mode so we must catch it here.
+            _bk_tp_price = float(exit_state.get("tp_price") or 0.0)
+            _bk_tp_filled = bool(exit_state.get("tp_order_filled", False))
+            _bk_tp_ids = exit_state.get("tp_order_ids") or []
+            if _bk_tp_price > 0 and not _bk_tp_filled and not _bk_tp_ids and sellable_price >= _bk_tp_price:
+                _bk_tp_reason = "TAKE_PROFIT_EXIT"
+                info(f"{label}{_bk_tp_reason} - price {sellable_price:.4f} >= tp {_bk_tp_price:.4f} with no active TP order; market exit")
+                if buy_order_id:
+                    set_live_exit_reason(buy_order_id, _bk_tp_reason)
+                _cancel_exit_orders(tc, exit_state)
+                _append_sell_tick(exit_state, _bk_tp_reason, sellable_price, fill_price, bid_price=bid_price if bid_price > 0 else None, mid_price=price)
+                return _bk_tp_reason, sellable_price, exit_state
             continue
 
         # ── Bad entry detection: exit early if trade shows no momentum ──
@@ -2028,19 +2534,24 @@ def monitor_with_polling(
             # Immediate STOP_LOSS handling: if SL threshold reached but SL not filled,
             # force the market-fallback path immediately (caller will execute market sell).
             if exit_reason == "STOP_LOSS_EXIT":
-                # compute absolute SL price
+                # Use confirmed_sl_price (actual broker stop) as the trigger reference.
+                # sl_dynamic_pct can diverge when the stop order is clamped to current
+                # price at placement time — using it directly causes premature exits when
+                # pnl% crosses sl_dynamic_pct% but price is still above the real SL stop.
+                _confirmed_sl = float(exit_state.get("confirmed_sl_price") or 0)
                 sl_abs = 0.0
-                try:
-                    sl_dyn_pct = float(exit_state.get("sl_dynamic_pct", exit_state.get("sl_static_pct", 0.0)) or 0.0)
-                    if float(fill_price) > 0:
-                        sl_abs = round(float(fill_price) * (1.0 + sl_dyn_pct / 100.0), 4)
-                except Exception:
-                    sl_abs = 0.0
+                if _confirmed_sl > 0:
+                    sl_abs = _confirmed_sl
+                else:
+                    try:
+                        sl_dyn_pct = float(exit_state.get("sl_dynamic_pct", exit_state.get("sl_static_pct", 0.0)) or 0.0)
+                        if float(fill_price) > 0:
+                            sl_abs = round(float(fill_price) * (1.0 + sl_dyn_pct / 100.0), 4)
+                    except Exception:
+                        sl_abs = 0.0
 
-                # Immediate CAPE fallback: if price is UNDER the active SL and
-                # the broker order still isn't filled, force a market exit.
+                # Only force exit when price has actually hit the confirmed broker SL level.
                 if sl_abs > 0 and sellable_price <= sl_abs and not bool(exit_state.get("sl_order_filled", False)):
-                    # mark fallback reason and return so caller can immediately place market sell
                     fallback_reason = "ORDER_SYSTEM_FAILURE_MARKET_EXIT"
                     if buy_order_id:
                         set_live_exit_reason(buy_order_id, fallback_reason)
@@ -2178,12 +2689,26 @@ def monitor_with_websocket(
             "bad_entry_fired": False,
         }
         _seed_bracket_exit_orders(tc, state["exit_state"], buy_entry_order_id or buy_order_id)
+        _pos_ready = _wait_until_broker_position_exists(tc, contract_symbol)
+        if not _pos_ready:
+            info(f"{label}[SL WAIT] Broker position not visible yet for {contract_symbol}; deferring initial SL placement")
         if not bool(state["exit_state"].get("sl_broker_disabled", False)):
-            if not (state["exit_state"].get("sl_order_ids") or []):
+            if _pos_ready and not (state["exit_state"].get("sl_order_ids") or []):
                 try:
                     _place_sl_stop_order(tc, state["exit_state"], contract_symbol, qty, buy_order_id)
                 except Exception as _sl_ex:
                     log_and_print("error", f"[SL ERROR] _place_sl_stop_order raised for {contract_symbol}: {_sl_ex}")
+        _clear_debug_log()
+        log_and_print(
+            "info",
+            f"\n[TRADE ENTRY] WEBSOCKET\n"
+            f"  symbol={contract_symbol}\n"
+            f"  fill_price={fill_price}\n"
+            f"  tp_price={tp_price}\n"
+            f"  sl_price={sl_price}\n"
+            f"  qty={qty}\n"
+            f"  ts={_iso_now_utc()}\n",
+        )
         _append_timeline_tick(
             state["exit_state"],
             source="entry",
@@ -2247,6 +2772,8 @@ def monitor_with_websocket(
             # Throttled check: poll Alpaca every PRICE_POLL_SEC to see if any exit order filled
             if now - state["last_qp_check_ts"] >= WS_ORDER_CHECK_SEC:
                 state["last_qp_check_ts"] = now
+                # Sanity: ensure at least one active exit order (TP or SL) exists.
+                _ensure_exit_coverage(tc, state["exit_state"], contract_symbol, qty, buy_order_id, label=label)
                 if _check_tp_order_filled(tc, state["exit_state"]):
                     tp_fill = state["exit_state"].get("tp_order_fill_price") or sellable_price
                     if buy_order_id:
@@ -2365,16 +2892,23 @@ def monitor_with_websocket(
                 use_extended_exit_criteria=use_extended_exit_criteria,
             )
             if exit_reason == "STOP_LOSS_EXIT":
-                # Immediate CAPE fallback: if price is under active SL and broker
-                # stop-limit isn't filled, force market exit.
+                # Use confirmed_sl_price (actual broker stop) as the trigger reference.
+                # sl_dynamic_pct can diverge when the stop order is clamped to current
+                # price at placement time — using it directly causes premature exits when
+                # pnl% crosses sl_dynamic_pct% but price is still above the real SL stop.
+                _ws_confirmed_sl = float(state["exit_state"].get("confirmed_sl_price") or 0)
                 sl_abs = 0.0
-                try:
-                    sl_dyn_pct = float(state["exit_state"].get("sl_dynamic_pct", state["exit_state"].get("sl_static_pct", 0.0)) or 0.0)
-                    if float(fill_price) > 0:
-                        sl_abs = round(float(fill_price) * (1.0 + sl_dyn_pct / 100.0), 4)
-                except Exception:
-                    sl_abs = 0.0
+                if _ws_confirmed_sl > 0:
+                    sl_abs = _ws_confirmed_sl
+                else:
+                    try:
+                        sl_dyn_pct = float(state["exit_state"].get("sl_dynamic_pct", state["exit_state"].get("sl_static_pct", 0.0)) or 0.0)
+                        if float(fill_price) > 0:
+                            sl_abs = round(float(fill_price) * (1.0 + sl_dyn_pct / 100.0), 4)
+                    except Exception:
+                        sl_abs = 0.0
 
+                # Only force exit when price has actually hit the confirmed broker SL level.
                 if sl_abs > 0 and sellable_price <= sl_abs and not bool(state["exit_state"].get("sl_order_filled", False)):
                     fallback_reason = "ORDER_SYSTEM_FAILURE_MARKET_EXIT"
                     if buy_order_id:
@@ -2449,6 +2983,23 @@ def monitor_with_websocket(
             # The internal _evaluate_priority_exit is skipped — exits happen via broker-side
             # stop-limit orders that are ratcheted up each tick by _update_dynamic_thresholds.
             if bool(state["exit_state"].get("use_bracket_exit", False)):
+                # TP miss guard: if price reached TP but no active TP order and no TP fill recorded,
+                # the bracket TP child was silently cancelled (e.g. held_for_orders handler).
+                _bk_tp_price = float(state["exit_state"].get("tp_price") or 0.0)
+                _bk_tp_filled = bool(state["exit_state"].get("tp_order_filled", False))
+                _bk_tp_ids = state["exit_state"].get("tp_order_ids") or []
+                if _bk_tp_price > 0 and not _bk_tp_filled and not _bk_tp_ids and sellable_price >= _bk_tp_price:
+                    _bk_tp_reason = "TAKE_PROFIT_EXIT"
+                    info(f"{label}{_bk_tp_reason} - price {sellable_price:.4f} >= tp {_bk_tp_price:.4f} with no active TP order; market exit")
+                    if buy_order_id:
+                        set_live_exit_reason(buy_order_id, _bk_tp_reason)
+                    _cancel_exit_orders(tc, state["exit_state"])
+                    state["last_price"] = sellable_price
+                    state["exit_reason"] = _bk_tp_reason
+                    _append_sell_tick(state["exit_state"], _bk_tp_reason, sellable_price, fill_price, bid_price=bid if bid > 0 else None, mid_price=price)
+                    done.set()
+                    stop_stream(stream)
+                    return
                 return
 
             # ── Bad entry detection: exit early if trade shows no momentum ──

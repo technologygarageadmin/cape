@@ -798,6 +798,7 @@ export default function OverallSummary() {
   const [sortCol,      setSortCol]      = useState('createdAt')
   const [sortDir,      setSortDir]      = useState('desc')
   const [hideStraddle, setHideStraddle]  = useState(false)
+  const [hideRecovery, setHideRecovery]  = useState(false)
   const [sellingSymbol, setSellingSymbol] = useState(null)
   const alertedPositionKeysRef = useRef(new Set())
   const lastDingAtRef = useRef(0)
@@ -950,6 +951,7 @@ export default function OverallSummary() {
   const filtered = useMemo(() => (
     allTrades.filter(t => {
       if (hideStraddle && t.tradeTypeTag === 'STRADDLE') return false
+      if (hideRecovery && String(t.tradeTypeTag || '').toUpperCase() === 'RECOVERY') return false
       const dateOk = isWithinRange(t.createdAt || t.entryTime, dateFilter)
       const resOk  = resultFilter === 'ALL' || t.result === resultFilter
       const symOk  = symbolFilter === 'ALL' || t.symbol === symbolFilter
@@ -957,7 +959,7 @@ export default function OverallSummary() {
       const typeOk = typeFilter === 'ALL' || (typeFilter === 'AIT' && tag === 'AIT') || (typeFilter === 'MANUAL' && tag === 'MANUAL')
       return dateOk && resOk && symOk && typeOk
     })
-  ), [allTrades, dateFilter, resultFilter, symbolFilter, hideStraddle])
+  ), [allTrades, dateFilter, resultFilter, symbolFilter, hideStraddle, hideRecovery, typeFilter])
 
   // History card display list — same as filtered (unified filter)
   const historyDisplayed = filtered
@@ -1247,12 +1249,32 @@ export default function OverallSummary() {
             </button>
           </div>
 
+          <div style={S.divider} />
+
+          {/* Hide Recovery toggle */}
+          <div style={S.filterGroup}>
+            <span style={S.filterLabel}><Filter size={11} /> Recovery</span>
+            <button
+              style={{
+                padding: '0.35rem 0.85rem', borderRadius: '999px',
+                border: `1px solid ${hideRecovery ? 'rgba(239,68,68,0.3)' : 'rgba(22,163,74,0.3)'}`,
+                cursor: 'pointer', fontSize: '0.74rem', fontWeight: 700,
+                background: hideRecovery ? 'rgba(239,68,68,0.08)' : 'rgba(22,163,74,0.08)',
+                color: hideRecovery ? '#ef4444' : '#16a34a',
+                display: 'flex', alignItems: 'center', gap: '0.3rem', transition: 'all 0.15s',
+              }}
+              onClick={() => setHideRecovery(h => !h)}
+            >
+              {hideRecovery ? '✕ Hidden' : '✓ Included'}
+            </button>
+          </div>
+
           {/* Clear filters */}
-          {(dateFilter !== 'ALL TIME' || resultFilter !== 'ALL' || symbolFilter !== 'ALL' || !hideStraddle || typeFilter !== 'ALL') && (
+          {(dateFilter !== 'ALL TIME' || resultFilter !== 'ALL' || symbolFilter !== 'ALL' || !hideStraddle || !hideRecovery || typeFilter !== 'ALL') && (
             <>
               <div style={S.divider} />
               <button
-                onClick={() => { setDateFilter('ALL TIME'); setResultFilter('ALL'); setSymbolFilter('ALL'); setHideStraddle(true); setTypeFilter('ALL') }}
+                onClick={() => { setDateFilter('ALL TIME'); setResultFilter('ALL'); setSymbolFilter('ALL'); setHideStraddle(true); setHideRecovery(true); setTypeFilter('ALL') }}
                 style={{
                   padding: '0.35rem 0.85rem', borderRadius: '999px', border: '1px solid rgba(239,68,68,0.25)',
                   cursor: 'pointer', fontSize: '0.76rem', fontWeight: 700,
@@ -1524,7 +1546,7 @@ export default function OverallSummary() {
                     </div>
 
                     {/* ── Sell Now button (when in profit) ── */}
-                    {isPos && (
+                    {/* {isPos && (
                       <div style={{ padding: '0 1.1rem 0.85rem', textAlign: 'center' }}>
                         <button
                           disabled={sellingSymbol === p.symbol}
@@ -1544,7 +1566,7 @@ export default function OverallSummary() {
                           {sellingSymbol === p.symbol ? 'Selling…' : `Sell Now · Lock ${fmtPnl(uPl)}`}
                         </button>
                       </div>
-                    )}
+                    )} */}
 
                   </div>
                 )

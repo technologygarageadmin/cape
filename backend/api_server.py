@@ -1973,13 +1973,21 @@ def _recovery_monitor_thread(
         snap_obj = extract_snapshot_for_symbol(snap, contract_symbol)
         snap_price = extract_snapshot_mid_price(snap_obj)
         if snap_price > 0:
-            # For SL quick-check use configured absolute price threshold
+            # For quick-check use configured absolute price thresholds:
+            # - If already below SL, force immediate market exit (gap-down/sl miss)
+            # - If already above TP, force immediate market exit to lock profit
             try:
                 if snap_price <= sl_price:
                     pnl_now = (snap_price - entry_price) / entry_price * 100
                     print(f"[RECOVERY:{underlying}] Current price={snap_price:.4f} pnl={pnl_now:+.2f}%")
                     print(f"[RECOVERY:{underlying}] Already past SL — selling immediately")
                     exit_reason = "SL_MISSED_GAPDOWN_MARKET_EXIT"
+                    opt_price = snap_price
+                elif snap_price >= tp_price:
+                    pnl_now = (snap_price - entry_price) / entry_price * 100
+                    print(f"[RECOVERY:{underlying}] Current price={snap_price:.4f} pnl={pnl_now:+.2f}%")
+                    print(f"[RECOVERY:{underlying}] Already above TP — selling immediately at market")
+                    exit_reason = "TP_PRICE_ABOVE_MARKET_EXIT"
                     opt_price = snap_price
             except Exception:
                 pass
@@ -1994,6 +2002,7 @@ def _recovery_monitor_thread(
     _exit_order_type = "UNKNOWN"
     market_fallback_reasons = {
         "SL_MISSED_GAPDOWN_MARKET_EXIT",
+        "TP_PRICE_ABOVE_MARKET_EXIT",
         "ORDER_SYSTEM_FAILURE_MARKET_EXIT",
         "QP_SL_REPLACE_FAILED_MARKET_EXIT",
         "SL_PRICE_BREACH_MARKET_EXIT",
@@ -2242,10 +2251,72 @@ def _recover_open_positions() -> None:
         underlying = parsed["underlying"]
         signal = parsed["signal"]
 
-        # Check if position is already way past SL — close immediately
+        # Quick startup checks — if price already at/above TP or below SL, close immediately
         current_price_raw = float(getattr(pos, "current_price", 0) or 0)
         if current_price_raw > 0 and entry_price > 0:
+            tp_price = compute_tp_price(entry_price)
             sl_price = compute_sl_price(entry_price)
+            # If current price already >= TP, close immediately at market to lock profit
+            if current_price_raw >= tp_price:
+                pnl_now = (current_price_raw - entry_price) / entry_price * 100
+                print(
+                    f"[RECOVERY] {contract_symbol} already at {pnl_now:+.2f}% (>= TP) — "
+                    f"closing immediately via Alpaca"
+                )
+                try:
+                    # Cancel any stale pending orders first
+                    try:
+                        from alpaca.trading.requests import GetOrdersRequest
+                        from alpaca.trading.enums import QueryOrderStatus
+                        stale_orders = tc_recovery.get_orders(
+                            filter=GetOrdersRequest(status=QueryOrderStatus.OPEN, symbols=[contract_symbol])
+                        )
+                        for stale_ord in stale_orders:
+                            try:
+                                tc_recovery.cancel_order_by_id(str(stale_ord.id))
+                                print(f"[RECOVERY] Cancelled stale order {stale_ord.id} for {contract_symbol}")
+                            except Exception:
+                                pass
+                        if stale_orders:
+                            time.sleep(1)
+                    except Exception:
+                        pass
+
+                    close_resp = tc_recovery.close_position(contract_symbol)
+                    close_order_id = str(getattr(close_resp, "id", ""))
+                    if close_order_id:
+                        filled = wait_for_fill(tc_recovery, close_order_id, FILL_WAIT_SEC)
+                        sell_px = float(filled.filled_avg_price or current_price_raw)
+                        final_pnl = (sell_px - entry_price) / entry_price * 100
+                        pnl_dollar = round((sell_px - entry_price) * qty * 100, 2)
+                        print(
+                            f"[RECOVERY] {contract_symbol} FORCE CLOSED at {sell_px:.4f} "
+                            f"| PnL: {final_pnl:+.2f}% (${pnl_dollar})"
+                        )
+                        # Log to MongoDB
+                        if _options_log_col is not None:
+                            _options_log_col.insert_one({
+                                "symbol": underlying, "contract_name": contract_symbol,
+                                "direction": signal, "option_type": signal,
+                                "strike_price": parsed["strike"], "expiry": parsed["expiry"],
+                                "qty": qty, "buy_price": entry_price, "sell_price": sell_px,
+                                "pnl": pnl_dollar, "pnl_pct": round(final_pnl, 4),
+                                "result": "WIN", "exit_reason": "TAKE_PROFIT_EXIT",
+                                "trade_type": "RECOVERY",
+                                "buy_order_id": buy_order_map.get(contract_symbol, f"RECOVERY-{contract_symbol}"),
+                                "sell_order_id": close_order_id,
+                                "created_at": datetime.now(CDT),
+                                "log_source": "startup_recovery_immediate",
+                                "timeline": [],
+                            })
+                    else:
+                        print(f"[RECOVERY] close_position returned no order for {contract_symbol}")
+                except Exception as ex:
+                    print(f"[RECOVERY] Immediate close failed for {contract_symbol}: {ex}")
+                recovered += 1
+                continue
+
+            # If already below SL, close immediately (existing behavior)
             if current_price_raw <= sl_price:
                 pnl_now = (current_price_raw - entry_price) / entry_price * 100
                 print(

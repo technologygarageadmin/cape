@@ -15,7 +15,10 @@
       "Bash(dir /s /b \"c:\\\\Users\\\\MuthamizhS\\\\OneDrive - Technology Garage\\\\Desktop\\\\Cape New UI\\\\monitoring_debug.log\")",
       "Bash(dir /s /b \"c:\\\\Users\\\\MuthamizhS\\\\OneDrive - Technology Garage\\\\Desktop\\\\Cape New UI\\\\backend\\\\monitoring_debug.log\")",
       "Read(//c/c/Users/MuthamizhS/OneDrive - Technology Garage/Desktop/Cape New UI/backend/**)",
-      "Bash(grep -v '^--$')"
+      "Bash(grep -v '^--$')",
+      "Bash(Get-Content \"c:\\\\Users\\\\MuthamizhS\\\\OneDrive - Technology Garage\\\\Desktop\\\\Cape New UI\\\\backend\\\\monitoring_debug.log\" -Tail 150)",
+      "Bash(python -c \"import pytz; print\\('pytz ok'\\); print\\(pytz.timezone\\('America/New_York'\\).localize\\(__import__\\('datetime'\\).datetime.now\\(\\)\\).strftime\\('%Y-%m-%d %H:%M:%S %Z'\\)\\)\")",
+      "Bash(Select-String -Path \"c:\\\\Users\\\\MuthamizhS\\\\OneDrive - Technology Garage\\\\Desktop\\\\Cape New UI\\\\backend\\\\monitoring_debug.log\" -Pattern \"9\\\\.38|9\\\\.39|9\\\\.25|stop price must|uncovered|BROKER_SL_DISABLED|sl_last_placed_pct = None|40310000|FALLBACK\" -Context 2)"
     ]
   }
 }
