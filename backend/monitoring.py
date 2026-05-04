@@ -232,6 +232,7 @@ def _init_exit_state(fill_price: float, tp_price: float, sl_price: float) -> dic
         # If broker rejects protective SL orders (common on accounts without stop support),
         # we keep monitoring internally and will exit via market fallback on trigger.
         "sl_broker_disabled": False,
+        "entry_ts": time.time(),
         "timeline": [],
     }
 
@@ -1664,21 +1665,28 @@ def _detect_market_fallback_reason(tc, exit_state: dict, sellable_price: float) 
     # Also catches any real trade where SL placement silently failed entirely.
     if not sl_ids and not bool(exit_state.get("sl_broker_disabled", False)):
         _fill8 = float(exit_state.get("fill_price", 0.0) or 0.0)
-        _sl_dyn8 = float(exit_state.get("sl_dynamic_pct", exit_state.get("sl_static_pct", 0.0)) or 0.0)
-        if _fill8 > 0 and _sl_dyn8 != 0.0:
-            _sl_threshold8 = round(_fill8 * (1.0 + _sl_dyn8 / 100.0), 4)
+        # Use static (original entry-level) SL — sl_dynamic_pct may be tightened by
+        # loss-ratchet, raising the threshold above the actual safe price.
+        _sl_static8 = float(exit_state.get("sl_static_pct", 0.0) or 0.0)
+        if _fill8 > 0 and _sl_static8 != 0.0:
+            _sl_threshold8 = round(_fill8 * (1.0 + _sl_static8 / 100.0), 4)
             if sellable_price <= _sl_threshold8:
                 _no_order_key = "no_sl_order_seen_ts"
                 _first_seen8 = float(exit_state.get(_no_order_key, 0.0) or 0.0)
                 _now8 = time.time()
-                if _first_seen8 <= 0.0:
+                # Skip during the SL seeding window (first 15s after entry) —
+                # bracket child IDs may not have propagated from the broker yet.
+                _entry_ts8 = float(exit_state.get("entry_ts") or 0)
+                if _entry_ts8 > 0 and (_now8 - _entry_ts8) < 15.0:
+                    exit_state.pop("no_sl_order_seen_ts", None)
+                elif _first_seen8 <= 0.0:
                     exit_state[_no_order_key] = _now8
-                elif (_now8 - _first_seen8) >= trigger_grace_sec:
+                elif (_now8 - _first_seen8) >= 10.0:
                     detail = (
                         f"no_sl_order_price_breach:"
                         f"sellable={sellable_price:.4f}:"
                         f"sl_threshold={_sl_threshold8:.4f}:"
-                        f"sl_dynamic={_sl_dyn8:+.4f}%:"
+                        f"sl_static={_sl_static8:+.4f}%:"
                         f"waited={_now8 - _first_seen8:.2f}s"
                     )
                     log_and_print("info", f"\n[FALLBACK TRIGGER]\n  reason=ORDER_SYSTEM_FAILURE_MARKET_EXIT\n  detail={detail}\n  sell_price={sellable_price}\n")
@@ -2544,11 +2552,17 @@ def monitor_with_polling(
                     sl_abs = _confirmed_sl
                 else:
                     try:
-                        sl_dyn_pct = float(exit_state.get("sl_dynamic_pct", exit_state.get("sl_static_pct", 0.0)) or 0.0)
+                        # No confirmed broker SL — use static (original) SL to avoid
+                        # premature exits from loss-ratchet tightening sl_dynamic_pct.
+                        sl_dyn_pct = float(exit_state.get("sl_static_pct", 0.0) or 0.0)
                         if float(fill_price) > 0:
                             sl_abs = round(float(fill_price) * (1.0 + sl_dyn_pct / 100.0), 4)
                     except Exception:
                         sl_abs = 0.0
+                # Suppress forced exit within the SL seeding window (first 10s after entry).
+                _p_entry_ts = float(exit_state.get("entry_ts") or 0)
+                if _p_entry_ts > 0 and (time.time() - _p_entry_ts) < 10.0:
+                    sl_abs = 0.0  # defer — SL seeding may still be in progress
 
                 # Only force exit when price has actually hit the confirmed broker SL level.
                 if sl_abs > 0 and sellable_price <= sl_abs and not bool(exit_state.get("sl_order_filled", False)):
@@ -2769,6 +2783,18 @@ def monitor_with_websocket(
                 qty=qty,
                 buy_order_id=buy_order_id,
             )
+            if (
+                not state["exit_state"].get("sl_order_ids")
+                and not state["exit_state"].get("sl_broker_disabled")
+                and not state["exit_state"].get("_sl_init_error_logged")
+            ):
+                _sl_e_ts = float(state["exit_state"].get("entry_ts") or 0)
+                if _sl_e_ts > 0 and (time.time() - _sl_e_ts) > 5.0:
+                    state["exit_state"]["_sl_init_error_logged"] = True
+                    info(
+                        f"{label}[SL INIT ERROR] No SL order placed {time.time() - _sl_e_ts:.0f}s after entry"
+                        f" — bracket seeding failed; no confirmed_sl_price or sl_order_ids"
+                    )
             # Throttled check: poll Alpaca every PRICE_POLL_SEC to see if any exit order filled
             if now - state["last_qp_check_ts"] >= WS_ORDER_CHECK_SEC:
                 state["last_qp_check_ts"] = now
@@ -2873,6 +2899,38 @@ def monitor_with_websocket(
                 info(f"{label}Exit hold window completed; exits are now active")
                 state["hold_notice_emitted"] = False
 
+            # Bracket-only mode: TP/SL child fills and market fallback are the only exits.
+            # Internal _evaluate_priority_exit is skipped — same guard as monitor_with_polling.
+            if bool(state["exit_state"].get("use_bracket_exit", False)):
+                _bk_tp_price = float(state["exit_state"].get("tp_price") or 0.0)
+                _bk_tp_filled = bool(state["exit_state"].get("tp_order_filled", False))
+                _bk_tp_ids = state["exit_state"].get("tp_order_ids") or []
+                if _bk_tp_price > 0 and not _bk_tp_filled and not _bk_tp_ids and sellable_price >= _bk_tp_price:
+                    _bk_tp_reason = "TAKE_PROFIT_EXIT"
+                    info(f"{label}{_bk_tp_reason} - WS price {sellable_price:.4f} >= tp {_bk_tp_price:.4f} with no active TP order; market exit")
+                    if buy_order_id:
+                        set_live_exit_reason(buy_order_id, _bk_tp_reason)
+                    _cancel_exit_orders(tc, state["exit_state"])
+                    state["last_price"] = sellable_price
+                    state["exit_reason"] = _bk_tp_reason
+                    _append_sell_tick(state["exit_state"], _bk_tp_reason, sellable_price, fill_price, bid_price=bid if bid > 0 else None, mid_price=price)
+                    done.set()
+                    stop_stream(stream)
+                    return
+                _append_timeline_tick(
+                    state["exit_state"],
+                    source="ws",
+                    tick_ts=tick_ts,
+                    fill_price=fill_price,
+                    mid_price=price,
+                    bid_price=bid if bid > 0 else None,
+                    sellable_price=sellable_price,
+                    pnl_pct=pnl_pct,
+                )
+                if buy_order_id:
+                    update_live_exit_state(buy_order_id, state["exit_state"], pnl_pct, sellable_price)
+                return
+
             # Evaluate absolute-price TP/SL preference here as well. If TP triggered
             # in price mode but no TP order exists, attempt to place one and wait.
             pnl_pct = (sellable_price - fill_price) / fill_price * 100
@@ -2902,11 +2960,17 @@ def monitor_with_websocket(
                     sl_abs = _ws_confirmed_sl
                 else:
                     try:
-                        sl_dyn_pct = float(state["exit_state"].get("sl_dynamic_pct", state["exit_state"].get("sl_static_pct", 0.0)) or 0.0)
+                        # No confirmed broker SL — use static (original) SL to avoid
+                        # premature exits from loss-ratchet tightening sl_dynamic_pct.
+                        sl_dyn_pct = float(state["exit_state"].get("sl_static_pct", 0.0) or 0.0)
                         if float(fill_price) > 0:
                             sl_abs = round(float(fill_price) * (1.0 + sl_dyn_pct / 100.0), 4)
                     except Exception:
                         sl_abs = 0.0
+                # Suppress forced exit within the SL seeding window (first 10s after entry).
+                _ws_entry_ts = float(state["exit_state"].get("entry_ts") or 0)
+                if _ws_entry_ts > 0 and (time.time() - _ws_entry_ts) < 10.0:
+                    sl_abs = 0.0  # defer — SL seeding may still be in progress
 
                 # Only force exit when price has actually hit the confirmed broker SL level.
                 if sl_abs > 0 and sellable_price <= sl_abs and not bool(state["exit_state"].get("sl_order_filled", False)):
