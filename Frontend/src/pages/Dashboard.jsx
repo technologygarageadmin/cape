@@ -35,7 +35,7 @@ const styles = {
     pointerEvents: 'none',
   },
   bannerLeft: { display: 'flex', flexDirection: 'column', gap: '0.5rem', zIndex: 1 },
-  bannerGreeting: { fontSize: '0.8rem', color: '#888', letterSpacing: '0.12em', textTransform: 'uppercase', fontWeight: 500 },
+  bannerGreeting: { fontSize: '0.8rem', color: 'var(--text)', letterSpacing: '0.12em', textTransform: 'uppercase', fontWeight: 500 },
   bannerTitle: { fontSize: '1.8rem', fontWeight: 800, color: '#fff', lineHeight: 1.1 },
   bannerTitleAccent: { color: GOLD },
   bannerStatus: { display: 'flex', alignItems: 'center', gap: '0.5rem', marginTop: '0.25rem' },
@@ -48,7 +48,7 @@ const styles = {
   statusText: { fontSize: '0.8rem', color: '#aaa', fontWeight: 500 },
   bannerRight: { display: 'flex', gap: '2rem', zIndex: 1 },
   bannerStat: { display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '0.2rem' },
-  bannerStatLabel: { fontSize: '0.7rem', color: '#666', textTransform: 'uppercase', letterSpacing: '0.1em' },
+  bannerStatLabel: { fontSize: '0.7rem', color: 'var(--text)', textTransform: 'uppercase', letterSpacing: '0.1em' },
   bannerStatValue: { fontSize: '1.5rem', fontWeight: 800, color: GOLD },
   bannerStatChange: { fontSize: '0.75rem', color: '#22c55e', fontWeight: 600 },
   // Stats grid
@@ -59,7 +59,7 @@ const styles = {
     marginBottom: '2rem',
   },
   statCard: {
-    background: '#fff',
+    background: 'var(--card-bg)',
     border: `1px solid rgba(201,162,39,0.15)`,
     borderRadius: '14px',
     padding: '1.5rem',
@@ -71,26 +71,26 @@ const styles = {
     cursor: 'default',
   },
   statCardTop: { display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' },
-  statLabel: { fontSize: '0.8rem', color: '#888', fontWeight: 500, textTransform: 'uppercase', letterSpacing: '0.08em' },
+  statLabel: { fontSize: '0.8rem', color: 'var(--text)', fontWeight: 500, textTransform: 'uppercase', letterSpacing: '0.08em' },
   statIconBox: {
     width: '40px', height: '40px', borderRadius: '10px',
     background: `rgba(201,162,39,0.1)`,
     display: 'flex', alignItems: 'center', justifyContent: 'center',
   },
-  statValue: { fontSize: '1.7rem', fontWeight: 800, color: '#111', lineHeight: 1 },
+  statValue: { fontSize: '1.7rem', fontWeight: 800, color: 'var(--text-h)', lineHeight: 1 },
   statChange: { display: 'flex', alignItems: 'center', gap: '0.3rem', fontSize: '0.78rem', fontWeight: 600 },
   // Main content
   mainGrid: { display: 'grid', gridTemplateColumns: '2fr 1fr', gap: '1.5rem', marginBottom: '2rem' },
   card: {
-    background: '#fff',
+    background: 'var(--card-bg)',
     border: `1px solid rgba(201,162,39,0.12)`,
     borderRadius: '14px',
     padding: '1.5rem',
     boxShadow: '0 2px 12px rgba(0,0,0,0.04)',
   },
   cardHeader: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.25rem' },
-  cardTitle: { fontSize: '1rem', fontWeight: 700, color: '#111' },
-  cardSubtitle: { fontSize: '0.78rem', color: '#888', marginTop: '0.15rem' },
+  cardTitle: { fontSize: '1rem', fontWeight: 700, color: 'var(--text-h)' },
+  cardSubtitle: { fontSize: '0.78rem', color: 'var(--text)', marginTop: '0.15rem' },
   badge: {
     padding: '0.3rem 0.8rem',
     borderRadius: '20px',
@@ -117,11 +117,11 @@ const styles = {
   },
   botBtnPrimary: {
     background: `linear-gradient(135deg, ${GOLD} 0%, ${GOLD_LIGHT} 100%)`,
-    color: '#111',
+    color: 'var(--text-h)',
     boxShadow: `0 4px 16px rgba(201,162,39,0.35)`,
   },
   botBtnDanger: { background: '#fff0f0', color: '#ef4444', border: '1px solid rgba(239,68,68,0.25)' },
-  botBtnNeutral: { background: '#f5f5f5', color: '#555', border: '1px solid #e5e5e5' },
+  botBtnNeutral: { background: 'var(--bg)', color: 'var(--text)', border: '1px solid rgba(0,0,0,0.12)' },
   // Performance mini chart (fake bars)
   miniChart: { display: 'flex', alignItems: 'flex-end', gap: '4px', height: '60px', marginBottom: '1rem' },
   miniBar: { flex: 1, borderRadius: '3px 3px 0 0', transition: 'all 0.4s ease' },
@@ -138,22 +138,22 @@ const styles = {
     fontSize: '0.7rem', fontWeight: 700, color: GOLD, letterSpacing: '0.05em',
   },
   tradeInfo: { display: 'flex', flexDirection: 'column', gap: '0.15rem' },
-  tradeName: { fontWeight: 700, fontSize: '0.9rem', color: '#111' },
+  tradeName: { fontWeight: 700, fontSize: '0.9rem', color: 'var(--text-h)' },
   tradeType: { fontSize: '0.72rem', color: '#999', fontWeight: 500 },
   tradeRight: { display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '0.15rem' },
-  tradeValue: { fontWeight: 700, fontSize: '0.9rem', color: '#111' },
+  tradeValue: { fontWeight: 700, fontSize: '0.9rem', color: 'var(--text-h)' },
   tradePnl: { fontSize: '0.75rem', fontWeight: 600 },
   // bot stats
   botStatGrid: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.75rem', marginTop: '0.5rem' },
   botStatItem: {
-    background: '#fafafa',
+    background: 'var(--bg)',
     border: '1px solid rgba(0,0,0,0.06)',
     borderRadius: '10px',
     padding: '0.85rem',
     display: 'flex', flexDirection: 'column', gap: '0.25rem',
   },
-  botStatLabel: { fontSize: '0.7rem', color: '#888', textTransform: 'uppercase', letterSpacing: '0.08em', fontWeight: 500 },
-  botStatValue: { fontSize: '1.1rem', fontWeight: 800, color: '#111' },
+  botStatLabel: { fontSize: '0.7rem', color: 'var(--text)', textTransform: 'uppercase', letterSpacing: '0.08em', fontWeight: 500 },
+  botStatValue: { fontSize: '1.1rem', fontWeight: 800, color: 'var(--text-h)' },
   // Bottom row
   bottomRow: { display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '1.5rem' },
   logList: { display: 'flex', flexDirection: 'column', gap: '0', maxHeight: '200px', overflowY: 'auto' },
@@ -162,7 +162,7 @@ const styles = {
     padding: '0.6rem 0', borderBottom: '1px solid rgba(0,0,0,0.04)', fontSize: '0.8rem',
   },
   logTime: { color: '#bbb', fontWeight: 500, whiteSpace: 'nowrap', marginTop: '1px', fontSize: '0.72rem' },
-  logText: { color: '#555', lineHeight: 1.4 },
+  logText: { color: 'var(--text)', lineHeight: 1.4 },
 }
 
 const statCards = [
@@ -315,7 +315,7 @@ export default function Dashboard() {
 
           {/* Performance bars */}
           <div style={{ marginBottom: '0.5rem' }}>
-            <div style={{ fontSize: '0.78rem', color: '#888', marginBottom: '0.75rem', fontWeight: 500 }}>Daily Performance (last 12 hours)</div>
+            <div style={{ fontSize: '0.78rem', color: 'var(--text)', marginBottom: '0.75rem', fontWeight: 500 }}>Daily Performance (last 12 hours)</div>
             <div style={styles.miniChart}>
               {performanceBars.map((h, i) => (
                 <div
@@ -416,10 +416,10 @@ export default function Dashboard() {
             { label: 'Max Drawdown', value: '3.4%', color: '#f59e0b' },
             { label: 'Exposure', value: '62%', color: GOLD },
             { label: 'Free Capital', value: '$18,440', color: '#22c55e' },
-            { label: 'Risk/Trade', value: '1.5%', color: '#888' },
+            { label: 'Risk/Trade', value: '1.5%', color: 'var(--text)' },
           ].map((r, i) => (
             <div key={i} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '0.7rem 0', borderBottom: i < 3 ? '1px solid rgba(0,0,0,0.05)' : 'none' }}>
-              <span style={{ fontSize: '0.82rem', color: '#666' }}>{r.label}</span>
+              <span style={{ fontSize: '0.82rem', color: 'var(--text)' }}>{r.label}</span>
               <span style={{ fontSize: '0.92rem', fontWeight: 700, color: r.color }}>{r.value}</span>
             </div>
           ))}

@@ -1,4 +1,4 @@
-﻿import { useState } from 'react'
+﻿import { useState, useEffect } from 'react'
 import { Routes, Route, Navigate } from 'react-router-dom'
 import Header from './components/Header'
 import Footer from './components/Footer'
@@ -11,11 +11,12 @@ import SignalRadar from './pages/SignalRadar'
 import WebLock from './pages/WebLock'
 
 const LOCK_SESSION_KEY = 'cape_ui_unlocked'
+const DARK_MODE_KEY   = 'cape_ui_dark'
 
-function ProtectedShell({ activeTab, setActiveTab, onLogout }) {
+function ProtectedShell({ activeTab, setActiveTab, onLogout, darkMode, toggleDarkMode }) {
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', minHeight: '100vh', background: '#fff' }}>
-      <Header activeTab={activeTab} onTabChange={setActiveTab} onLogout={onLogout} />
+    <div style={{ display: 'flex', flexDirection: 'column', minHeight: '100vh', background: 'var(--bg)' }}>
+      <Header activeTab={activeTab} onTabChange={setActiveTab} onLogout={onLogout} darkMode={darkMode} toggleDarkMode={toggleDarkMode} />
       <main style={{ flex: 1, padding: '2rem', boxSizing: 'border-box' }}>
         <Routes>
           <Route path="/" element={<Navigate to="/dashboard" replace />} />
@@ -42,6 +43,33 @@ function App() {
       return false
     }
   })
+  const [darkMode, setDarkMode] = useState(() => {
+    try {
+      return localStorage.getItem(DARK_MODE_KEY) === '1'
+    } catch (_) {
+      return false
+    }
+  })
+  const [shellVisible, setShellVisible] = useState(true)
+
+  useEffect(() => {
+    if (darkMode) {
+      document.documentElement.setAttribute('data-dark', '')
+    } else {
+      document.documentElement.removeAttribute('data-dark')
+    }
+    try {
+      localStorage.setItem(DARK_MODE_KEY, darkMode ? '1' : '0')
+    } catch (_) {}
+  }, [darkMode])
+
+  const toggleDarkMode = () => {
+    setShellVisible(false)
+    setTimeout(() => {
+      setDarkMode(d => !d)
+      setShellVisible(true)
+    }, 160)
+  }
 
   const handleUnlock = () => {
     try {
@@ -71,7 +99,15 @@ function App() {
         path="*"
         element={
           isUnlocked
-            ? <ProtectedShell activeTab={activeTab} setActiveTab={setActiveTab} onLogout={handleLogout} />
+            ? (
+              <div style={{
+                opacity: shellVisible ? 1 : 0,
+                transition: 'opacity 0.18s ease',
+                willChange: 'opacity',
+              }}>
+                <ProtectedShell activeTab={activeTab} setActiveTab={setActiveTab} onLogout={handleLogout} darkMode={darkMode} toggleDarkMode={toggleDarkMode} />
+              </div>
+            )
             : <Navigate to="/lock" replace />
         }
       />

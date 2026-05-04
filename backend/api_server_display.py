@@ -47,7 +47,7 @@ _client: httpx.AsyncClient | None = None
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _client
-    _client = httpx.AsyncClient(base_url=TRADING_BASE, timeout=30.0)
+    _client = httpx.AsyncClient(base_url=TRADING_BASE, timeout=60.0)
     yield
     await _client.aclose()
     _client = None

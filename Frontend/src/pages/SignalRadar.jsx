@@ -26,7 +26,7 @@ const STATUS_CONFIG = {
   PUT_WARMING:  { color: '#ef4444', bg: 'rgba(239,68,68,0.08)',  text: 'PUT Warming',   pulse: false },
   BUILDING:     { color: '#f59e0b', bg: 'rgba(245,158,11,0.08)', text: 'Building',      pulse: false },
   SCANNING:     { color: '#888',    bg: 'rgba(0,0,0,0.04)',      text: 'Scanning...',   pulse: false },
-  OFF:          { color: '#666',    bg: 'rgba(0,0,0,0.04)',      text: 'Offline',       pulse: false },
+  OFF:          { color: 'var(--text)',    bg: 'rgba(0,0,0,0.04)',      text: 'Offline',       pulse: false },
   ERROR:        { color: '#ef4444', bg: 'rgba(239,68,68,0.06)',  text: 'Error',         pulse: false },
   NO_DATA:      { color: '#888',    bg: 'rgba(0,0,0,0.04)',      text: 'No Data',       pulse: false },
 }
@@ -133,7 +133,7 @@ function FilterChecklist({ filters, direction }) {
               : <XCircle size={13} color="#ccc" />
             }
             <span style={{
-              fontSize: '0.72rem', fontWeight: 600, color: '#555',
+              fontSize: '0.72rem', fontWeight: 600, color: 'var(--text)',
               minWidth: '70px', display: 'flex', alignItems: 'center', gap: '0.3rem',
             }}>
               {labels[key]}
@@ -271,7 +271,7 @@ function SymbolCard({ data, onModeChange }) {
 
   return (
     <div style={{
-      background: '#fff',
+      background: 'var(--card-bg)',
       border: `1px solid ${isOff ? 'rgba(0,0,0,0.06)' : 'rgba(201,162,39,0.12)'}`,
       borderRadius: '16px',
       overflow: 'hidden',
@@ -301,7 +301,7 @@ function SymbolCard({ data, onModeChange }) {
         {/* Symbol + Mode */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: '0.3rem', minWidth: '90px' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-            <span style={{ fontSize: '1.3rem', fontWeight: 800, color: '#111' }}>{data.symbol}</span>
+            <span style={{ fontSize: '1.3rem', fontWeight: 800, color: 'var(--text-h)' }}>{data.symbol}</span>
             {statusConf.pulse && (
               <span style={{
                 width: '8px', height: '8px', borderRadius: '50%',
@@ -325,7 +325,7 @@ function SymbolCard({ data, onModeChange }) {
         {/* Price */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: '0.15rem', minWidth: '80px' }}>
           <span style={{ fontSize: '0.65rem', color: '#999', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Price</span>
-          <span style={{ fontSize: '1.1rem', fontWeight: 700, color: '#111' }}>
+          <span style={{ fontSize: '1.1rem', fontWeight: 700, color: 'var(--text-h)' }}>
             {data.price != null ? `$${data.price.toFixed(2)}` : '—'}
           </span>
         </div>
@@ -388,7 +388,7 @@ function SymbolCard({ data, onModeChange }) {
           ))}
           {Array.isArray(data.entry_strategies) && data.entry_strategies.length > 0 && (
             <div style={{ marginTop: '0.25rem', textAlign: 'right' }}>
-              <div style={{ fontSize: '0.62rem', color: '#666', fontWeight: 700 }}>Used by</div>
+              <div style={{ fontSize: '0.62rem', color: 'var(--text)', fontWeight: 700 }}>Used by</div>
               <div style={{ display: 'flex', gap: '0.35rem', justifyContent: 'flex-end', marginTop: '0.25rem' }}>
                 {data.entry_strategies.map((id) => {
                   const m = STRATEGIES_META.find(x => x.id === id)
@@ -471,7 +471,7 @@ function SymbolCard({ data, onModeChange }) {
             borderTop: '1px dashed rgba(0,0,0,0.04)',
             marginTop: '0.4rem',
           }}>
-            <div style={{ fontSize: '0.72rem', fontWeight: 700, color: '#666', marginBottom: '0.5rem' }}>Strategy Forming</div>
+            <div style={{ fontSize: '0.72rem', fontWeight: 700, color: 'var(--text)', marginBottom: '0.5rem' }}>Strategy Forming</div>
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: '0.45rem' }}>
               {STRATEGIES_META.map(s => {
                 const formingKey = `${s.key}_forming`;
@@ -512,8 +512,8 @@ function SymbolCard({ data, onModeChange }) {
             {[
               { label: 'RSI', value: data.rsi?.toFixed(1), color: data.rsi >= 35 && data.rsi <= 58 ? '#22c55e' : '#ef4444' },
               { label: 'RSI Gap', value: data.rsi_gap != null ? `${data.rsi_gap >= 0 ? '+' : ''}${data.rsi_gap.toFixed(1)}` : '—', color: data.rsi_gap >= 3.0 ? '#22c55e' : data.rsi_gap >= 1.5 ? '#f59e0b' : '#ef4444' },
-              { label: 'EMA9', value: data.ema_fast ? `$${data.ema_fast.toFixed(2)}` : '—', color: '#111' },
-              { label: 'EMA21', value: data.ema_slow ? `$${data.ema_slow.toFixed(2)}` : '—', color: '#111' },
+              { label: 'EMA9', value: data.ema_fast ? `$${data.ema_fast.toFixed(2)}` : '—', color: 'var(--text-h)' },
+              { label: 'EMA21', value: data.ema_slow ? `$${data.ema_slow.toFixed(2)}` : '—', color: 'var(--text-h)' },
               { label: 'EMA55', value: data.ema_third ? `$${data.ema_third.toFixed(2)}` : '—', color: data.ema_triple_bull ? '#22c55e' : data.ema_triple_bear ? '#ef4444' : '#888' },
               { label: 'Momentum Δ', value: data.rsi_delta != null ? `${data.rsi_delta >= 0 ? '+' : ''}${data.rsi_delta.toFixed(1)}` : '—', color: Math.abs(data.rsi_delta ?? 0) >= 4.0 ? '#22c55e' : '#f59e0b' },
               { label: 'Volume', value: data.volume_ratio != null ? `${data.volume_ratio.toFixed(1)}x` : '—', color: (data.volume_ratio ?? 0) >= 2.0 ? '#22c55e' : (data.volume_ratio ?? 0) >= 1.2 ? '#f59e0b' : '#ef4444' },
@@ -643,7 +643,7 @@ function Heatmap({ symbols }) {
             minWidth: '60px',
             transition: 'all 0.4s ease',
           }}>
-            <span style={{ fontSize: '0.78rem', fontWeight: 700, color: '#111' }}>{s.symbol}</span>
+            <span style={{ fontSize: '0.78rem', fontWeight: 700, color: 'var(--text-h)' }}>{s.symbol}</span>
             <span style={{
               fontSize: '0.9rem', fontWeight: 800,
               color: score >= 70 ? (side === 'call' ? '#16a34a' : '#dc2626') : '#888',
@@ -797,11 +797,11 @@ export default function SignalRadar() {
 
         <div style={{ display: 'flex', gap: '2rem', zIndex: 1, alignItems: 'center' }}>
           <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '0.2rem' }}>
-            <span style={{ fontSize: '0.7rem', color: '#666', textTransform: 'uppercase', letterSpacing: '0.1em' }}>Hot Signals</span>
+            <span style={{ fontSize: '0.7rem', color: 'var(--text)', textTransform: 'uppercase', letterSpacing: '0.1em' }}>Hot Signals</span>
             <span style={{ fontSize: '1.5rem', fontWeight: 800, color: hotCount > 0 ? '#22c55e' : '#555' }}>{hotCount}</span>
           </div>
           <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '0.2rem' }}>
-            <span style={{ fontSize: '0.7rem', color: '#666', textTransform: 'uppercase', letterSpacing: '0.1em' }}>Ready</span>
+            <span style={{ fontSize: '0.7rem', color: 'var(--text)', textTransform: 'uppercase', letterSpacing: '0.1em' }}>Ready</span>
             <span style={{ fontSize: '1.5rem', fontWeight: 800, color: readyCount > 0 ? GOLD : '#555' }}>{readyCount}</span>
           </div>
           <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', alignItems: 'flex-end' }}>
@@ -848,7 +848,7 @@ export default function SignalRadar() {
                   </button>
             </div>
             {lastUpdate && (
-              <span style={{ fontSize: '0.6rem', color: '#555' }}>
+              <span style={{ fontSize: '0.6rem', color: 'var(--text)' }}>
                 Updated {lastUpdate.toLocaleTimeString()}
               </span>
             )}
@@ -859,21 +859,21 @@ export default function SignalRadar() {
       {/* Quick legend */}
       <div style={{ padding: '0.6rem 1rem', display: 'flex', gap: '0.6rem', alignItems: 'center', marginBottom: '0.75rem' }}>
         <div style={{ display: 'flex', gap: '0.4rem', alignItems: 'center' }}>
-          <span style={{ fontSize: '0.68rem', color: '#666', fontWeight: 700, marginRight: '0.6rem' }}>Legend</span>
+          <span style={{ fontSize: '0.68rem', color: 'var(--text)', fontWeight: 700, marginRight: '0.6rem' }}>Legend</span>
           <span style={{ padding: '0.25rem 0.6rem', borderRadius: '8px', background: 'rgba(34,197,94,0.12)', color: '#16a34a', fontWeight: 700 }}>CALL READY</span>
           <span style={{ padding: '0.25rem 0.6rem', borderRadius: '8px', background: 'rgba(239,68,68,0.12)', color: '#dc2626', fontWeight: 700 }}>PUT READY</span>
           <span style={{ padding: '0.25rem 0.6rem', borderRadius: '8px', background: 'rgba(245,158,11,0.10)', color: '#92400e', fontWeight: 700 }}>Warming / Building</span>
-          <span style={{ padding: '0.25rem 0.6rem', borderRadius: '8px', background: 'rgba(0,0,0,0.04)', color: '#666', fontWeight: 700 }}>Scanning</span>
+          <span style={{ padding: '0.25rem 0.6rem', borderRadius: '8px', background: 'rgba(0,0,0,0.04)', color: 'var(--text)', fontWeight: 700 }}>Scanning</span>
         </div>
       </div>
 
       {/* Help overlay */}
       {showHelp && (
         <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.45)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 60 }} onClick={() => setShowHelp(false)}>
-          <div onClick={(e) => e.stopPropagation()} style={{ width: '840px', maxWidth: '92%', background: '#fff', borderRadius: '12px', padding: '1.25rem', boxShadow: '0 20px 60px rgba(0,0,0,0.3)' }}>
+          <div onClick={(e) => e.stopPropagation()} style={{ width: '840px', maxWidth: '92%', background: 'var(--card-bg)', borderRadius: '12px', padding: '1.25rem', boxShadow: '0 20px 60px rgba(0,0,0,0.3)' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.5rem' }}>
               <div style={{ fontSize: '1.05rem', fontWeight: 800 }}>Signal Radar — Quick Help</div>
-              <button onClick={() => setShowHelp(false)} style={{ border: 'none', background: 'transparent', cursor: 'pointer', color: '#666', fontWeight: 700 }}>Close</button>
+              <button onClick={() => setShowHelp(false)} style={{ border: 'none', background: 'transparent', cursor: 'pointer', color: 'var(--text)', fontWeight: 700 }}>Close</button>
             </div>
             <div style={{ color: '#444', lineHeight: 1.5 }}>
               <ul>
@@ -918,7 +918,7 @@ export default function SignalRadar() {
       ) : symbols.length === 0 ? (
         <div style={{ textAlign: 'center', padding: '4rem', color: '#888' }}>
           <Crosshair size={48} color={GOLD} style={{ opacity: 0.3 }} />
-          <p style={{ marginTop: '1rem', fontSize: '1rem', fontWeight: 600, color: '#555' }}>No Symbols Configured</p>
+          <p style={{ marginTop: '1rem', fontSize: '1rem', fontWeight: 600, color: 'var(--text)' }}>No Symbols Configured</p>
           <p style={{ fontSize: '0.85rem' }}>Add symbols to your watchlist to start tracking signals</p>
         </div>
       ) : (

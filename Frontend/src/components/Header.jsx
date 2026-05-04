@@ -1,11 +1,11 @@
 import React, { useState, useRef, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Settings, Bell, X, TrendingUp, Lock, DollarSign, LogOut } from 'lucide-react'
+import { Settings, Bell, X, TrendingUp, Lock, DollarSign, LogOut, Sun, Moon } from 'lucide-react'
 import logo from '../assets/logo.png'
 
 const styles = {
   header: {
-    background: '#ffffff',
+    background: 'var(--bg)',
     borderBottom: '1px solid rgba(201,162,39,0.15)',
     boxShadow: '0 4px 16px rgba(201,162,39,0.08)',
     position: 'sticky',
@@ -50,7 +50,7 @@ const styles = {
     fontWeight: 900,
     letterSpacing: '0.12em',
     textTransform: 'uppercase',
-    color: '#000000',
+    color: 'var(--text-h)',
   },
   brandTagline: {
     fontSize: '0.69rem',
@@ -74,7 +74,7 @@ const styles = {
   },
   navItem: {
     cursor: 'pointer',
-    color: '#666',
+    color: 'var(--text)',
     fontWeight: 500,
     fontSize: '0.85rem',
     transition: 'all 0.3s ease',
@@ -103,7 +103,7 @@ const styles = {
     alignItems: 'center',
     justifyContent: 'center',
     transition: 'all 0.3s ease',
-    color: '#666',
+    color: 'var(--text)',
     position: 'relative',
   },
   notificationBadge: {
@@ -126,7 +126,7 @@ const styles = {
     top: '100%',
     right: '0',
     marginTop: '0.5rem',
-    background: '#ffffff',
+    background: 'var(--bg)',
     border: '1px solid rgba(0,0,0,0.08)',
     borderRadius: '12px',
     boxShadow: '0 8px 32px rgba(0,0,0,0.12)',
@@ -144,7 +144,7 @@ const styles = {
   notificationTitle: {
     fontSize: '1rem',
     fontWeight: 700,
-    color: '#000',
+    color: 'var(--text-h)',
   },
   notificationCloseBtn: {
     background: 'transparent',
@@ -154,7 +154,7 @@ const styles = {
     display: 'flex',
     alignItems: 'center',
     justifyContent: 'center',
-    color: '#666',
+    color: 'var(--text)',
     transition: 'all 0.2s ease',
   },
   notificationList: {
@@ -191,11 +191,11 @@ const styles = {
   notificationItemTitle: {
     fontSize: '0.95rem',
     fontWeight: 600,
-    color: '#000',
+    color: 'var(--text-h)',
   },
   notificationItemText: {
     fontSize: '0.85rem',
-    color: '#666',
+    color: 'var(--text)',
     lineHeight: 1.4,
   },
   notificationTime: {
@@ -212,7 +212,7 @@ const styles = {
     alignItems: 'center',
     justifyContent: 'center',
     transition: 'all 0.3s ease',
-    color: '#666',
+    color: 'var(--text)',
     borderRadius: '8px',
   },
   settingsButtonHover: {
@@ -235,7 +235,7 @@ const styles = {
   },
 }
 
-function Header({ activeTab, onTabChange, onLogout }) {
+function Header({ activeTab, onTabChange, onLogout, darkMode, toggleDarkMode }) {
   const navigate = useNavigate()
   const [brandHover, setBrandHover] = useState(false)
   const [settingsHover, setSettingsHover] = useState(false)
@@ -330,12 +330,12 @@ function Header({ activeTab, onTabChange, onLogout }) {
                 onClick={() => handleTabChange(item.id, item.route)}
                 onMouseEnter={(e) => {
                   if (activeTab !== item.id) {
-                    e.currentTarget.style.color = '#000'
+                    e.currentTarget.style.color = darkMode ? '#e8e8e8' : '#000'
                   }
                 }}
                 onMouseLeave={(e) => {
                   if (activeTab !== item.id) {
-                    e.currentTarget.style.color = '#666'
+                    e.currentTarget.style.color = 'var(--text)'
                   }
                 }}
               >
@@ -344,85 +344,42 @@ function Header({ activeTab, onTabChange, onLogout }) {
             ))}
           </ul>
           <div style={styles.rightSection}>
-          <div style={{ position: 'relative' }} ref={notificationRef}>
+         
+          {/* Dark mode toggle */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+            <Sun size={13} color={darkMode ? '#666' : '#C9A227'} />
             <button
-              style={styles.notificationButton}
-              title="Notifications"
-              onClick={() => setNotificationOpen(!notificationOpen)}
-              onMouseEnter={(e) => {
-                e.currentTarget.style.color = '#000'
-                e.currentTarget.style.transform = 'scale(1.1)'
-              }}
-              onMouseLeave={(e) => {
-                e.currentTarget.style.color = '#666'
-                e.currentTarget.style.transform = 'scale(1)'
+              onClick={toggleDarkMode}
+              title={darkMode ? 'Switch to light mode' : 'Switch to dark mode'}
+              style={{
+                position: 'relative',
+                width: '40px',
+                height: '22px',
+                borderRadius: '11px',
+                background: darkMode ? '#C9A227' : '#e8e3d8',
+                border: 'none',
+                cursor: 'pointer',
+                padding: 0,
+                transition: 'background 0.3s ease',
+                flexShrink: 0,
               }}
             >
-              <Bell size={22} />
-              {notificationCount > 0 && (
-                <div style={styles.notificationBadge}>{notificationCount}</div>
-              )}
+              <span style={{
+                position: 'absolute',
+                top: '2px',
+                left: darkMode ? '20px' : '2px',
+                width: '18px',
+                height: '18px',
+                borderRadius: '50%',
+                background: '#ffffff',
+                transition: 'left 0.25s ease',
+                boxShadow: '0 1px 3px rgba(0,0,0,0.25)',
+                display: 'block',
+              }} />
             </button>
-
-            {notificationOpen && (
-              <div style={styles.notificationDropdown}>
-                <div style={styles.notificationHeader}>
-                  <span style={styles.notificationTitle}>Notifications</span>
-                  <button
-                    style={styles.notificationCloseBtn}
-                    onClick={() => setNotificationOpen(false)}
-                    onMouseEnter={(e) => (e.currentTarget.style.color = '#000')}
-                    onMouseLeave={(e) => (e.currentTarget.style.color = '#666')}
-                  >
-                    <X size={20} />
-                  </button>
-                </div>
-                <div style={styles.notificationList}>
-                  {notifications.map((notif) => {
-                    const IconComponent = notif.icon
-                    return (
-                      <div
-                        key={notif.id}
-                        style={{
-                          ...styles.notificationItem,
-                          ...(hoveredNotif === notif.id ? styles.notificationItemHover : {}),
-                        }}
-                        onMouseEnter={() => setHoveredNotif(notif.id)}
-                        onMouseLeave={() => setHoveredNotif(null)}
-                      >
-                        <div style={styles.notificationItemIcon}>
-                          <IconComponent size={20} color="#000" strokeWidth={1.5} />
-                        </div>
-                        <div style={styles.notificationContent}>
-                          <div style={styles.notificationItemTitle}>{notif.title}</div>
-                          <div style={styles.notificationItemText}>{notif.text}</div>
-                          <div style={styles.notificationTime}>{notif.time}</div>
-                        </div>
-                      </div>
-                    )
-                  })}
-                </div>
-              </div>
-            )}
+            <Moon size={13} color={darkMode ? '#C9A227' : '#999'} />
           </div>
-          <button
-            style={{
-              ...styles.settingsButton,
-              ...(settingsHover ? styles.settingsButtonHover : {}),
-            }}
-            onClick={() => navigate('/profile')}
-            onMouseEnter={(e) => {
-              setSettingsHover(true)
-              e.currentTarget.style.transform = 'rotate(20deg) scale(1.1)'
-            }}
-            onMouseLeave={(e) => {
-              setSettingsHover(false)
-              e.currentTarget.style.transform = 'none'
-            }}
-            title="Go to Profile"
-          >
-            <Settings size={22} />
-          </button>
+          
           <button
             style={styles.logoutButton}
             onClick={handleLogoutClick}

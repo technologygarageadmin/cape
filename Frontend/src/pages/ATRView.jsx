@@ -12,7 +12,7 @@ const GOLD_DEEP = '#A07C10'
 const styles = {
   page: {
     minHeight: '100vh',
-    background: '#ffffff',
+    background: 'var(--bg)',
     display: 'flex',
     padding: '0',
     position: 'relative',
@@ -23,7 +23,7 @@ const styles = {
     top: '80px',
     bottom: '0',
     width: '280px',
-    background: '#ffffff',
+    background: 'var(--bg)',
     borderRight: `1px solid rgba(201,162,39,0.15)`,
     padding: '2rem 1.25rem 2rem 1.25rem',
     transition: 'transform 0.35s cubic-bezier(0.4, 0, 0.2, 1)',
@@ -60,7 +60,7 @@ const styles = {
   sidebarLogoText: {
     fontSize: '0.9rem',
     fontWeight: 800,
-    color: '#111',
+    color: 'var(--text-h)',
     letterSpacing: '0.08em',
     textTransform: 'uppercase',
   },
@@ -80,7 +80,7 @@ const styles = {
     gap: '0.6rem',
     fontSize: '0.88rem',
     fontWeight: 700,
-    color: '#111',
+    color: 'var(--text-h)',
     boxShadow: `0 4px 14px rgba(201,162,39,0.35)`,
     letterSpacing: '0.03em',
   },
@@ -98,7 +98,7 @@ const styles = {
     display: 'flex',
     alignItems: 'center',
     justifyContent: 'center',
-    color: '#111',
+    color: 'var(--text-h)',
     boxShadow: `2px 4px 14px rgba(201,162,39,0.3)`,
     willChange: 'transform',
   },
@@ -124,11 +124,11 @@ const styles = {
     borderRadius: '8px',
     fontSize: '0.85rem',
     fontWeight: 500,
-    color: '#333',
+    color: 'var(--text-h)',
     marginBottom: '0.6rem',
     transition: 'all 0.2s ease',
     outline: 'none',
-    background: '#fff',
+    background: 'var(--card-bg)',
   },
   marketToggle: {
     display: 'flex',
@@ -149,11 +149,11 @@ const styles = {
     fontWeight: 600,
     transition: 'all 0.2s ease',
     background: 'transparent',
-    color: '#888',
+    color: 'var(--text)',
   },
   marketBtnActive: {
     background: `linear-gradient(135deg, ${GOLD} 0%, ${GOLD_LIGHT} 100%)`,
-    color: '#111',
+    color: 'var(--text-h)',
     boxShadow: `0 2px 8px rgba(201,162,39,0.3)`,
   },
   mainContent: {
@@ -176,7 +176,7 @@ const styles = {
   title: {
     fontSize: '1.9rem',
     fontWeight: 800,
-    color: '#111',
+    color: 'var(--text-h)',
     marginBottom: '0.3rem',
     lineHeight: 1.1,
   },
@@ -185,7 +185,7 @@ const styles = {
   },
   subtitle: {
     fontSize: '0.875rem',
-    color: '#888',
+    color: 'var(--text)',
   },
   // Stats summary row
   statsRow: {
@@ -195,7 +195,7 @@ const styles = {
     marginBottom: '1.5rem',
   },
   statCard: {
-    background: '#fff',
+    background: 'var(--card-bg)',
     border: `1px solid rgba(201,162,39,0.15)`,
     borderRadius: '12px',
     padding: '1.1rem 1.25rem',
@@ -216,7 +216,7 @@ const styles = {
   },
   statInfo: { display: 'flex', flexDirection: 'column', gap: '0.15rem' },
   statLabel: { fontSize: '0.7rem', color: '#aaa', textTransform: 'uppercase', letterSpacing: '0.08em', fontWeight: 500 },
-  statValue: { fontSize: '1.1rem', fontWeight: 800, color: '#111', lineHeight: 1 },
+  statValue: { fontSize: '1.1rem', fontWeight: 800, color: 'var(--text-h)', lineHeight: 1 },
   // Search bar
   searchBar: {
     display: 'flex',
@@ -232,9 +232,9 @@ const styles = {
     border: `1.5px solid rgba(201,162,39,0.2)`,
     borderRadius: '10px',
     fontSize: '0.88rem',
-    color: '#333',
+    color: 'var(--text-h)',
     outline: 'none',
-    background: '#fff',
+    background: 'var(--card-bg)',
     transition: 'all 0.2s ease',
     fontWeight: 500,
   },
@@ -256,7 +256,7 @@ const styles = {
     alignItems: 'center',
     gap: '1.25rem',
     fontSize: '0.82rem',
-    color: '#888',
+    color: 'var(--text)',
     whiteSpace: 'nowrap',
   },
   refreshChip: {
@@ -272,7 +272,7 @@ const styles = {
     color: GOLD_DEEP,
   },
   tableSection: {
-    background: '#ffffff',
+    background: 'var(--card-bg)',
     border: `1px solid rgba(201,162,39,0.12)`,
     borderRadius: '14px',
     overflow: 'hidden',
@@ -316,12 +316,12 @@ const styles = {
   tableCell: {
     padding: '0.85rem 1rem',
     fontSize: '0.875rem',
-    color: '#444',
+    color: 'var(--text)',
     whiteSpace: 'nowrap',
   },
   symbol: {
     fontWeight: 700,
-    color: '#111',
+    color: 'var(--text-h)',
     fontSize: '0.9rem',
   },
   typeBadge: {
@@ -798,7 +798,7 @@ function ATRView() {
                     padding: '0.65rem 0.9rem',
                     borderRadius: '8px',
                     border: viewType === type.id ? `1.5px solid ${GOLD}` : '1.5px solid rgba(0,0,0,0.07)',
-                    background: viewType === type.id ? `rgba(201,162,39,0.08)` : '#fff',
+                    background: viewType === type.id ? `rgba(201,162,39,0.08)` : 'var(--card-bg)',
                     color: viewType === type.id ? '#111' : '#666',
                     fontWeight: viewType === type.id ? 700 : 500,
                     fontSize: '0.85rem',
@@ -942,7 +942,7 @@ function ATRView() {
                       bottom: '2rem',
                       right: '2rem',
                       background: `linear-gradient(135deg, ${GOLD} 0%, ${GOLD_LIGHT} 100%)`,
-                      color: '#111',
+                      color: 'var(--text-h)',
                       padding: '0.7rem 1.25rem',
                       borderRadius: '10px',
                       fontSize: '0.82rem',
@@ -1049,7 +1049,7 @@ function ATRView() {
                       <td style={styles.tableCell}>${ask.toFixed(4)}</td>
                       <td style={styles.tableCell}>
                         <div style={styles.atrBar}>
-                          <span style={{ fontWeight: 600, color: '#333', minWidth: '60px' }}>{row.atr?.toFixed(4)}</span>
+                          <span style={{ fontWeight: 600, color: 'var(--text-h)', minWidth: '60px' }}>{row.atr?.toFixed(4)}</span>
                           <div style={styles.atrBarTrack}>
                             <div style={{ ...styles.atrBarFill, width: `${atrWidth}%` }} />
                           </div>
@@ -1065,7 +1065,7 @@ function ATRView() {
                               gap: '0.4rem',
                               padding: '0.45rem 0.9rem',
                               background: `linear-gradient(135deg, ${GOLD} 0%, ${GOLD_LIGHT} 100%)`,
-                              color: '#111',
+                              color: 'var(--text-h)',
                               border: 'none',
                               borderRadius: '7px',
                               cursor: 'pointer',
@@ -1114,7 +1114,7 @@ function ATRView() {
                   fontSize: '0.9rem',
                 }}>
                   <Search size={28} style={{ margin: '0 auto 0.75rem', opacity: 0.35, display: 'block', color: GOLD }} />
-                  <p style={{ fontWeight: 600, color: '#888' }}>No symbols match &ldquo;<span style={{ color: '#111' }}>{searchTerm}</span>&rdquo;</p>
+                  <p style={{ fontWeight: 600, color: 'var(--text)' }}>No symbols match &ldquo;<span style={{ color: 'var(--text-h)' }}>{searchTerm}</span>&rdquo;</p>
                   <p style={{ fontSize: '0.8rem', marginTop: '0.35rem' }}>Try a different search term</p>
                 </div>
               )}

@@ -67,10 +67,10 @@ const styles = {
   bannerLeft: { display: 'flex', flexDirection: 'column', gap: '0.5rem', zIndex: 1 },
   bannerTitle: { fontSize: '1.8rem', fontWeight: 800, color: '#fff', lineHeight: 1.1 },
   bannerAccent: { color: GOLD },
-  bannerSub: { fontSize: '0.8rem', color: '#888', letterSpacing: '0.12em', textTransform: 'uppercase', fontWeight: 500 },
+  bannerSub: { fontSize: '0.8rem', color: 'var(--text)', letterSpacing: '0.12em', textTransform: 'uppercase', fontWeight: 500 },
   bannerRight: { display: 'flex', gap: '2rem', zIndex: 1 },
   bannerStat: { display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '0.2rem' },
-  bannerStatLabel: { fontSize: '0.7rem', color: '#666', textTransform: 'uppercase', letterSpacing: '0.1em' },
+  bannerStatLabel: { fontSize: '0.7rem', color: 'var(--text)', textTransform: 'uppercase', letterSpacing: '0.1em' },
   bannerStatValue: { fontSize: '1.5rem', fontWeight: 800, color: GOLD },
   refreshBtn: {
     background: 'rgba(201,162,39,0.15)',
@@ -87,7 +87,7 @@ const styles = {
     transition: 'all 0.2s ease',
   },
   card: {
-    background: '#fff',
+    background: 'var(--card-bg)',
     border: '1px solid rgba(201,162,39,0.12)',
     borderRadius: '14px',
     padding: '1.5rem',
@@ -106,7 +106,7 @@ const styles = {
   symbolBadge: {
     fontSize: '1.1rem',
     fontWeight: 800,
-    color: '#111',
+    color: 'var(--text-h)',
   },
   signalBadge: {
     padding: '0.2rem 0.6rem',
@@ -147,7 +147,7 @@ const styles = {
   sectionTitle: {
     fontSize: '0.72rem',
     fontWeight: 700,
-    color: '#888',
+    color: 'var(--text)',
     textTransform: 'uppercase',
     letterSpacing: '0.1em',
     marginBottom: '0.75rem',
@@ -195,7 +195,7 @@ const styles = {
   gaugeLabel: {
     fontSize: '0.68rem',
     fontWeight: 600,
-    color: '#888',
+    color: 'var(--text)',
     textTransform: 'uppercase',
     letterSpacing: '0.08em',
   },
@@ -222,7 +222,7 @@ const styles = {
   },
   noteItem: {
     fontSize: '0.78rem',
-    color: '#555',
+    color: 'var(--text)',
     display: 'flex',
     alignItems: 'center',
     gap: '0.4rem',
@@ -247,7 +247,7 @@ const styles = {
   },
   qualityNote: {
     fontSize: '0.75rem',
-    color: '#666',
+    color: 'var(--text)',
     marginTop: '0.3rem',
   },
   // Exit reason box
@@ -267,7 +267,7 @@ const styles = {
   },
   exitDesc: {
     fontSize: '0.78rem',
-    color: '#666',
+    color: 'var(--text)',
     lineHeight: 1.5,
   },
   // PnL bar
@@ -308,8 +308,8 @@ const styles = {
     gap: '0.15rem',
     alignItems: 'center',
   },
-  priceLabel: { fontSize: '0.65rem', color: '#888', textTransform: 'uppercase', letterSpacing: '0.05em', fontWeight: 600 },
-  priceValue: { fontSize: '0.95rem', fontWeight: 700, color: '#111' },
+  priceLabel: { fontSize: '0.65rem', color: 'var(--text)', textTransform: 'uppercase', letterSpacing: '0.05em', fontWeight: 600 },
+  priceValue: { fontSize: '0.95rem', fontWeight: 700, color: 'var(--text-h)' },
   bracketGrid: {
     display: 'grid',
     gridTemplateColumns: 'repeat(3, 1fr)',
@@ -335,14 +335,14 @@ const styles = {
   bracketValue: {
     fontSize: '0.75rem',
     fontWeight: 700,
-    color: '#333',
+    color: 'var(--text-h)',
     wordBreak: 'break-word',
   },
   // Empty state
   empty: {
     textAlign: 'center',
     padding: '4rem 2rem',
-    color: '#888',
+    color: 'var(--text)',
   },
   emptyIcon: {
     width: '64px',
@@ -354,8 +354,8 @@ const styles = {
     alignItems: 'center',
     justifyContent: 'center',
   },
-  emptyTitle: { fontSize: '1.2rem', fontWeight: 700, color: '#333', marginBottom: '0.5rem' },
-  emptyText: { fontSize: '0.85rem', color: '#888' },
+  emptyTitle: { fontSize: '1.2rem', fontWeight: 700, color: 'var(--text-h)', marginBottom: '0.5rem' },
+  emptyText: { fontSize: '0.85rem', color: 'var(--text)' },
   // Live dot
   liveDot: {
     width: '8px',
@@ -434,7 +434,7 @@ function ThresholdGauges({ live }) {
       </div>
       <div style={styles.gaugeItem}>
         <span style={styles.gaugeLabel}>Current Price</span>
-        <span style={{ ...styles.gaugeValue, color: '#111' }}>${parseFloat(live.current_price || 0).toFixed(4)}</span>
+        <span style={{ ...styles.gaugeValue, color: 'var(--text-h)' }}>${parseFloat(live.current_price || 0).toFixed(4)}</span>
       </div>
     </div>
   )
@@ -559,7 +559,7 @@ function ExitForecast({ pos, live }) {
             <t.Icon size={14} color={t.color} />
             <div style={{ display: 'flex', flexDirection: 'column', gap: '0.08rem' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
-                <span style={{ fontSize: '0.74rem', fontWeight: 700, color: '#333' }}>{t.label}</span>
+                <span style={{ fontSize: '0.74rem', fontWeight: 700, color: 'var(--text-h)' }}>{t.label}</span>
                 <span style={{
                   fontSize: '0.56rem', fontWeight: 700, padding: '0.06rem 0.3rem',
                   borderRadius: '4px', textTransform: 'uppercase', letterSpacing: '0.05em',
@@ -569,7 +569,7 @@ function ExitForecast({ pos, live }) {
                   {t.urgent ? 'TRIGGERED' : t.armed ? 'ARMED' : 'WAITING'}
                 </span>
               </div>
-              <span style={{ fontSize: '0.66rem', color: '#888' }}>{t.sub}</span>
+              <span style={{ fontSize: '0.66rem', color: 'var(--text)' }}>{t.sub}</span>
               {t.note && <span style={{ fontSize: '0.64rem', color: t.color, fontStyle: 'italic' }}>{t.note}</span>}
             </div>
           </div>
@@ -605,7 +605,7 @@ function PositionCard({ pos }) {
       ...styles.card,
       borderLeft: `4px solid ${hasExitReason ? '#9ca3af' : pnl >= 0 ? '#22c55e' : '#ef4444'}`,
       opacity: hasExitReason ? 0.85 : 1,
-      background: hasExitReason ? '#fafafa' : '#fff',
+      background: 'var(--card-bg)',
     }}>
       {/* ── Status Banner ── */}
       {hasExitReason ? (
@@ -631,7 +631,7 @@ function PositionCard({ pos }) {
             </span>
             <span style={{
               padding: '0.15rem 0.5rem', borderRadius: '6px', fontSize: '0.68rem', fontWeight: 600,
-              background: 'rgba(0,0,0,0.06)', color: '#555',
+              background: 'rgba(0,0,0,0.06)', color: 'var(--text)',
             }}>
               {exitReasonLabel || 'Unknown'}
             </span>
@@ -754,7 +754,7 @@ function PositionCard({ pos }) {
                   fontWeight: 700,
                   textTransform: 'uppercase',
                   letterSpacing: '0.08em',
-                  color: '#888',
+                  color: 'var(--text)',
                   marginBottom: '0.45rem',
                 }}>
                   Tick Details (TP/SL change log)
@@ -764,7 +764,7 @@ function PositionCard({ pos }) {
                     <thead>
                       <tr style={{ background: '#fdfaf4', position: 'sticky', top: 0, zIndex: 1 }}>
                         {['Time', 'Source', 'Price', 'PnL%', 'Peak%', 'Peak Price', 'TP', 'SL', 'SL Update', 'SL Order'].map((h) => (
-                          <th key={h} style={{ padding: '0.32rem 0.45rem', textAlign: 'left', color: '#777', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.04em', borderBottom: '1px solid rgba(0,0,0,0.08)' }}>{h}</th>
+                          <th key={h} style={{ padding: '0.32rem 0.45rem', textAlign: 'left', color: 'var(--text)', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.04em', borderBottom: '1px solid rgba(0,0,0,0.08)' }}>{h}</th>
                         ))}
                       </tr>
                     </thead>
@@ -777,14 +777,14 @@ function PositionCard({ pos }) {
                           ? fillPx * (1 + peakPct / 100)
                           : null
                         return (
-                          <tr key={idx} style={{ borderBottom: '1px solid rgba(0,0,0,0.04)', background: idx % 2 === 0 ? '#fff' : '#fcfcfc' }}>
-                            <td style={{ padding: '0.3rem 0.45rem', fontFamily: 'monospace', color: '#555' }}>{fmtTickTime(tick.ts)}</td>
-                            <td style={{ padding: '0.3rem 0.45rem', color: '#666', textTransform: 'uppercase', fontWeight: 700 }}>{tick.source || 'tick'}</td>
+                          <tr key={idx} style={{ borderBottom: '1px solid rgba(0,0,0,0.04)', background: 'var(--card-bg)' }}>
+                            <td style={{ padding: '0.3rem 0.45rem', fontFamily: 'monospace', color: 'var(--text)' }}>{fmtTickTime(tick.ts)}</td>
+                            <td style={{ padding: '0.3rem 0.45rem', color: 'var(--text)', textTransform: 'uppercase', fontWeight: 700 }}>{tick.source || 'tick'}</td>
                             <td style={{ padding: '0.3rem 0.45rem', fontFamily: 'monospace' }}>{tick.sellable_price != null ? `$${fmtNum4(tick.sellable_price)}` : '—'}</td>
                             <td style={{ padding: '0.3rem 0.45rem', fontFamily: 'monospace', color: parseFloat(tick.pnl_pct || 0) >= 0 ? '#16a34a' : '#dc2626' }}>{fmtSignedPct(tick.pnl_pct)}</td>
-                            <td style={{ padding: '0.3rem 0.45rem', fontFamily: 'monospace', color: '#555' }}>{fmtSignedPct(tick.max_pnl_pct)}</td>
-                            <td style={{ padding: '0.3rem 0.45rem', fontFamily: 'monospace', color: '#555' }}>{peakPrice != null ? `$${fmtNum4(peakPrice)}` : '—'}</td>
-                            <td style={{ padding: '0.3rem 0.45rem', fontFamily: 'monospace', color: '#555' }}>{tick.tp_action || 'NO_CHANGE'}</td>
+                            <td style={{ padding: '0.3rem 0.45rem', fontFamily: 'monospace', color: 'var(--text)' }}>{fmtSignedPct(tick.max_pnl_pct)}</td>
+                            <td style={{ padding: '0.3rem 0.45rem', fontFamily: 'monospace', color: 'var(--text)' }}>{peakPrice != null ? `$${fmtNum4(peakPrice)}` : '—'}</td>
+                            <td style={{ padding: '0.3rem 0.45rem', fontFamily: 'monospace', color: 'var(--text)' }}>{tick.tp_action || 'NO_CHANGE'}</td>
                             <td style={{ padding: '0.3rem 0.45rem', fontFamily: 'monospace', color: tick.sl_action === 'UPDATED' ? '#dc2626' : '#555', fontWeight: tick.sl_action === 'UPDATED' ? 700 : 500 }}>{tick.sl_action || 'NO_CHANGE'}</td>
                             <td style={{ padding: '0.3rem 0.45rem', fontFamily: 'monospace', color: '#444', whiteSpace: 'nowrap' }}>
                               {isOrder
@@ -831,7 +831,7 @@ function PositionCard({ pos }) {
                 ))}
               </div>
             ) : (
-              <span style={{ fontSize: '0.78rem', color: '#888' }}>No filter data available (straddle or legacy trade)</span>
+              <span style={{ fontSize: '0.78rem', color: 'var(--text)' }}>No filter data available (straddle or legacy trade)</span>
             )}
           </div>
 
@@ -974,7 +974,7 @@ export default function LivePositions() {
               Refresh
             </button>
             {lastUpdate && (
-              <span style={{ fontSize: '0.65rem', color: '#555', marginTop: '0.25rem' }}>
+              <span style={{ fontSize: '0.65rem', color: 'var(--text)', marginTop: '0.25rem' }}>
                 {lastUpdate.toLocaleTimeString()}
               </span>
             )}
@@ -1002,7 +1002,7 @@ export default function LivePositions() {
 
       {/* Positions */}
       {loading ? (
-        <div style={{ textAlign: 'center', padding: '3rem', color: '#888' }}>
+        <div style={{ textAlign: 'center', padding: '3rem', color: 'var(--text)' }}>
           <RefreshCw size={24} color={GOLD} style={{ animation: 'spin 1s linear infinite' }} />
           <p style={{ marginTop: '1rem' }}>Loading positions...</p>
         </div>

@@ -339,7 +339,7 @@ function TradeTimeline({ timeline, fillPrice, qpArmed, qpArmTime, qpArmPrice, qp
         <div style={{ paddingBottom: '10px' }}>
           {/* Sparkline */}
           <div style={{
-            background: '#f9f9f9', borderRadius: '8px', padding: '8px',
+            background: 'var(--bg)', borderRadius: '8px', padding: '8px',
             marginBottom: '8px', border: '1px solid rgba(0,0,0,0.05)',
             position: 'relative',
           }}>
@@ -439,24 +439,24 @@ function TradeTimeline({ timeline, fillPrice, qpArmed, qpArmTime, qpArmPrice, qp
                     const rowBg = isProfit ? 'rgba(22,163,74,0.10)' : 'rgba(239,68,68,0.10)'
                     return (
                       <tr key={idx} style={{ background: rowBg, fontWeight: 700, borderLeft: `3px solid ${rowColor}` }}>
-                        <td style={{ padding: '2px 6px', fontFamily: 'monospace', color: '#555', whiteSpace: 'nowrap' }}>{fmtTickTime(tick.ts)}</td>
+                        <td style={{ padding: '2px 6px', fontFamily: 'monospace', color: 'var(--text)', whiteSpace: 'nowrap' }}>{fmtTickTime(tick.ts)}</td>
                         <td style={{ padding: '2px 6px', color: rowColor, fontSize: '9px', fontWeight: 800, textTransform: 'uppercase' }}>EXIT_FILLED</td>
                         <td style={{ padding: '2px 6px', fontFamily: 'monospace', color: rowColor, fontWeight: 700 }}>
                           {tick.fill_price != null ? `$${fmt2(tick.fill_price)}` : '—'}
                         </td>
-                        <td style={{ padding: '2px 6px', fontFamily: 'monospace', color: '#777' }}>
+                        <td style={{ padding: '2px 6px', fontFamily: 'monospace', color: 'var(--text)' }}>
                           {tick.triggered_at ? `trig@${fmtTickTime(tick.triggered_at)}` : '—'}
                         </td>
-                        <td style={{ padding: '2px 6px', fontFamily: 'monospace', color: '#777' }}>{tick.order_type || '—'}</td>
-                        <td style={{ padding: '2px 6px', fontFamily: 'monospace', color: '#777' }}>—</td>
-                        <td style={{ padding: '2px 6px', fontFamily: 'monospace', color: '#777' }}>—</td>
-                        <td style={{ padding: '2px 6px', fontFamily: 'monospace', color: '#777' }}>—</td>
-                        <td style={{ padding: '2px 6px', fontFamily: 'monospace', color: '#777' }}>—</td>
-                        <td style={{ padding: '2px 6px', fontFamily: 'monospace', color: '#777' }}>—</td>
-                        <td style={{ padding: '2px 6px', fontFamily: 'monospace', color: '#777' }}>—</td>
-                        <td style={{ padding: '2px 6px', fontFamily: 'monospace', color: '#777' }}>—</td>
+                        <td style={{ padding: '2px 6px', fontFamily: 'monospace', color: 'var(--text)' }}>{tick.order_type || '—'}</td>
+                        <td style={{ padding: '2px 6px', fontFamily: 'monospace', color: 'var(--text)' }}>—</td>
+                        <td style={{ padding: '2px 6px', fontFamily: 'monospace', color: 'var(--text)' }}>—</td>
+                        <td style={{ padding: '2px 6px', fontFamily: 'monospace', color: 'var(--text)' }}>—</td>
+                        <td style={{ padding: '2px 6px', fontFamily: 'monospace', color: 'var(--text)' }}>—</td>
+                        <td style={{ padding: '2px 6px', fontFamily: 'monospace', color: 'var(--text)' }}>—</td>
+                        <td style={{ padding: '2px 6px', fontFamily: 'monospace', color: 'var(--text)' }}>—</td>
+                        <td style={{ padding: '2px 6px', fontFamily: 'monospace', color: 'var(--text)' }}>—</td>
                         <td style={{ padding: '2px 6px', fontFamily: 'monospace', color: rowColor, fontWeight: 700 }}>EXECUTED</td>
-                        <td style={{ padding: '2px 6px', fontFamily: 'monospace', color: '#555', whiteSpace: 'nowrap', fontSize: '9px' }}>
+                        <td style={{ padding: '2px 6px', fontFamily: 'monospace', color: 'var(--text)', whiteSpace: 'nowrap', fontSize: '9px' }}>
                           {`${String(tick.order_id || '').slice(0, 8)}… · filled@${fmtTickTime(tick.filled_at)}`}
                         </td>
                         <td style={{ padding: '2px 6px', textAlign: 'center' }}>
@@ -493,15 +493,15 @@ function TradeTimeline({ timeline, fillPrice, qpArmed, qpArmTime, qpArmPrice, qp
                     const timeAuditText = [placedTimeText, statusTimeText, filledTimeText, cancelledTimeText].filter(Boolean).join(' · ')
                     return (
                       <tr key={idx} style={{ background: rowBg, borderLeft: `3px solid ${isError ? '#dc2626' : typeColor}` }}>
-                        <td style={{ padding: '2px 6px', fontFamily: 'monospace', color: '#555', whiteSpace: 'nowrap' }}>{fmtTickTime(tick.ts)}</td>
+                        <td style={{ padding: '2px 6px', fontFamily: 'monospace', color: 'var(--text)', whiteSpace: 'nowrap' }}>{fmtTickTime(tick.ts)}</td>
                         <td style={{ padding: '2px 6px', color: isError ? '#dc2626' : typeColor, fontSize: '9px', fontWeight: 800, textTransform: 'uppercase' }}>{typeLabel}</td>
                         <td style={{ padding: '2px 6px', fontFamily: 'monospace', color: typeColor, fontWeight: 700 }}>
                           {tick.fill_price != null ? `$${fmt2(tick.fill_price)}` : (tick.limit_price != null ? `$${fmt2(tick.limit_price)}` : '—')}
                         </td>
-                        <td style={{ padding: '2px 6px', fontFamily: 'monospace', color: '#777' }}>
+                        <td style={{ padding: '2px 6px', fontFamily: 'monospace', color: 'var(--text)' }}>
                           {tick.stop_price != null ? `stop $${fmt2(tick.stop_price)}` : '—'}
                         </td>
-                        <td style={{ padding: '2px 6px', fontFamily: 'monospace', color: '#777' }}>
+                        <td style={{ padding: '2px 6px', fontFamily: 'monospace', color: 'var(--text)' }}>
                           {tick.limit_price != null ? `lmt $${fmt2(tick.limit_price)}` : '—'}
                         </td>
                         <td style={{ padding: '2px 6px', fontFamily: 'monospace', color: typeColor }}>{fmtPctSigned(tick.pct)}</td>
@@ -528,20 +528,20 @@ function TradeTimeline({ timeline, fillPrice, qpArmed, qpArmTime, qpArmPrice, qp
                     : null
                   return (
                     <tr key={idx} style={{ background: rowBg, fontWeight: isSell ? 700 : undefined }}>
-                      <td style={{ padding: '2px 6px', fontFamily: 'monospace', color: '#555', whiteSpace: 'nowrap' }}>{fmtTickTime(tick.ts)}</td>
+                      <td style={{ padding: '2px 6px', fontFamily: 'monospace', color: 'var(--text)', whiteSpace: 'nowrap' }}>{fmtTickTime(tick.ts)}</td>
                       <td style={{ padding: '2px 6px', color: srcColor, textTransform: 'uppercase', fontSize: '9px', fontWeight: 700 }}>{srcLabel}</td>
                       <td style={{ padding: '2px 6px', fontFamily: 'monospace', fontWeight: 700, color: isSell ? '#ef4444' : '#111' }}>${fmt2(tick.sellable_price)}</td>
-                      <td style={{ padding: '2px 6px', fontFamily: 'monospace', color: '#777' }}>{tick.bid_price != null ? `$${fmt2(tick.bid_price)}` : '—'}</td>
-                      <td style={{ padding: '2px 6px', fontFamily: 'monospace', color: '#777' }}>{tick.mid_price != null ? `$${fmt2(tick.mid_price)}` : '—'}</td>
+                      <td style={{ padding: '2px 6px', fontFamily: 'monospace', color: 'var(--text)' }}>{tick.bid_price != null ? `$${fmt2(tick.bid_price)}` : '—'}</td>
+                      <td style={{ padding: '2px 6px', fontFamily: 'monospace', color: 'var(--text)' }}>{tick.mid_price != null ? `$${fmt2(tick.mid_price)}` : '—'}</td>
                       <td style={{ padding: '2px 6px', fontFamily: 'monospace', fontWeight: 800, color: pnlColor }}>{fmtPctSigned(tick.pnl_pct)}</td>
                       <td style={{ padding: '2px 6px', fontFamily: 'monospace', color: '#d97706' }}>{tick.qp_limit_price != null ? `$${fmt2(tick.qp_limit_price)}` : '—'}</td>
                       <td style={{ padding: '2px 6px', fontFamily: 'monospace', color: '#d97706' }}>{tick.qp_dynamic_pct > 0 ? fmtPctSigned(tick.qp_dynamic_pct) : '—'}</td>
                       <td style={{ padding: '2px 6px', fontFamily: 'monospace', color: '#ef4444' }}>{fmtPctSigned(tick.sl_dynamic_pct)}</td>
                       <td style={{ padding: '2px 6px', fontFamily: 'monospace', color: '#6366f1' }}>{fmtPctSigned(tick.max_pnl_pct)}</td>
                       <td style={{ padding: '2px 6px', fontFamily: 'monospace', color: '#6366f1' }}>{peakPrice != null ? `$${fmt2(peakPrice)}` : '—'}</td>
-                      <td style={{ padding: '2px 6px', fontFamily: 'monospace', color: '#777', fontWeight: 700 }}>{tick.tp_action || 'NO_CHANGE'}</td>
+                      <td style={{ padding: '2px 6px', fontFamily: 'monospace', color: 'var(--text)', fontWeight: 700 }}>{tick.tp_action || 'NO_CHANGE'}</td>
                       <td style={{ padding: '2px 6px', fontFamily: 'monospace', color: tick.sl_action === 'UPDATED' ? '#ef4444' : '#777', fontWeight: 700 }}>{tick.sl_action || 'NO_CHANGE'}</td>
-                      <td style={{ padding: '2px 6px', fontFamily: 'monospace', color: '#555', whiteSpace: 'nowrap' }}>
+                      <td style={{ padding: '2px 6px', fontFamily: 'monospace', color: 'var(--text)', whiteSpace: 'nowrap' }}>
                         {tick.sl_action === 'UPDATED'
                           ? `${tick.sl_order_action || 'UPDATED'} · ${tick.sl_prev_price != null ? `$${fmt2(tick.sl_prev_price)}` : '—'} -> ${tick.sl_new_price != null ? `$${fmt2(tick.sl_new_price)}` : '—'}`
                           : 'No change'}
@@ -576,7 +576,7 @@ function TradeTimeline({ timeline, fillPrice, qpArmed, qpArmTime, qpArmPrice, qp
 
 // ── styles ─────────────────────────────────────────────────────────────────
 const S = {
-  page: { minHeight: '100vh', background: '#f8f8f8' },
+  page: { minHeight: '100vh', background: 'var(--bg)' },
   inner: { maxWidth: '1400px', margin: '0 auto', padding: '0 1.5rem 2rem' },
 
   // page header
@@ -584,13 +584,13 @@ const S = {
     display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between',
     padding: '1.5rem 0 1.25rem', flexWrap: 'wrap', gap: '1rem',
   },
-  pageTitle: { fontSize: '1.7rem', fontWeight: 900, color: '#111', margin: 0, letterSpacing: '-0.02em' },
-  pageSub: { fontSize: '0.85rem', color: '#888', marginTop: '0.25rem' },
+  pageTitle: { fontSize: '1.7rem', fontWeight: 900, color: 'var(--text-h)', margin: 0, letterSpacing: '-0.02em' },
+  pageSub: { fontSize: '0.85rem', color: 'var(--text)', marginTop: '0.25rem' },
 
   // filter bar
   filterBar: {
     display: 'flex', flexWrap: 'wrap', gap: '0.65rem', alignItems: 'center',
-    background: '#fff', border: '1px solid rgba(201,162,39,0.18)',
+    background: 'var(--card-bg)', border: '1px solid rgba(201,162,39,0.18)',
     borderRadius: '12px', padding: '0.65rem 1rem',
     boxShadow: '0 2px 8px rgba(201,162,39,0.06)',
   },
@@ -614,7 +614,7 @@ const S = {
     display: 'flex', alignItems: 'center', gap: '0.45rem',
     padding: '0.5rem 1.1rem', background: `linear-gradient(135deg,${GOLD} 0%,${GOLD_LIGHT} 100%)`,
     border: 'none', borderRadius: '8px', cursor: 'pointer',
-    fontSize: '0.82rem', fontWeight: 700, color: '#111',
+    fontSize: '0.82rem', fontWeight: 700, color: 'var(--text-h)',
     boxShadow: '0 2px 8px rgba(201,162,39,0.22)', transition: 'all 0.2s',
   },
 
@@ -625,7 +625,7 @@ const S = {
     gap: '0.9rem', marginBottom: '1.5rem',
   },
   statCard: {
-    background: '#fff', borderRadius: '12px',
+    background: 'var(--card-bg)', borderRadius: '12px',
     border: '1px solid rgba(201,162,39,0.15)',
     padding: '1.1rem 1.25rem',
     boxShadow: '0 2px 10px rgba(201,162,39,0.05)',
@@ -642,7 +642,7 @@ const S = {
 
   // section card
   card: {
-    background: '#fff', borderRadius: '14px',
+    background: 'var(--card-bg)', borderRadius: '14px',
     border: '1px solid rgba(201,162,39,0.15)',
     boxShadow: '0 2px 12px rgba(201,162,39,0.06)',
     marginBottom: '1.25rem', overflow: 'hidden',
@@ -653,7 +653,7 @@ const S = {
     borderBottom: '1px solid rgba(201,162,39,0.1)',
     background: 'rgba(201,162,39,0.02)',
   },
-  cardTitle: { fontSize: '0.95rem', fontWeight: 800, color: '#111', display: 'flex', alignItems: 'center', gap: '0.55rem' },
+  cardTitle: { fontSize: '0.95rem', fontWeight: 800, color: 'var(--text-h)', display: 'flex', alignItems: 'center', gap: '0.55rem' },
   cardCount: {
     display: 'inline-block', background: 'rgba(201,162,39,0.14)',
     color: GOLD_DEEP, borderRadius: '20px',
@@ -665,12 +665,12 @@ const S = {
   posCard: (pnlPos) => ({
     borderRadius: '12px', overflow: 'hidden',
     border: `1px solid ${pnlPos ? 'rgba(22,163,74,0.22)' : 'rgba(239,68,68,0.2)'}`,
-    background: '#fff',
+    background: 'var(--card-bg)',
     boxShadow: pnlPos ? '0 4px 18px rgba(22,163,74,0.07)' : '0 4px 18px rgba(239,68,68,0.07)',
   }),
   posRow: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '0.42rem' },
   posKey: { fontSize: '0.72rem', color: '#aaa', fontWeight: 600 },
-  posVal: { fontSize: '0.8rem', color: '#111', fontWeight: 700 },
+  posVal: { fontSize: '0.8rem', color: 'var(--text-h)', fontWeight: 700 },
 
   // table
   tableWrap: { overflowX: 'auto', overflowY: 'auto', maxHeight: '620px', padding: '0 0 0.5rem' },
@@ -680,12 +680,12 @@ const S = {
     fontSize: '0.71rem', fontWeight: 700, color: '#aaa',
     textTransform: 'uppercase', letterSpacing: '0.06em',
     borderBottom: '2px solid rgba(201,162,39,0.12)',
-    background: '#fdfaf4', whiteSpace: 'nowrap',
+    background: 'var(--bg)', whiteSpace: 'nowrap',
     cursor: 'pointer', userSelect: 'none',
     position: 'sticky', top: 0, zIndex: 2,
   },
   td: {
-    padding: '0.82rem 1.1rem', fontSize: '0.85rem', color: '#333',
+    padding: '0.82rem 1.1rem', fontSize: '0.85rem', color: 'var(--text-h)',
     borderBottom: '1px solid rgba(201,162,39,0.07)', verticalAlign: 'middle',
   },
 
@@ -712,11 +712,11 @@ const S = {
     display: 'flex', alignItems: 'center', gap: '0.3rem',
     padding: '0.35rem 0.85rem', borderRadius: '999px',
     border: '1px solid rgba(201,162,39,0.25)', cursor: 'pointer',
-    background: '#fff', fontSize: '0.78rem', fontWeight: 700, color: '#555',
+    background: 'var(--card-bg)', fontSize: '0.78rem', fontWeight: 700, color: 'var(--text)',
   },
   symbolMenu: {
     position: 'absolute', top: 'calc(100% + 4px)', left: 0,
-    background: '#fff', borderRadius: '10px',
+    background: 'var(--card-bg)', borderRadius: '10px',
     border: '1px solid rgba(201,162,39,0.2)',
     boxShadow: '0 8px 24px rgba(0,0,0,0.1)',
     zIndex: 50, minWidth: '130px', overflow: 'hidden',
@@ -724,7 +724,7 @@ const S = {
   symbolOption: (active) => ({
     padding: '0.55rem 1rem', fontSize: '0.81rem', fontWeight: active ? 700 : 500,
     cursor: 'pointer', color: active ? GOLD_DEEP : '#444',
-    background: active ? 'rgba(201,162,39,0.08)' : '#fff',
+    background: active ? 'rgba(201,162,39,0.08)' : 'var(--card-bg)',
     borderBottom: '1px solid rgba(201,162,39,0.06)',
     transition: 'background 0.12s',
   }),
@@ -1417,7 +1417,7 @@ export default function OverallSummary() {
                     <div style={{ padding: '0.85rem 1.1rem 0.7rem', display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
                       <div>
                         <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', flexWrap: 'wrap' }}>
-                          <span style={{ fontWeight: 900, fontSize: '1.05rem', color: '#111' }}>
+                          <span style={{ fontWeight: 900, fontSize: '1.05rem', color: 'var(--text-h)' }}>
                             {opt ? opt.underlying : p.symbol}
                           </span>
                           <span style={{
@@ -1470,7 +1470,7 @@ export default function OverallSummary() {
                       {p.buy_order_id && (
                         <div style={S.posRow}>
                           <span style={S.posKey}>Buy Order ID</span>
-                          <span style={{ ...S.posVal, fontFamily: 'monospace', fontSize: '0.67rem', color: '#888', wordBreak: 'break-all' }}>{p.buy_order_id}</span>
+                          <span style={{ ...S.posVal, fontFamily: 'monospace', fontSize: '0.67rem', color: 'var(--text)', wordBreak: 'break-all' }}>{p.buy_order_id}</span>
                         </div>
                       )}
                     </div>
@@ -1720,7 +1720,7 @@ export default function OverallSummary() {
                         borderRadius: '12px',
                         border: `1.5px solid ${accentBorder}`,
                         borderLeft: `5px solid ${accentColor}`,
-                        background: '#ffffff',
+                        background: 'var(--card-bg)',
                       }}
                     >
                       {/* ── Top section ── */}
@@ -1736,7 +1736,7 @@ export default function OverallSummary() {
                         <div>
                           {/* Row 1: Symbol + date */}
                           <div style={{ display: 'flex', alignItems: 'baseline', gap: '8px', marginBottom: contractSubtitle ? '3px' : '8px' }}>
-                            <span style={{ fontWeight: 900, fontSize: '20px', color: '#111', letterSpacing: '-0.4px', lineHeight: 1 }}>
+                            <span style={{ fontWeight: 900, fontSize: '20px', color: 'var(--text-h)', letterSpacing: '-0.4px', lineHeight: 1 }}>
                               {displaySymbol}
                             </span>
                             <span style={{ fontSize: '12px', color: '#bbb', fontWeight: 500 }}>
@@ -1785,7 +1785,7 @@ export default function OverallSummary() {
 
                           {/* Row 3: Strike · Expiry · Qty */}
                           {strikeLine && (
-                            <div style={{ fontSize: '13px', color: '#666', fontWeight: 600 }}>
+                            <div style={{ fontSize: '13px', color: 'var(--text)', fontWeight: 600 }}>
                               {strikeLine}
                             </div>
                           )}
@@ -1810,12 +1810,12 @@ export default function OverallSummary() {
                           <div style={{ marginBottom: '8px' }}>
                             {badgeForResult(t.result)}
                           </div>
-                          <div style={{ fontSize: '13px', color: '#888', fontFamily: 'monospace', fontWeight: 600 }}>
+                          <div style={{ fontSize: '13px', color: 'var(--text)', fontFamily: 'monospace', fontWeight: 600 }}>
                             Buy&nbsp;
-                            <span style={{ color: '#333' }}>{t.buyPrice != null ? `$${fmt2(t.buyPrice)}` : '—'}</span>
+                            <span style={{ color: 'var(--text-h)' }}>{t.buyPrice != null ? `$${fmt2(t.buyPrice)}` : '—'}</span>
                             <span style={{ color: '#ddd', margin: '0 5px' }}>→</span>
                             Sell&nbsp;
-                            <span style={{ color: '#333' }}>{t.sellPrice != null ? `$${fmt2(t.sellPrice)}` : '—'}</span>
+                            <span style={{ color: 'var(--text-h)' }}>{t.sellPrice != null ? `$${fmt2(t.sellPrice)}` : '—'}</span>
                           </div>
                         </div>
                       </div>
@@ -1824,7 +1824,7 @@ export default function OverallSummary() {
                       <div style={{
                         padding: '9px 18px 11px',
                         borderTop: '1px solid #f0f0f0',
-                        background: '#fafafa',
+                        background: 'var(--bg)',
                         borderRadius: '0 0 11px 11px',
                         display: 'flex',
                         flexDirection: 'column',
@@ -1845,9 +1845,9 @@ export default function OverallSummary() {
                                 background: 'rgba(201,162,39,0.08)', fontSize: '11px',
                               }}>
                                 <span style={{ fontSize: '9px', fontWeight: 800, color: '#bbb', textTransform: 'uppercase', letterSpacing: '0.4px' }}>{label}</span>
-                                <span style={{ color: '#555', fontFamily: 'monospace', fontWeight: 700 }}>{time || '—'}</span>
+                                <span style={{ color: 'var(--text)', fontFamily: 'monospace', fontWeight: 700 }}>{time || '—'}</span>
                                 <span style={{ color: '#aaa' }}>@</span>
-                                <span style={{ color: '#333', fontFamily: 'monospace', fontWeight: 800 }}>{price != null ? `$${fmt2(price)}` : '—'}</span>
+                                <span style={{ color: 'var(--text-h)', fontFamily: 'monospace', fontWeight: 800 }}>{price != null ? `$${fmt2(price)}` : '—'}</span>
                               </span>
                             ))}
                           </div>
@@ -1856,7 +1856,7 @@ export default function OverallSummary() {
                         {/* Line 1: entry → exit time + exit reason */}
                         <div style={{ display: 'flex', alignItems: 'center', gap: '16px', flexWrap: 'wrap' }}>
                           {(t.entryTime || t.exitTime) && (
-                            <span style={{ fontSize: '12px', color: '#777' }}>
+                            <span style={{ fontSize: '12px', color: 'var(--text)' }}>
                               <span style={{ fontSize: '10px', fontWeight: 800, color: '#bbb', textTransform: 'uppercase', letterSpacing: '0.5px', marginRight: '5px' }}>Entry</span>
                               <span style={{ fontFamily: 'monospace' }}>{fmtTimeShort(t.entryTime) || '—'}</span>
                               {t.exitTime && (
@@ -1869,9 +1869,9 @@ export default function OverallSummary() {
                             </span>
                           )}
                           {exitReasonText && (
-                            <span style={{ fontSize: '12px', color: '#777' }}>
+                            <span style={{ fontSize: '12px', color: 'var(--text)' }}>
                               <span style={{ fontSize: '10px', fontWeight: 800, color: '#bbb', textTransform: 'uppercase', letterSpacing: '0.5px', marginRight: '5px' }}>Exit</span>
-                              <span style={{ fontWeight: 700, color: '#555' }}>{exitReasonText}</span>
+                              <span style={{ fontWeight: 700, color: 'var(--text)' }}>{exitReasonText}</span>
                               {exitMeaning && <span style={{ marginLeft: '6px', color: '#999' }}>({exitMeaning})</span>}
                             </span>
                           )}
@@ -1954,7 +1954,7 @@ export default function OverallSummary() {
                                     background: 'rgba(0,0,0,0.04)', fontSize: '11px',
                                   }}>
                                     <span style={{ fontSize: '9px', fontWeight: 800, color: '#bbb', textTransform: 'uppercase', letterSpacing: '0.4px' }}>Stock</span>
-                                    <span style={{ color: '#333', fontFamily: 'monospace', fontWeight: 700 }}>${fmt2(underlying)}</span>
+                                    <span style={{ color: 'var(--text-h)', fontFamily: 'monospace', fontWeight: 700 }}>${fmt2(underlying)}</span>
                                   </span>
                                 )}
                               </div>

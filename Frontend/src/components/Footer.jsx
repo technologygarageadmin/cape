@@ -8,7 +8,7 @@ const styles = {
 		justifyContent: 'space-between',
 		padding: '0.5rem 2rem',
 		borderTop: '1px solid rgba(0,0,0,0.08)',
-		background: 'linear-gradient(135deg, #ffffff 0%, #fafbfc 100%)',
+		background: 'var(--bg)',
 		boxShadow: '0 -2px 8px rgba(0,0,0,0.04)',
 		marginTop: 'auto',
 		transition: 'all 0.3s ease',

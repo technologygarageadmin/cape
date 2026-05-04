@@ -534,6 +534,26 @@ async def _request_log(request: Request, call_next):
 _straddle_col = None                 # pymongo Collection, set at startup
 _options_log_col = None              # pymongo Collection — single collection for ALL trade types
 _manual_trades_col = None            # alias → same as _options_log_col (kept for backward compat)
+
+# Simple TTL cache for slow Atlas queries — avoids re-fetching on every poll cycle.
+_TRADE_LOG_CACHE_TTL = 30           # seconds
+_trade_log_cache: dict[str, tuple[float, Any]] = {}  # key → (timestamp, payload)
+
+
+def _cache_get(key: str) -> Any | None:
+    entry = _trade_log_cache.get(key)
+    if entry and time.time() - entry[0] < _TRADE_LOG_CACHE_TTL:
+        return entry[1]
+    return None
+
+
+def _cache_set(key: str, value: Any) -> None:
+    _trade_log_cache[key] = (time.time(), value)
+
+
+def _cache_invalidate_trade_log() -> None:
+    """Call after any trade write so the next read sees fresh data."""
+    _trade_log_cache.clear()
 _STRADDLE_TP_PCT = 0.02              # 2% stock move → WIN
 ET = ZoneInfo("America/New_York")
 
@@ -1436,6 +1456,7 @@ def _ait_run_straddle(
                     "exit_order_fill_price":   sell_price,
                 }
                 _options_log_col.insert_one(_straddle_doc)
+                _cache_invalidate_trade_log()
                 log_trade("STRADDLE", _straddle_doc)
         except Exception as ex:
             print(f"[AIT:{symbol}] Straddle {leg_name} monitor/sell error: {ex}")
@@ -1827,6 +1848,7 @@ def _ait_trade_loop(
                     "entry_price_above_vwap": _indicators.get("price_above_vwap"),
                 }
                 _options_log_col.insert_one(_ait_doc)
+                _cache_invalidate_trade_log()
                 log_trade("AIT", _ait_doc)
 
             cooldown_bars_remaining = POST_TRADE_COOLDOWN_BARS
@@ -2185,6 +2207,7 @@ def _recovery_monitor_thread(
             "exit_order_fill_price":   sell_price,
             "log_source": "startup_recovery",
         })
+        _cache_invalidate_trade_log()
 
 
 def _recover_open_positions() -> None:
@@ -2309,6 +2332,7 @@ def _recover_open_positions() -> None:
                                 "log_source": "startup_recovery_immediate",
                                 "timeline": [],
                             })
+                            _cache_invalidate_trade_log()
                     else:
                         print(f"[RECOVERY] close_position returned no order for {contract_symbol}")
                 except Exception as ex:
@@ -2369,6 +2393,7 @@ def _recover_open_positions() -> None:
                                 "log_source": "startup_recovery_immediate",
                                 "timeline": [],
                             })
+                            _cache_invalidate_trade_log()
                     else:
                         print(f"[RECOVERY] close_position returned no order for {contract_symbol}")
                 except Exception as ex:
@@ -2959,6 +2984,7 @@ def close_position_endpoint(symbol: str) -> dict[str, Any]:
                 **_snap,
             }
             ins = _options_log_col.insert_one(_ml_doc)
+            _cache_invalidate_trade_log()
             logged_trade = {
                 "id": str(ins.inserted_id),
                 "type": "manual",
@@ -3494,6 +3520,7 @@ def create_manual_trade(body: ManualTradeHistoryBody) -> dict[str, Any]:
         "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
     ins = _options_log_col.insert_one(doc)
+    _cache_invalidate_trade_log()
     return {"id": str(ins.inserted_id), "message": "manual_trade_saved"}
 
 
@@ -3879,11 +3906,16 @@ def get_manual_trades(
     if _options_log_col is None:
         return {"count": 0, "trades": []}
 
+    cache_key = f"manual_trades:{symbol}:{limit}"
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached
+
     q: dict[str, Any] = {"trade_type": {"$in": ["MANUAL", "MANUAL_LIQUIDATE"]}}
     if symbol:
         q["symbol"] = symbol.strip().upper()
 
-    rows = list(_options_log_col.find(q).sort("created_at", -1).limit(limit))
+    rows = list(_options_log_col.find(q, {"timeline": 0}).sort("created_at", -1).limit(limit))
     trades = []
     for r in rows:
         trades.append(
@@ -3917,18 +3949,18 @@ def get_manual_trades(
                 "sellFilledPrice":r.get("sell_price", 0),
                 "pnlPct":        r.get("pnl_pct"),
                 "tradeDurationSec": r.get("trade_duration_sec"),
-                # QP arm metadata
                 "qpArmed":       r.get("qp_armed", False),
                 "qpArmTime":     r.get("qp_arm_time"),
                 "qpArmPrice":    r.get("qp_arm_price"),
                 "qpArmPnlPct":   r.get("qp_arm_pnl_pct"),
                 "qpArmPeakPct":  r.get("qp_arm_peak_pct"),
-                # Full tick-by-tick timeline
-                "timeline":      r.get("timeline") or [],
+                "timeline":      [],
             }
         )
 
-    return {"count": len(trades), "trades": trades}
+    payload = {"count": len(trades), "trades": trades}
+    _cache_set(cache_key, payload)
+    return payload
 
 
 @app.get("/api/options-log")
@@ -3945,20 +3977,21 @@ def get_options_log(
     if _options_log_col is None:
         return {"count": 0, "trades": []}
 
+    cache_key = f"options_log:{symbol}:{result}:{limit}"
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached
+
     q: dict[str, Any] = {}
     if symbol:
         q["symbol"] = symbol.strip().upper()
     if result:
         q["result"] = result.strip().upper()
-    # Exclude MANUAL types and require trade_type to exist.
-    # This prevents legacy/malformed rows (missing trade_type) from being
-    # mislabeled as AIT in the frontend merged history view.
-    q["trade_type"] = {
-        "$exists": True,
-        "$nin": ["MANUAL", "MANUAL_LIQUIDATE"],
-    }
+    # Use $in with known AIT types so MongoDB can use the (trade_type, created_at)
+    # compound index and skip MANUAL docs without a full collection scan.
+    q["trade_type"] = {"$in": ["AIT", "STRADDLE", "RECOVERY", "MONITOR_EXIT"]}
 
-    rows = list(_options_log_col.find(q).sort("created_at", -1).limit(limit))
+    rows = list(_options_log_col.find(q, {"timeline": 0}).sort("created_at", -1).limit(limit))
     trades = []
     for r in rows:
         trades.append(
@@ -3996,7 +4029,6 @@ def get_options_log(
                 "createdAt": _to_iso(r.get("created_at")) or r.get("created_at"),
                 "buyOrderId": r.get("buy_order_id"),
                 "sellOrderId": r.get("sell_order_id"),
-                # New enriched fields
                 "pnlPct": r.get("pnl_pct"),
                 "tradeDurationSec": r.get("trade_duration_sec"),
                 "entryRsi": r.get("entry_rsi"),
@@ -4018,18 +4050,18 @@ def get_options_log(
                 "entryTrend": r.get("entry_trend"),
                 "entryVwap": r.get("entry_vwap"),
                 "entryPriceAboveVwap": r.get("entry_price_above_vwap"),
-                # QP arm metadata
                 "qpArmed":       r.get("qp_armed", False),
                 "qpArmTime":     r.get("qp_arm_time"),
                 "qpArmPrice":    r.get("qp_arm_price"),
                 "qpArmPnlPct":   r.get("qp_arm_pnl_pct"),
                 "qpArmPeakPct":  r.get("qp_arm_peak_pct"),
-                # Full tick-by-tick timeline
-                "timeline":      r.get("timeline") or [],
+                "timeline":      [],
             }
         )
 
-    return {"count": len(trades), "trades": trades}
+    payload = {"count": len(trades), "trades": trades}
+    _cache_set(cache_key, payload)
+    return payload
 
 
 @app.post("/api/ai-trade/stop")

@@ -1646,7 +1646,7 @@ export default function TradingView() {
       {/* LEFT: Symbol Watchlist */}
       <div style={{
         width: '210px', flexShrink: 0,
-        background: '#fff',
+        background: 'var(--card-bg)',
         border: '1px solid rgba(201,162,39,0.15)',
         borderRadius: '14px',
         overflow: 'hidden',
@@ -1687,7 +1687,7 @@ export default function TradingView() {
                   cursor: locked ? 'not-allowed' : 'pointer',
                   background: isActive
                     ? 'linear-gradient(135deg, rgba(201,162,39,0.1) 0%, rgba(245,197,24,0.06) 100%)'
-                    : hoveredSymbol === stock.symbol && !locked ? 'rgba(201,162,39,0.05)' : '#fff',
+                    : hoveredSymbol === stock.symbol && !locked ? 'rgba(201,162,39,0.05)' : 'var(--card-bg)',
                   borderLeft: isActive ? `3px solid ${GOLD}` : '3px solid transparent',
                   transition: 'all 0.2s',
                   opacity: locked ? 0.45 : 1,
@@ -1696,7 +1696,7 @@ export default function TradingView() {
                 {/* Symbol + price row */}
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '0.55rem' }}>
                   <div>
-                    <div style={{ fontSize: '0.88rem', fontWeight: 800, color: isActive ? GOLD_DEEP : '#111' }}>{stock.symbol}</div>
+                    <div style={{ fontSize: '0.88rem', fontWeight: 800, color: isActive ? GOLD_DEEP : 'var(--text-h)' }}>{stock.symbol}</div>
                     <div style={{ fontSize: '0.65rem', color: '#bbb', marginTop: '0.1rem' }}>{stock.sector}</div>
                   </div>
                   <div style={{ textAlign: 'right' }}>
@@ -1769,7 +1769,7 @@ export default function TradingView() {
       {/* CENTER: Chart + Last Trade */}
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: '1rem', minWidth: 0 }}>
         <div style={{
-          background: '#fff',
+          background: 'var(--card-bg)',
           border: '1px solid rgba(201,162,39,0.12)',
           borderRadius: '14px',
           overflow: 'hidden',
@@ -1783,7 +1783,7 @@ export default function TradingView() {
             flexWrap: 'wrap', gap: '0.75rem',
           }}>
             <div style={{ display: 'flex', alignItems: 'baseline', gap: '0.75rem', flexWrap: 'wrap' }}>
-              <span style={{ fontSize: '1.1rem', fontWeight: 800, color: '#111' }}>{selected.symbol}</span>
+              <span style={{ fontSize: '1.1rem', fontWeight: 800, color: 'var(--text-h)' }}>{selected.symbol}</span>
               <span style={{ fontSize: '0.8rem', color: '#999' }}>{selected.name}</span>
               <span style={{ fontSize: '1.5rem', fontWeight: 900, color: priceUp ? '#16a34a' : '#ef4444', transition: 'color 0.3s', letterSpacing: '-0.02em' }}>
                 ${fmt(livePrice)}
@@ -1840,7 +1840,7 @@ export default function TradingView() {
                   fontSize: '0.66rem', fontWeight: 800, color: GOLD_DEEP, letterSpacing: '0.04em',
                 }} title={`EMA lines visible (${emaLines.map(e=>e.period).join('/')})`}>
                   <span style={{ fontSize: '0.72rem', fontWeight: 900, color: '#92710a' }}>EMA</span>
-                  <span style={{ fontSize: '0.66rem', fontWeight: 800, color: '#444' }}>{emaLines.map(e=>e.period).join('/')}</span>
+                  <span style={{ fontSize: '0.66rem', fontWeight: 800, color: 'var(--text)' }}>{emaLines.map(e=>e.period).join('/')}</span>
                   <span style={{ fontSize: '0.66rem', fontWeight: 700, color: emaCrossMarkers && emaCrossMarkers.length > 0 ? '#16a34a' : '#999' }}>{emaCrossMarkers ? `${emaCrossMarkers.length}×` : '0×'}</span>
                 </span>
               )}
@@ -1905,7 +1905,7 @@ export default function TradingView() {
             {/* RSI */}
             {rsi !== null && (
               <div style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', fontSize: '0.78rem', fontWeight: 600 }}>
-                <span style={{ fontSize: '0.7rem', fontWeight: 700, color: '#888' }}>RSI(14):</span>
+                <span style={{ fontSize: '0.7rem', fontWeight: 700, color: 'var(--text)' }}>RSI(14):</span>
                 <span style={{
                   padding: '0.15rem 0.55rem', borderRadius: '20px', fontWeight: 800, fontSize: '0.76rem',
                   background: rsi >= 70 ? 'rgba(239,68,68,0.1)' : rsi <= 30 ? 'rgba(22,163,74,0.1)' : 'rgba(201,162,39,0.1)',
@@ -2029,16 +2029,16 @@ export default function TradingView() {
             if (startupRecovery?.status === 'no_positions') {
               return (
                 <div style={{
-                  background: '#fff',
+                  background: 'var(--card-bg)',
                   border: '1px solid rgba(148,163,184,0.35)',
                   borderRadius: '14px',
                   padding: '0.9rem 1.1rem',
                   boxShadow: '0 2px 12px rgba(0,0,0,0.04)',
                 }}>
-                  <div style={{ fontSize: '0.72rem', fontWeight: 900, letterSpacing: '0.08em', color: '#475569' }}>
+                  <div style={{ fontSize: '0.72rem', fontWeight: 900, letterSpacing: '0.08em', color: 'var(--text)' }}>
                     RECOVERY
                   </div>
-                  <div style={{ marginTop: '0.25rem', fontSize: '0.82rem', color: '#6b7280', fontWeight: 650 }}>
+                  <div style={{ marginTop: '0.25rem', fontSize: '0.82rem', color: 'var(--text)', fontWeight: 650 }}>
                     No position found.
                   </div>
                 </div>
@@ -2062,7 +2062,7 @@ export default function TradingView() {
 
           return (
             <div style={{
-              background: '#fff',
+              background: 'var(--card-bg)',
               border: '1px solid rgba(201,162,39,0.18)',
               borderRadius: '14px',
               overflow: 'hidden',
@@ -2075,7 +2075,7 @@ export default function TradingView() {
               }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '0.45rem' }}>
                   <Activity size={13} color={GOLD_DEEP} />
-                  <span style={{ fontSize: '0.74rem', fontWeight: 800, color: '#111', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+                  <span style={{ fontSize: '0.74rem', fontWeight: 800, color: 'var(--text-h)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
                     Live Tick Stream
                   </span>
                 </div>
@@ -2087,9 +2087,9 @@ export default function TradingView() {
               <div style={{ overflowX: 'auto', overflowY: 'auto', maxHeight: '240px' }}>
                 <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: '1120px', fontSize: '0.67rem' }}>
                   <thead>
-                    <tr style={{ background: '#fdfaf4', position: 'sticky', top: 0, zIndex: 1 }}>
+                    <tr style={{ background: 'var(--bg)', position: 'sticky', top: 0, zIndex: 1 }}>
                       {['Time', 'Src', 'Sellable', 'Bid', 'Mid', 'PnL%', 'QP LMT', 'QP DYN%', 'Trailing SL Dyn', 'Peak', 'Peak Px', 'TP', 'SL Action', 'SL Update', 'Armed', 'Orders'].map((h) => (
-                        <th key={h} style={{ padding: '0.3rem 0.38rem', textAlign: 'left', color: '#888', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.04em', borderBottom: '1px solid rgba(0,0,0,0.08)', whiteSpace: 'nowrap' }}>
+                        <th key={h} style={{ padding: '0.3rem 0.38rem', textAlign: 'left', color: 'var(--text)', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.04em', borderBottom: '1px solid rgba(0,0,0,0.08)', whiteSpace: 'nowrap' }}>
                           {h}
                         </th>
                       ))}
@@ -2141,15 +2141,15 @@ export default function TradingView() {
 
                       return (
                         <tr key={`${tick.ts || idx}-${idx}`} style={{ borderBottom: '1px solid rgba(0,0,0,0.04)', background: rowBg }}>
-                          <td style={{ padding: '0.26rem 0.38rem', fontFamily: 'monospace', color: '#555', whiteSpace: 'nowrap' }}>{fmtTickTime(tick.ts)}</td>
+                          <td style={{ padding: '0.26rem 0.38rem', fontFamily: 'monospace', color: 'var(--text)', whiteSpace: 'nowrap' }}>{fmtTickTime(tick.ts)}</td>
                           <td style={{ padding: '0.26rem 0.38rem', fontFamily: 'monospace', color: isSell ? '#ef4444' : isExitFilled ? (exitFilledIsProfit ? '#16a34a' : '#ef4444') : '#6b7280', fontWeight: 700, whiteSpace: 'nowrap' }}>{src}</td>
-                          <td style={{ padding: '0.26rem 0.38rem', fontFamily: 'monospace', color: '#111', fontWeight: 700, whiteSpace: 'nowrap' }}>
+                          <td style={{ padding: '0.26rem 0.38rem', fontFamily: 'monospace', color: 'var(--text-h)', fontWeight: 700, whiteSpace: 'nowrap' }}>
                             {isExitFilled ? fmtMoneyMaybe(tick.fill_price) : !isOrder ? fmtMoneyMaybe(tick.sellable_price) : (tick.fill_price != null ? fmtMoneyMaybe(tick.fill_price) : fmtMoneyMaybe(tick.limit_price))}
                           </td>
-                          <td style={{ padding: '0.26rem 0.38rem', fontFamily: 'monospace', color: '#666', whiteSpace: 'nowrap' }}>
+                          <td style={{ padding: '0.26rem 0.38rem', fontFamily: 'monospace', color: 'var(--text)', whiteSpace: 'nowrap' }}>
                             {isExitFilled ? `trig@${fmtTickTime(tick.triggered_at)}` : !isOrder ? fmtMoneyMaybe(tick.bid_price) : (tick.stop_price != null ? `stop ${fmtMoneyMaybe(tick.stop_price)}` : '—')}
                           </td>
-                          <td style={{ padding: '0.26rem 0.38rem', fontFamily: 'monospace', color: '#666', whiteSpace: 'nowrap' }}>
+                          <td style={{ padding: '0.26rem 0.38rem', fontFamily: 'monospace', color: 'var(--text)', whiteSpace: 'nowrap' }}>
                             {isExitFilled ? (tick.order_type || '—') : !isOrder ? fmtMoneyMaybe(tick.mid_price) : (tick.limit_price != null ? `lmt ${fmtMoneyMaybe(tick.limit_price)}` : '—')}
                           </td>
                           <td style={{ padding: '0.26rem 0.38rem', fontFamily: 'monospace', color: Number(tick.pnl_pct ?? tick.pct ?? 0) >= 0 ? '#16a34a' : '#dc2626', fontWeight: 700, whiteSpace: 'nowrap' }}>
@@ -2160,11 +2160,11 @@ export default function TradingView() {
                           <td style={{ padding: '0.26rem 0.38rem', fontFamily: 'monospace', color: '#ef4444', whiteSpace: 'nowrap' }}>{fmtPctMaybe(tick.sl_dynamic_pct)}</td>
                           <td style={{ padding: '0.26rem 0.38rem', fontFamily: 'monospace', color: '#6366f1', whiteSpace: 'nowrap' }}>{fmtPctMaybe(tick.max_pnl_pct)}</td>
                           <td style={{ padding: '0.26rem 0.38rem', fontFamily: 'monospace', color: '#6366f1', whiteSpace: 'nowrap' }}>{peakPx != null ? fmtMoneyMaybe(peakPx) : '—'}</td>
-                          <td style={{ padding: '0.26rem 0.38rem', fontFamily: 'monospace', color: '#666', whiteSpace: 'nowrap' }}>{tick.tp_action || (isExitFilled ? '—' : 'NO_CHANGE')}</td>
+                          <td style={{ padding: '0.26rem 0.38rem', fontFamily: 'monospace', color: 'var(--text)', whiteSpace: 'nowrap' }}>{tick.tp_action || (isExitFilled ? '—' : 'NO_CHANGE')}</td>
                           <td style={{ padding: '0.26rem 0.38rem', fontFamily: 'monospace', color: isExitFilled ? (exitFilledIsProfit ? '#16a34a' : '#ef4444') : tick.sl_action === 'UPDATED' ? '#dc2626' : '#666', fontWeight: 700, whiteSpace: 'nowrap' }}>
                             {isExitFilled ? 'EXECUTED' : isOrder ? String(tick.order_type || 'ORDER').toUpperCase() : (tick.sl_action || 'NO_CHANGE')}
                           </td>
-                          <td style={{ padding: '0.26rem 0.38rem', fontFamily: 'monospace', color: '#555', whiteSpace: 'nowrap' }}>
+                          <td style={{ padding: '0.26rem 0.38rem', fontFamily: 'monospace', color: 'var(--text)', whiteSpace: 'nowrap' }}>
                             {isExitFilled
                               ? `${String(tick.order_id || '').slice(0, 8)}… · filled@${fmtTickTime(tick.filled_at)}`
                               : isOrder
@@ -2174,7 +2174,7 @@ export default function TradingView() {
                                   : 'No change'}
                           </td>
                           <td style={{ padding: '0.26rem 0.38rem', textAlign: 'center', color: '#d97706', fontWeight: 800 }}>{tick.qp_armed ? '✓' : '—'}</td>
-                          <td style={{ padding: '0.26rem 0.38rem', fontFamily: 'monospace', color: '#666', whiteSpace: 'nowrap' }}>
+                          <td style={{ padding: '0.26rem 0.38rem', fontFamily: 'monospace', color: 'var(--text)', whiteSpace: 'nowrap' }}>
                             {isExitFilled
                               ? (tick.exit_reason || '—')
                               : isOrder
@@ -2257,7 +2257,7 @@ export default function TradingView() {
           if (symPositions.length === 0) return null
           return (
             <div style={{
-              background: '#fff',
+              background: 'var(--card-bg)',
               border: '1px solid rgba(22,163,74,0.25)',
               borderRadius: '14px',
               overflow: 'hidden',
@@ -2271,7 +2271,7 @@ export default function TradingView() {
               }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
                   <span style={{ width: '7px', height: '7px', borderRadius: '50%', background: '#22c55e', display: 'inline-block', animation: 'livePulse 1.5s infinite' }} />
-                  <span style={{ fontSize: '0.82rem', fontWeight: 800, color: '#111', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+                  <span style={{ fontSize: '0.82rem', fontWeight: 800, color: 'var(--text-h)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
                     Open Positions
                   </span>
                   <span style={{ padding: '0.1rem 0.5rem', borderRadius: '20px', fontSize: '0.65rem', fontWeight: 700, background: 'rgba(22,163,74,0.12)', color: '#16a34a' }}>
@@ -2360,7 +2360,7 @@ export default function TradingView() {
                       ].map(({k, v}) => (
                         <div key={k} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '0.25rem 0', borderBottom: '1px solid rgba(0,0,0,0.04)', fontSize: '0.78rem' }}>
                           <span style={{ color: '#aaa', fontWeight: 600 }}>{k}</span>
-                          <span style={{ color: '#111', fontWeight: 700 }}>{v}</span>
+                          <span style={{ color: 'var(--text-h)', fontWeight: 700 }}>{v}</span>
                         </div>
                       ))}
 
@@ -2412,7 +2412,7 @@ export default function TradingView() {
                         <div style={{ display: 'grid', gap: '0.2rem' }}>
                           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '0.67rem' }}>
                             <span style={{ color: '#ef4444', fontWeight: 800 }}>{slHit ? 'Hit Safety SL' : 'Safety SL'}</span>
-                            <span style={{ color: '#777', fontWeight: 700 }}>
+                            <span style={{ color: 'var(--text)', fontWeight: 700 }}>
                               {safetySlSellPrice == null
                                 ? '—'
                                 : slHit
@@ -2422,7 +2422,7 @@ export default function TradingView() {
                           </div>
                           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '0.67rem' }}>
                             <span style={{ color: '#16a34a', fontWeight: 800 }}>{tpHit ? 'Hit TP' : 'TP'}</span>
-                            <span style={{ color: '#777', fontWeight: 700 }}>
+                            <span style={{ color: 'var(--text)', fontWeight: 700 }}>
                               {tpSellPrice == null
                                 ? '—'
                                 : tpHit
@@ -2434,7 +2434,7 @@ export default function TradingView() {
                             <span style={{ color: '#d97706', fontWeight: 700 }}>
                               {!qpArmed ? 'QP limit not armed' : qpHit ? 'Hit QP limit' : 'Will hit QP limit'}
                             </span>
-                            <span style={{ color: '#777', fontWeight: 700 }}>
+                            <span style={{ color: 'var(--text)', fontWeight: 700 }}>
                               {qpPct == null
                                 ? '—'
                                 : !qpArmed
@@ -2448,10 +2448,10 @@ export default function TradingView() {
 
                         <div style={{ marginTop: '0.45rem', display: 'grid', gap: '0.2rem' }}>
                           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '0.67rem' }}>
-                            <span style={{ color: '#111', fontWeight: 800 }}>
+                            <span style={{ color: 'var(--text-h)', fontWeight: 800 }}>
                               {sellNowPrice == null ? 'Will sell at' : (qpArmed ? 'Will sell at (QP LMT)' : 'Will sell at (SL)')}
                             </span>
-                            <span style={{ color: '#111', fontWeight: 900 }}>
+                            <span style={{ color: 'var(--text-h)', fontWeight: 900 }}>
                               {sellNowPrice != null ? `$${fmt(sellNowPrice)}` : '—'}
                             </span>
                           </div>
@@ -2559,7 +2559,7 @@ export default function TradingView() {
 
           return (
         <div style={{
-          background: '#fff',
+          background: 'var(--card-bg)',
           border: '1px solid rgba(201,162,39,0.15)',
           borderRadius: '14px',
           overflow: 'hidden',
@@ -2575,7 +2575,7 @@ export default function TradingView() {
           }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
               <Layers size={14} color={GOLD_DEEP} />
-              <span style={{ fontSize: '0.82rem', fontWeight: 800, color: '#111', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+              <span style={{ fontSize: '0.82rem', fontWeight: 800, color: 'var(--text-h)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
                 {selected.symbol} · Today's Trades
               </span>
               {filteredHistory.length > 0 && (
@@ -2620,10 +2620,10 @@ export default function TradingView() {
           {filteredHistory.length > 0 && (
             <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center', padding: '0.65rem 1.5rem', background: 'rgba(201,162,39,0.02)', borderBottom: '1px solid rgba(201,162,39,0.07)', flexWrap: 'wrap' }}>
               {[
-                { label: 'Trades', value: filteredHistory.length,                     color: '#555'                              },
+                { label: 'Trades', value: filteredHistory.length,                     color: 'var(--text)'                              },
                 { label: 'Wins',   value: hWins,                                       color: '#16a34a'                           },
                 { label: 'Losses', value: hLosses,                                     color: '#ef4444'                           },
-                { label: 'Win %',  value: `${filteredHistory.length > 0 ? ((hWins / filteredHistory.length) * 100).toFixed(0) : 0}%`, color: '#555' },
+                { label: 'Win %',  value: `${filteredHistory.length > 0 ? ((hWins / filteredHistory.length) * 100).toFixed(0) : 0}%`, color: 'var(--text)' },
                 { label: 'Net P&L',value: `${hNetPnl >= 0 ? '+' : ''}$${fmt(hNetPnl)}`,color: hNetPnl >= 0 ? '#16a34a' : '#ef4444'},
               ].map(chip => (
                 <div key={chip.label} style={{ display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
@@ -2667,7 +2667,7 @@ export default function TradingView() {
                       borderRadius: '11px',
                       border: `1px solid ${accent}44`,
                       borderLeft: `4px solid ${accent}`,
-                      background: '#fff',
+                      background: 'var(--card-bg)',
                       boxShadow: '0 1px 8px rgba(0,0,0,0.03)',
                       padding: '0.72rem 0.9rem 0.8rem',
                     }}
@@ -2676,7 +2676,7 @@ export default function TradingView() {
                       <div style={{ minWidth: 0 }}>
                         <div style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', flexWrap: 'wrap' }}>
                           <span style={{ color: '#bbb', fontSize: '0.67rem', fontWeight: 700 }}>#{i + 1}</span>
-                          <span style={{ color: '#111', fontSize: '0.88rem', fontWeight: 900 }}>{underlying}</span>
+                          <span style={{ color: 'var(--text-h)', fontSize: '0.88rem', fontWeight: 900 }}>{underlying}</span>
                           <span style={{
                             padding: '0.13rem 0.42rem', borderRadius: '4px',
                             fontWeight: 800, fontSize: '0.63rem', letterSpacing: '0.03em',
@@ -2742,7 +2742,7 @@ export default function TradingView() {
                       ].map(row => (
                         <div key={row.k} style={{ background: 'rgba(201,162,39,0.04)', borderRadius: '6px', padding: '0.32rem 0.42rem' }}>
                           <div style={{ fontSize: '0.58rem', color: '#b2b2b2', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.04em' }}>{row.k}</div>
-                          <div style={{ fontSize: '0.72rem', color: '#333', fontWeight: 800, marginTop: '0.08rem', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }} title={String(row.v)}>{row.v || '—'}</div>
+                          <div style={{ fontSize: '0.72rem', color: 'var(--text-h)', fontWeight: 800, marginTop: '0.08rem', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }} title={String(row.v)}>{row.v || '—'}</div>
                         </div>
                       ))}
                     </div>
@@ -2769,7 +2769,7 @@ export default function TradingView() {
                       }}>{isBreakeven ? 'BREAKEVEN' : isWin ? 'WIN' : 'LOSS'}</span>
                       <span style={{
                         fontSize: '0.69rem',
-                        color: '#555',
+                        color: 'var(--text)',
                         fontWeight: 700,
                         maxWidth: '72%',
                         whiteSpace: 'nowrap',
@@ -2806,7 +2806,7 @@ export default function TradingView() {
         )}
 
         {/* AI Trade / Manual Trade Toggle */}
-        <div style={{ display: 'flex', background: '#f3f4f6', borderRadius: '12px', padding: '4px', border: '1px solid rgba(201,162,39,0.15)', flexShrink: 0 }}>
+        <div style={{ display: 'flex', background: 'var(--bg)', borderRadius: '12px', padding: '4px', border: '1px solid rgba(201,162,39,0.15)', flexShrink: 0 }}>
           <button
             onClick={() => handleSetTradeMode('ai')}
             disabled={!tradingConfig.ait_enabled}
@@ -2833,7 +2833,7 @@ export default function TradingView() {
               cursor: tradingConfig.mt_enabled ? 'pointer' : 'not-allowed',
               fontWeight: 700, fontSize: '0.8rem', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.35rem',
               transition: 'all 0.2s', opacity: tradingConfig.mt_enabled ? 1 : 0.4,
-              background: tradeMode === 'manual' ? '#fff' : 'transparent',
+              background: tradeMode === 'manual' ? 'var(--card-bg)' : 'transparent',
               color: tradeMode === 'manual' ? '#111' : '#999',
               boxShadow: tradeMode === 'manual' ? '0 2px 8px rgba(0,0,0,0.1)' : 'none',
             }}
@@ -2845,18 +2845,18 @@ export default function TradingView() {
 
         {/* Entry Strategy Toggles */}
         <div style={{
-          background: '#fff', border: '1px solid rgba(201,162,39,0.18)', borderRadius: '14px',
+          background: 'var(--card-bg)', border: '1px solid rgba(201,162,39,0.18)', borderRadius: '14px',
           padding: '0.95rem 0.9rem', boxShadow: '0 2px 10px rgba(0,0,0,0.04)', flexShrink: 0,
         }}>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.65rem' }}>
-            <div style={{ fontSize: '0.74rem', fontWeight: 800, color: '#111', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+            <div style={{ fontSize: '0.74rem', fontWeight: 800, color: 'var(--text-h)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
               Entry Strategies
             </div>
             <div style={{ fontSize: '0.66rem', fontWeight: 700, color: GOLD_DEEP }}>
               {entryStrategies.enabled.length}/{entryStrategies.maxEnabled}
             </div>
           </div>
-          <div style={{ fontSize: '0.67rem', color: '#777', marginBottom: '0.6rem', lineHeight: 1.35 }}>
+          <div style={{ fontSize: '0.67rem', color: 'var(--text)', marginBottom: '0.6rem', lineHeight: 1.35 }}>
             Enable up to {entryStrategies.maxEnabled} for entry. Exit logic stays unchanged.
           </div>
           <div style={{ display: 'flex', flexDirection: 'column', gap: '0.42rem' }}>
@@ -2874,11 +2874,11 @@ export default function TradingView() {
                     textAlign: 'left',
                     padding: '0.5rem 0.62rem',
                     borderRadius: '9px',
-                    border: `1px solid ${isEnabled ? 'rgba(201,162,39,0.5)' : 'rgba(0,0,0,0.1)'}`,
+                    border: `1px solid ${isEnabled ? 'rgba(201,162,39,0.5)' : 'rgba(128,128,128,0.2)'}`,
                     background: isEnabled
                       ? 'linear-gradient(135deg, rgba(201,162,39,0.18) 0%, rgba(245,197,24,0.2) 100%)'
-                      : '#fff',
-                    color: isEnabled ? '#111' : '#555',
+                      : 'var(--bg)',
+                    color: isEnabled ? 'var(--text-h)' : 'var(--text)',
                     fontSize: '0.72rem',
                     fontWeight: isEnabled ? 700 : 600,
                     cursor: strategyBusy || maxReached ? 'not-allowed' : 'pointer',
@@ -2912,8 +2912,8 @@ export default function TradingView() {
         <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
 
           {/* Manual Trade Form */}
-          <div style={{ background: '#fff', border: '1px solid rgba(201,162,39,0.15)', borderRadius: '14px', padding: '1.25rem', boxShadow: '0 2px 12px rgba(0,0,0,0.04)' }}>
-            <div style={{ fontSize: '0.78rem', fontWeight: 700, color: '#111', marginBottom: '1rem', textTransform: 'uppercase', letterSpacing: '0.06em', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+          <div style={{ background: 'var(--card-bg)', border: '1px solid rgba(201,162,39,0.15)', borderRadius: '14px', padding: '1.25rem', boxShadow: '0 2px 12px rgba(0,0,0,0.04)' }}>
+            <div style={{ fontSize: '0.78rem', fontWeight: 700, color: 'var(--text-h)', marginBottom: '1rem', textTransform: 'uppercase', letterSpacing: '0.06em', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
               <User size={13} color={GOLD_DEEP} /> Trade Setup
               {suggestLoading && autoSuggestEnabled && (
                 <span style={{ marginLeft: 'auto', fontSize: '0.65rem', color: GOLD_DEEP, fontWeight: 600 }}>loading...</span>
@@ -2947,21 +2947,21 @@ export default function TradingView() {
 
             {/* Strike Price */}
             <div style={{ marginBottom: '0.8rem' }}>
-              <label style={{ fontSize: '0.68rem', fontWeight: 700, color: '#888', textTransform: 'uppercase', letterSpacing: '0.05em', display: 'block', marginBottom: '0.35rem' }}>Strike Price</label>
-              <div style={{ display: 'flex', alignItems: 'center', border: `1.5px solid ${manualPosition ? 'rgba(0,0,0,0.08)' : 'rgba(201,162,39,0.3)'}`, borderRadius: '8px', padding: '0.48rem 0.75rem', background: manualPosition ? '#f9f9f9' : '#fff' }}>
+              <label style={{ fontSize: '0.68rem', fontWeight: 700, color: 'var(--text)', textTransform: 'uppercase', letterSpacing: '0.05em', display: 'block', marginBottom: '0.35rem' }}>Strike Price</label>
+              <div style={{ display: 'flex', alignItems: 'center', border: `1.5px solid ${manualPosition ? 'rgba(0,0,0,0.08)' : 'rgba(201,162,39,0.3)'}`, borderRadius: '8px', padding: '0.48rem 0.75rem', background: 'var(--card-bg)' }}>
                 <span style={{ fontSize: '0.82rem', color: '#aaa', marginRight: '3px', fontWeight: 600 }}>$</span>
                         <input
                           type="number" step="1" inputMode="numeric" placeholder="e.g. 185"
                           value={strikePrice}
                           disabled={!!manualPosition}
                           onChange={e => setStrikePrice(e.target.value)}
-                          style={{ flex: 1, border: 'none', outline: 'none', background: 'transparent', fontSize: '0.88rem', fontWeight: 700, color: '#111', minWidth: 0 }}
+                          style={{ flex: 1, border: 'none', outline: 'none', background: 'transparent', fontSize: '0.88rem', fontWeight: 700, color: 'var(--text-h)', minWidth: 0 }}
                         />
             </div>
 
             {/* Direction */}
             <div style={{ marginBottom: '0.8rem' }}>
-              <label style={{ fontSize: '0.68rem', fontWeight: 700, color: '#888', textTransform: 'uppercase', letterSpacing: '0.05em', display: 'block', marginBottom: '0.35rem' }}>Direction</label>
+              <label style={{ fontSize: '0.68rem', fontWeight: 700, color: 'var(--text)', textTransform: 'uppercase', letterSpacing: '0.05em', display: 'block', marginBottom: '0.35rem' }}>Direction</label>
               <div style={{ display: 'flex', gap: '0.4rem' }}>
                 {[
                   { val: 'uptrend',   label: 'Uptrend',   icon: <TrendingUp size={12} />,   activeColor: '#16a34a', activeBg: 'rgba(22,163,74,0.1)',  activeBorder: 'rgba(22,163,74,0.3)'  },
@@ -2970,7 +2970,7 @@ export default function TradingView() {
                   <button key={opt.val} onClick={() => setDirection(opt.val)} disabled={!!manualPosition} style={{
                     flex: 1, padding: '0.45rem 0.3rem', borderRadius: '8px', border: 'none', cursor: manualPosition ? 'not-allowed' : 'pointer',
                     fontWeight: 700, fontSize: '0.75rem', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.25rem',
-                    background: direction === opt.val ? opt.activeBg : '#f3f4f6',
+                    background: direction === opt.val ? opt.activeBg : 'var(--bg)',
                     color: direction === opt.val ? opt.activeColor : '#aaa',
                     outline: direction === opt.val ? `1.5px solid ${opt.activeBorder}` : '1.5px solid transparent',
                     opacity: manualPosition ? 0.6 : 1, transition: 'all 0.15s',
@@ -2981,7 +2981,7 @@ export default function TradingView() {
 
             {/* Call / Put */}
             <div style={{ marginBottom: '0.8rem' }}>
-              <label style={{ fontSize: '0.68rem', fontWeight: 700, color: '#888', textTransform: 'uppercase', letterSpacing: '0.05em', display: 'block', marginBottom: '0.35rem' }}>Option Type</label>
+              <label style={{ fontSize: '0.68rem', fontWeight: 700, color: 'var(--text)', textTransform: 'uppercase', letterSpacing: '0.05em', display: 'block', marginBottom: '0.35rem' }}>Option Type</label>
               <div style={{ display: 'flex', gap: '0.4rem' }}>
                 {[
                   { val: 'call', activeColor: '#16a34a', activeBg: 'rgba(22,163,74,0.1)',  activeBorder: 'rgba(22,163,74,0.3)'  },
@@ -2997,7 +2997,7 @@ export default function TradingView() {
                   }} disabled={!!manualPosition} style={{
                     flex: 1, padding: '0.45rem', borderRadius: '8px', border: 'none', cursor: manualPosition ? 'not-allowed' : 'pointer',
                     fontWeight: 800, fontSize: '0.8rem', textTransform: 'uppercase', letterSpacing: '0.05em',
-                    background: optionType === opt.val ? opt.activeBg : '#f3f4f6',
+                    background: optionType === opt.val ? opt.activeBg : 'var(--bg)',
                     color: optionType === opt.val ? opt.activeColor : '#aaa',
                     outline: optionType === opt.val ? `1.5px solid ${opt.activeBorder}` : '1.5px solid transparent',
                     opacity: manualPosition ? 0.6 : 1, transition: 'all 0.15s',
@@ -3009,19 +3009,19 @@ export default function TradingView() {
             {/* Expiry & Qty */}
             <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '0.9rem' }}>
               <div style={{ flex: 1 }}>
-                <label style={{ fontSize: '0.68rem', fontWeight: 700, color: '#888', textTransform: 'uppercase', letterSpacing: '0.05em', display: 'block', marginBottom: '0.35rem' }}>Expiry</label>
+                <label style={{ fontSize: '0.68rem', fontWeight: 700, color: 'var(--text)', textTransform: 'uppercase', letterSpacing: '0.05em', display: 'block', marginBottom: '0.35rem' }}>Expiry</label>
                 <input
                   type="date" value={expiry} disabled={!!manualPosition}
                   onChange={e => setExpiry(e.target.value)}
-                  style={{ width: '100%', padding: '0.48rem 0.4rem', border: `1.5px solid ${manualPosition ? 'rgba(0,0,0,0.08)' : 'rgba(201,162,39,0.3)'}`, borderRadius: '8px', background: manualPosition ? '#f9f9f9' : '#fff', color: '#111', fontSize: '0.72rem', fontWeight: 600, outline: 'none', opacity: manualPosition ? 0.6 : 1, boxSizing: 'border-box' }}
+                  style={{ width: '100%', padding: '0.48rem 0.4rem', border: `1.5px solid ${manualPosition ? 'rgba(0,0,0,0.08)' : 'rgba(201,162,39,0.3)'}`, borderRadius: '8px', background: 'var(--card-bg)', color: 'var(--text-h)', fontSize: '0.72rem', fontWeight: 600, outline: 'none', opacity: manualPosition ? 0.6 : 1, boxSizing: 'border-box' }}
                 />
               </div>
               <div style={{ width: '60px' }}>
-                <label style={{ fontSize: '0.68rem', fontWeight: 700, color: '#888', textTransform: 'uppercase', letterSpacing: '0.05em', display: 'block', marginBottom: '0.35rem' }}>Qty</label>
+                <label style={{ fontSize: '0.68rem', fontWeight: 700, color: 'var(--text)', textTransform: 'uppercase', letterSpacing: '0.05em', display: 'block', marginBottom: '0.35rem' }}>Qty</label>
                 <input
                   type="number" min="1" max="100" value={qty} disabled={!!manualPosition}
                   onChange={e => setQty(e.target.value)}
-                  style={{ width: '100%', padding: '0.48rem 0.3rem', border: `1.5px solid ${manualPosition ? 'rgba(0,0,0,0.08)' : 'rgba(201,162,39,0.3)'}`, borderRadius: '8px', background: manualPosition ? '#f9f9f9' : '#fff', color: '#111', fontSize: '0.88rem', fontWeight: 700, outline: 'none', textAlign: 'center', opacity: manualPosition ? 0.6 : 1, boxSizing: 'border-box' }}
+                  style={{ width: '100%', padding: '0.48rem 0.3rem', border: `1.5px solid ${manualPosition ? 'rgba(0,0,0,0.08)' : 'rgba(201,162,39,0.3)'}`, borderRadius: '8px', background: 'var(--card-bg)', color: 'var(--text-h)', fontSize: '0.88rem', fontWeight: 700, outline: 'none', textAlign: 'center', opacity: manualPosition ? 0.6 : 1, boxSizing: 'border-box' }}
                 />
               </div>
             </div>
@@ -3029,7 +3029,7 @@ export default function TradingView() {
             {/* Order Summary */}
             <div style={{ marginBottom: '0.9rem', padding: '0.55rem 0.75rem', background: 'rgba(201,162,39,0.05)', borderRadius: '8px', border: '1px solid rgba(201,162,39,0.15)', fontSize: '0.75rem', color: '#999', fontWeight: 600, display: 'flex', flexWrap: 'wrap', gap: '0.3rem', lineHeight: 1.6 }}>
               <span style={{ color: optionType === 'call' ? '#16a34a' : '#ef4444', fontWeight: 800, textTransform: 'uppercase' }}>{optionType}</span>
-              {strikePrice && <><span>·</span><span style={{ color: '#111' }}>${strikePrice}</span></>}
+              {strikePrice && <><span>·</span><span style={{ color: 'var(--text-h)' }}>${strikePrice}</span></>}
               {expiry && <><span>·</span><span>{expiry}</span></>}
               <span>·</span>
               <span style={{ color: GOLD_DEEP }}>×{qty || 1} lot{parseInt(qty) !== 1 ? 's' : ''}</span>
@@ -3042,19 +3042,19 @@ export default function TradingView() {
                 padding: '0.45rem 0.65rem',
                 borderRadius: '8px',
                 border: '1px solid rgba(0,0,0,0.08)',
-                background: '#fafafa',
+                background: 'var(--bg)',
                 fontSize: '0.66rem',
                 lineHeight: 1.4,
                 display: 'grid',
                 gap: '0.2rem',
               }}>
-                <div style={{ color: '#666', fontWeight: 700 }}>
-                  SELECTED {optionType.toUpperCase()} CONTRACT: <span style={{ color: '#111', fontFamily: 'monospace' }}>{(optionType === 'put' ? quoteBook.put?.contract_name : quoteBook.call?.contract_name) || '—'}</span>
+                <div style={{ color: 'var(--text)', fontWeight: 700 }}>
+                  SELECTED {optionType.toUpperCase()} CONTRACT: <span style={{ color: 'var(--text-h)', fontFamily: 'monospace' }}>{(optionType === 'put' ? quoteBook.put?.contract_name : quoteBook.call?.contract_name) || '—'}</span>
                 </div>
-                <div style={{ color: '#888', fontWeight: 700 }}>
-                  Expiry: <span style={{ color: '#111' }}>{(optionType === 'put' ? quoteBook.put?.expiry : quoteBook.call?.expiry) || expiry || '—'}</span>
+                <div style={{ color: 'var(--text)', fontWeight: 700 }}>
+                  Expiry: <span style={{ color: 'var(--text-h)' }}>{(optionType === 'put' ? quoteBook.put?.expiry : quoteBook.call?.expiry) || expiry || '—'}</span>
                   {' · '}
-                  Strike: <span style={{ color: '#111' }}>${(optionType === 'put' ? quoteBook.put?.strike_price : quoteBook.call?.strike_price) ?? strikePrice ?? '—'}</span>
+                  Strike: <span style={{ color: 'var(--text-h)' }}>${(optionType === 'put' ? quoteBook.put?.strike_price : quoteBook.call?.strike_price) ?? strikePrice ?? '—'}</span>
                 </div>
               </div>
             )}
@@ -3101,8 +3101,8 @@ export default function TradingView() {
                     <div style={{ fontSize: '0.82rem', fontWeight: 800, color: '#ef4444' }}>${contractQuote.ask.toFixed(2)}</div>
                   </div>
                   <div style={{ flex: 1, padding: '0.42rem 0.6rem', borderRadius: '7px', background: 'rgba(100,100,100,0.06)', border: '1px solid rgba(100,100,100,0.13)', textAlign: 'center' }}>
-                    <div style={{ fontSize: '0.6rem', fontWeight: 700, color: '#888', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Mid</div>
-                    <div style={{ fontSize: '0.82rem', fontWeight: 800, color: '#555' }}>${contractQuote.mid.toFixed(2)}</div>
+                    <div style={{ fontSize: '0.6rem', fontWeight: 700, color: 'var(--text)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Mid</div>
+                    <div style={{ fontSize: '0.82rem', fontWeight: 800, color: 'var(--text)' }}>${contractQuote.mid.toFixed(2)}</div>
                   </div>
                 </div>
                 {/* Spread warning: >10% spread = wide, you'll immediately be down */}
@@ -3195,8 +3195,8 @@ export default function TradingView() {
               : 0
 
             return (
-          <div style={{ background: '#fff', border: '1px solid rgba(201,162,39,0.15)', borderRadius: '14px', padding: '1.25rem', boxShadow: '0 2px 12px rgba(0,0,0,0.04)' }}>
-            <div style={{ fontSize: '0.78rem', fontWeight: 700, color: '#111', marginBottom: '0.85rem', textTransform: 'uppercase', letterSpacing: '0.06em', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+          <div style={{ background: 'var(--card-bg)', border: '1px solid rgba(201,162,39,0.15)', borderRadius: '14px', padding: '1.25rem', boxShadow: '0 2px 12px rgba(0,0,0,0.04)' }}>
+            <div style={{ fontSize: '0.78rem', fontWeight: 700, color: 'var(--text-h)', marginBottom: '0.85rem', textTransform: 'uppercase', letterSpacing: '0.06em', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
               <Activity size={13} color={GOLD} />
               Contract Tracker
               {trackedPos && (
@@ -3232,7 +3232,7 @@ export default function TradingView() {
               },
             ].map((row, i, arr) => (
               <div key={i} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '0.5rem 0', borderBottom: i < arr.length - 1 ? '1px solid rgba(0,0,0,0.04)' : 'none' }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.75rem', color: '#888', fontWeight: 500 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.75rem', color: 'var(--text)', fontWeight: 500 }}>
                   {row.label}
                   {row.live && trackedPos && (
                     <span style={{ width: '5px', height: '5px', borderRadius: '50%', background: '#22c55e', display: 'inline-block', animation: 'livePulse 1.5s infinite' }} />
@@ -3268,7 +3268,7 @@ export default function TradingView() {
 
             return (
               <div style={{
-                background: '#fff',
+                background: 'var(--card-bg)',
                 border: '1px solid rgba(201,162,39,0.15)',
                 borderRadius: '14px',
                 overflow: 'hidden',
@@ -3279,7 +3279,7 @@ export default function TradingView() {
                   padding: '0.72rem 0.9rem', borderBottom: '1px solid rgba(201,162,39,0.1)',
                   background: 'rgba(201,162,39,0.03)', gap: '0.45rem',
                 }}>
-                  <span style={{ fontSize: '0.68rem', fontWeight: 800, color: '#111', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                  <span style={{ fontSize: '0.68rem', fontWeight: 800, color: 'var(--text-h)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
                     Tick Log
                   </span>
                   <span style={{ fontSize: '0.6rem', color: '#9ca3af', fontWeight: 700, maxWidth: '130px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={contract}>
@@ -3290,9 +3290,9 @@ export default function TradingView() {
                 <div style={{ overflowX: 'auto', overflowY: 'auto', maxHeight: '255px' }}>
                   <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: '560px', fontSize: '0.62rem' }}>
                     <thead>
-                      <tr style={{ background: '#fdfaf4', position: 'sticky', top: 0, zIndex: 1 }}>
+                      <tr style={{ background: 'var(--bg)', position: 'sticky', top: 0, zIndex: 1 }}>
                         {['Time', 'Src', 'Price', 'PnL%', 'Peak%', 'Peak Px'].map(h => (
-                          <th key={h} style={{ padding: '0.24rem 0.35rem', textAlign: 'left', fontWeight: 800, color: '#888', borderBottom: '1px solid rgba(0,0,0,0.08)', whiteSpace: 'nowrap', textTransform: 'uppercase', letterSpacing: '0.04em' }}>{h}</th>
+                          <th key={h} style={{ padding: '0.24rem 0.35rem', textAlign: 'left', fontWeight: 800, color: 'var(--text)', borderBottom: '1px solid rgba(0,0,0,0.08)', whiteSpace: 'nowrap', textTransform: 'uppercase', letterSpacing: '0.04em' }}>{h}</th>
                         ))}
                       </tr>
                     </thead>
@@ -3333,9 +3333,9 @@ export default function TradingView() {
 
                         return (
                           <tr key={`${tick.ts || idx}-${idx}`} style={{ background: rowBg, borderBottom: '1px solid rgba(0,0,0,0.04)' }}>
-                            <td style={{ padding: '0.22rem 0.35rem', fontFamily: 'monospace', color: '#555', whiteSpace: 'nowrap' }}>{fmtTickTime(tick.ts)}</td>
+                            <td style={{ padding: '0.22rem 0.35rem', fontFamily: 'monospace', color: 'var(--text)', whiteSpace: 'nowrap' }}>{fmtTickTime(tick.ts)}</td>
                             <td style={{ padding: '0.22rem 0.35rem', fontFamily: 'monospace', color: isSell ? '#ef4444' : isExitFilled ? (exitFilledIsProfit ? '#16a34a' : '#ef4444') : '#6b7280', fontWeight: 700, whiteSpace: 'nowrap' }}>{src}</td>
-                            <td style={{ padding: '0.22rem 0.35rem', fontFamily: 'monospace', color: '#111', fontWeight: 700, whiteSpace: 'nowrap' }}>{fmtMoneyMaybe(price)}</td>
+                            <td style={{ padding: '0.22rem 0.35rem', fontFamily: 'monospace', color: 'var(--text-h)', fontWeight: 700, whiteSpace: 'nowrap' }}>{fmtMoneyMaybe(price)}</td>
                             <td style={{ padding: '0.22rem 0.35rem', fontFamily: 'monospace', color: Number(pnlRaw ?? 0) >= 0 ? '#16a34a' : '#dc2626', fontWeight: 700, whiteSpace: 'nowrap' }}>{fmtPctMaybe(pnlRaw)}</td>
                             <td style={{ padding: '0.22rem 0.35rem', fontFamily: 'monospace', color: '#6366f1', whiteSpace: 'nowrap' }}>{fmtPctMaybe(tick.max_pnl_pct)}</td>
                             <td style={{ padding: '0.22rem 0.35rem', fontFamily: 'monospace', color: '#6366f1', whiteSpace: 'nowrap' }}>{peakPx != null ? fmtMoneyMaybe(peakPx) : '—'}</td>
@@ -3353,7 +3353,7 @@ export default function TradingView() {
         {/* ── Backend Activity Panel ──────────────────────────────────────── */}
         {/* Shows which symbols are running, what mode, and live position state */}
         <div style={{
-          background: '#fff',
+          background: 'var(--card-bg)',
           border: '1px solid rgba(201,162,39,0.15)',
           borderRadius: '14px',
           overflow: 'hidden',
@@ -3367,7 +3367,7 @@ export default function TradingView() {
             display: 'flex', alignItems: 'center', gap: '0.5rem',
           }}>
             <Activity size={13} color={GOLD_DEEP} />
-            <span style={{ fontSize: '0.72rem', fontWeight: 800, color: '#111', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+            <span style={{ fontSize: '0.72rem', fontWeight: 800, color: 'var(--text-h)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
               Backend Activity
             </span>
             {/* Global config flags */}
@@ -3471,7 +3471,7 @@ export default function TradingView() {
               <div key={toast.id} style={{
                 display: 'flex', alignItems: 'center', gap: '0.65rem',
                 padding: '0.6rem 1rem', borderRadius: '10px',
-                background: '#fff', border: `1px solid ${cfg.border}`,
+                background: 'var(--card-bg)', border: `1px solid ${cfg.border}`,
                 boxShadow: `0 4px 20px rgba(0,0,0,0.1), 0 0 0 1px ${cfg.border}`,
                 minWidth: '240px', maxWidth: '340px',
                 animation: 'slideInToast 0.22s ease',
@@ -3485,7 +3485,7 @@ export default function TradingView() {
                 }}>
                   {cfg.icon}
                 </span>
-                <span style={{ fontSize: '0.78rem', fontWeight: 700, color: '#111', lineHeight: 1.35 }}>
+                <span style={{ fontSize: '0.78rem', fontWeight: 700, color: 'var(--text-h)', lineHeight: 1.35 }}>
                   {toast.message}
                 </span>
               </div>

@@ -1,4 +1,4 @@
-import React, { useLayoutEffect, useRef, useState } from "react";
+import React, { useLayoutEffect, useEffect, useRef, useState } from "react";
 import {
   createChart,
   CandlestickSeries,
@@ -89,23 +89,51 @@ const CandleChart = ({
   const rsiMeanReversionMarkersRef = useRef(null);
   const prevFitKeyRef = useRef(null);
   const [hoveredBar, setHoveredBar] = useState(null);
+  const [isDark, setIsDark] = useState(() => document.documentElement.hasAttribute('data-dark'));
+
+  // Watch for dark mode toggle on <html data-dark>
+  useEffect(() => {
+    const observer = new MutationObserver(() => {
+      setIsDark(document.documentElement.hasAttribute('data-dark'));
+    });
+    observer.observe(document.documentElement, { attributes: true, attributeFilter: ['data-dark'] });
+    return () => observer.disconnect();
+  }, []);
+
+  // Apply chart colors when dark mode changes
+  useLayoutEffect(() => {
+    if (!chartRef.current) return;
+    chartRef.current.applyOptions({
+      layout: {
+        background: { color: isDark ? '#000000' : '#ffffff' },
+        textColor: isDark ? '#c8c8c8' : '#555555',
+      },
+      grid: {
+        vertLines: { color: isDark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)' },
+        horzLines: { color: isDark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)' },
+      },
+      rightPriceScale: { borderColor: isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.08)' },
+      timeScale: { borderColor: isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.08)' },
+    });
+  }, [isDark]);
 
   // Initialize chart on mount
   useLayoutEffect(() => {
     if (!containerRef.current) return;
 
     try {
+      const dark = document.documentElement.hasAttribute('data-dark');
       const chart = createChart(containerRef.current, {
         width: containerRef.current.clientWidth,
         height: 400,
         layout: {
           attributionLogo: false,
-          background: { color: "#ffffff" },
-          textColor: "#555555",
+          background: { color: dark ? '#000000' : '#ffffff' },
+          textColor: dark ? '#c8c8c8' : '#555555',
         },
         grid: {
-          vertLines: { color: "rgba(0,0,0,0.05)" },
-          horzLines: { color: "rgba(0,0,0,0.05)" },
+          vertLines: { color: dark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)' },
+          horzLines: { color: dark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)' },
         },
         localization: {
           timeFormatter: (time) => {
@@ -117,9 +145,9 @@ const CandleChart = ({
             });
           },
         },
-        rightPriceScale: { borderColor: 'rgba(0,0,0,0.08)' },
+        rightPriceScale: { borderColor: dark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.08)' },
         timeScale: {
-          borderColor: 'rgba(0,0,0,0.08)',
+          borderColor: dark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.08)',
           timeVisible: true,
           secondsVisible: false,
           fixLeftEdge: false,
@@ -559,17 +587,17 @@ const CandleChart = ({
         <div style={{
           position: 'absolute', top: '10px', left: '12px', zIndex: 10,
           display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap',
-          background: 'rgba(255,255,255,0.92)',
-          border: '1px solid rgba(0,0,0,0.07)',
+          background: isDark ? 'rgba(0,0,0,0.88)' : 'rgba(255,255,255,0.92)',
+          border: isDark ? '1px solid rgba(255,255,255,0.1)' : '1px solid rgba(0,0,0,0.07)',
           borderRadius: '8px',
           padding: '5px 12px',
           fontSize: '0.75rem',
           fontWeight: 700,
           pointerEvents: 'none',
-          boxShadow: '0 2px 8px rgba(0,0,0,0.08)',
+          boxShadow: '0 2px 8px rgba(0,0,0,0.18)',
           backdropFilter: 'blur(4px)',
         }}>
-          <span style={{ color: '#999', fontWeight: 500, fontSize: '0.68rem' }}>{hoveredBar.time}</span>
+          <span style={{ color: isDark ? '#888' : '#999', fontWeight: 500, fontSize: '0.68rem' }}>{hoveredBar.time}</span>
           {[
             { label: 'O', value: fmtP(hoveredBar.open),  color: isUp ? '#16a34a' : '#ef4444' },
             { label: 'H', value: fmtP(hoveredBar.high),  color: '#16a34a' },

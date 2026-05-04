@@ -62,3 +62,57 @@ body {
 ::-webkit-scrollbar-corner {
   background: transparent;
 }
+
+
+/* ── Dark mode: pure black instead of white ── */
+[data-dark] {
+  --bg: #000000;
+  --card-bg: #000000;
+  --border: rgba(201, 162, 39, 0.22);
+  --text: #c8c8c8;
+  --text-h: #f0f0f0;
+  color-scheme: dark;
+}
+
+/* Override hardcoded white/near-white backgrounds in inline styles */
+[data-dark] [style*="background: #fff"],
+[data-dark] [style*="background:#fff"],
+[data-dark] [style*="background: #ffffff"],
+[data-dark] [style*="background:#ffffff"],
+[data-dark] [style*="background: #fdfcf8"],
+[data-dark] [style*="background: #fdfaf4"],
+[data-dark] [style*="background: #fafafa"],
+[data-dark] [style*="background: #f9f9f9"],
+[data-dark] [style*="background: #f8f9fa"],
+[data-dark] [style*="background: #f5f5f5"],
+[data-dark] [style*="background: #f3f4f6"],
+[data-dark] [style*="background-color: #fff"],
+[data-dark] [style*="background-color: #ffffff"] {
+  background: #000000 !important;
+  background-color: #000000 !important;
+}
+
+/* Override hardcoded near-black text that becomes invisible on black */
+[data-dark] [style*="color: #111"] { color: #e8e8e8 !important; }
+[data-dark] [style*="color: #000"] { color: #e8e8e8 !important; }
+[data-dark] [style*="color: #222"] { color: #d8d8d8 !important; }
+[data-dark] [style*="color: #333"] { color: #c8c8c8 !important; }
+[data-dark] [style*="color: #444"] { color: #b8b8b8 !important; }
+[data-dark] [style*="color: #555"] { color: #aaaaaa !important; }
+[data-dark] [style*="color: #666"] { color: #999999 !important; }
+[data-dark] [style*="color: #777"] { color: #909090 !important; }
+[data-dark] [style*="color: black"] { color: #e8e8e8 !important; }
+
+/* Form inputs and selects */
+[data-dark] input,
+[data-dark] select,
+[data-dark] textarea {
+  background: #000000 !important;
+  color: #e8e8e8 !important;
+}
+
+/* Table header near-whites */
+[data-dark] thead tr,
+[data-dark] [style*="background: #fdfaf4"] {
+  background: #111111 !important;
+}
