@@ -15,6 +15,8 @@ from config import (
 	EMA_FAST_PERIOD,
 	EMA_SLOW_PERIOD,
 	EMA_THIRD_PERIOD,
+	ENTRY_SR_PROXIMITY_PCT,
+	ENTRY_TREND_PERSISTENCE_BARS,
 	PRICE_POLL_SEC,
 	RSI_MA_PERIOD,
 	RSI_PERIOD,
@@ -368,6 +370,23 @@ def analyze_rsi(symbol: str = SYMBOL) -> dict:
 	result["ema_triple_bull"] = curr_fast_above and float(ema_slow.iloc[-1]) > ema_third_val
 	result["ema_triple_bear"] = (not curr_fast_above) and float(ema_slow.iloc[-1]) < ema_third_val
 
+	# Multi-bar EMA persistence — regime gate must hold for N consecutive bars.
+	persist_n = max(1, int(ENTRY_TREND_PERSISTENCE_BARS))
+	if len(ema_fast) >= persist_n:
+		recent_fast = ema_fast.iloc[-persist_n:]
+		recent_slow = ema_slow.iloc[-persist_n:]
+		recent_third = ema_third.iloc[-persist_n:]
+		result["ema_triple_bull_persist"] = bool(
+			(recent_fast > recent_slow).all() and (recent_slow > recent_third).all()
+		)
+		result["ema_triple_bear_persist"] = bool(
+			(recent_fast < recent_slow).all() and (recent_slow < recent_third).all()
+		)
+	else:
+		result["ema_triple_bull_persist"] = False
+		result["ema_triple_bear_persist"] = False
+	result["ema_persist_bars"] = persist_n
+
 	# Check recent EMA cross (within last 5 bars) — don't require it on THIS exact bar
 	ema_bullish_regime = False
 	ema_bearish_regime = False
@@ -583,6 +602,85 @@ def analyze_rsi(symbol: str = SYMBOL) -> dict:
 
 	result["vwap"] = round(vwap_val, 4) if vwap_val is not None else None
 	result["price_above_vwap"] = (current_close > vwap_val) if vwap_val is not None else None
+
+	# ── ATR(14) on 1-min bars (Wilder smoothing) ──
+	high_s = df["high"].astype("float64")
+	low_s = df["low"].astype("float64")
+	prev_close_s = closes.shift(1)
+	tr = pd.concat(
+		[
+			high_s - low_s,
+			(high_s - prev_close_s).abs(),
+			(low_s - prev_close_s).abs(),
+		],
+		axis=1,
+	).max(axis=1)
+	atr_series = tr.ewm(alpha=1.0 / 14.0, adjust=False, min_periods=14).mean()
+	atr_14 = float(atr_series.iloc[-1]) if pd.notna(atr_series.iloc[-1]) else None
+	result["atr_14"] = round(atr_14, 4) if atr_14 is not None else None
+	result["atr_pct"] = (
+		round(atr_14 / current_close * 100.0, 4)
+		if atr_14 is not None and current_close > 0
+		else None
+	)
+
+	# ── BB width (BBB) + 20-bar rolling avg ──
+	bb_width = bb_upper - bb_lower
+	bbb_now = float(bb_width.iloc[-1]) if pd.notna(bb_width.iloc[-1]) else None
+	bbb_avg = bb_width.rolling(window=20).mean()
+	bbb_avg_now = float(bbb_avg.iloc[-1]) if pd.notna(bbb_avg.iloc[-1]) else None
+	result["bbb"] = round(bbb_now, 4) if bbb_now is not None else None
+	result["bbb_avg20"] = round(bbb_avg_now, 4) if bbb_avg_now is not None else None
+	result["bb_expanding"] = bool(
+		bbb_now is not None and bbb_avg_now is not None and bbb_avg_now > 0 and bbb_now > bbb_avg_now * 2.0
+	)
+
+	# ── Opening volatility zone (09:30-09:45 ET) ──
+	bar_ny = last_bar_time.astimezone(ny_tz) if last_bar_time else None
+	if bar_ny is not None:
+		bar_minutes = bar_ny.hour * 60 + bar_ny.minute
+		result["in_opening_zone"] = bool(9 * 60 + 30 <= bar_minutes < 9 * 60 + 45)
+	else:
+		result["in_opening_zone"] = False
+
+	# ── Prior session high/low from intraday lookback ──
+	prior_dates = sorted(
+		{
+			ts.astimezone(ny_tz).date()
+			for ts in timestamps
+			if ts is not None and ts.astimezone(ny_tz).date() < today_ny
+		}
+	)
+	if prior_dates:
+		prev_session_date = prior_dates[-1]
+		prev_mask = timestamps.apply(
+			lambda ts: ts is not None and ts.astimezone(ny_tz).date() == prev_session_date
+		)
+		prev_session = df.loc[prev_mask]
+		prev_day_high = float(prev_session["high"].max()) if not prev_session.empty else None
+		prev_day_low = float(prev_session["low"].min()) if not prev_session.empty else None
+	else:
+		prev_day_high = None
+		prev_day_low = None
+	result["prev_day_high"] = round(prev_day_high, 4) if prev_day_high is not None else None
+	result["prev_day_low"] = round(prev_day_low, 4) if prev_day_low is not None else None
+
+	# ── S/R wall: price within ±N% of PDH / PDL / VWAP ──
+	def _within_pct(price: float, level, pct: float) -> bool:
+		if level is None or level <= 0:
+			return False
+		return abs(price - float(level)) / float(level) <= pct
+
+	sr_pct = float(ENTRY_SR_PROXIMITY_PCT)
+	sr_walls_hit: list[str] = []
+	if _within_pct(current_close, prev_day_high, sr_pct):
+		sr_walls_hit.append("PDH")
+	if _within_pct(current_close, prev_day_low, sr_pct):
+		sr_walls_hit.append("PDL")
+	if _within_pct(current_close, vwap_val, sr_pct):
+		sr_walls_hit.append("VWAP")
+	result["at_sr_wall"] = bool(sr_walls_hit)
+	result["sr_walls_hit"] = sr_walls_hit
 
 	return result
 

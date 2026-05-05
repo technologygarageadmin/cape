@@ -2,9 +2,11 @@ from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from alpaca.trading.enums import ContractType, OrderSide
 from config import (
+    ENTRY_ATR_PCT_MIN,
     ENTRY_CONFLUENCE_CANDLE_BODY_MIN,
     ENTRY_CONFLUENCE_MIN_SCORE,
     ENTRY_CONFLUENCE_VOLUME_RATIO_MIN,
+    ENTRY_OPENING_ZONE_VETO_ENABLED,
     ENTRY_RSI_VETO_CALL_MAX,
     ENTRY_RSI_VETO_PUT_MIN,
     ENTRY_SETUP_A_ENABLED,
@@ -66,27 +68,26 @@ def _in_trade_window() -> bool:
 def classify_regime(rsi_result: dict) -> str:
     """Return BULL, BEAR, or CHOP.
 
-    BULL requires: price > VWAP AND EMA9 > EMA21 > EMA55 AND RSI > 50
-    BEAR requires: price < VWAP AND EMA9 < EMA21 < EMA55 AND RSI < 50
+    BULL requires: price > VWAP AND EMA9 > EMA21 > EMA55 (held N bars) AND RSI > 50.
+    BEAR requires: price < VWAP AND EMA9 < EMA21 < EMA55 (held N bars) AND RSI < 50.
     Falls back to EMA-stack + RSI when VWAP is unavailable (IEX feed gaps).
     """
     latest_rsi = float(rsi_result.get("latest_rsi", 50))
-    ema_triple_bull = bool(rsi_result.get("ema_triple_bull", False))
-    ema_triple_bear = bool(rsi_result.get("ema_triple_bear", False))
+    ema_bull = bool(rsi_result.get("ema_triple_bull_persist", False))
+    ema_bear = bool(rsi_result.get("ema_triple_bear_persist", False))
     price_above_vwap = rsi_result.get("price_above_vwap")
     vwap = rsi_result.get("vwap")
 
     if vwap is None or price_above_vwap is None:
-        # VWAP unavailable — fall back to EMA stack + RSI side only
-        if ema_triple_bull and latest_rsi > 50:
+        if ema_bull and latest_rsi > 50:
             return "BULL"
-        if ema_triple_bear and latest_rsi < 50:
+        if ema_bear and latest_rsi < 50:
             return "BEAR"
         return "CHOP"
 
-    if bool(price_above_vwap) and ema_triple_bull and latest_rsi > 50:
+    if bool(price_above_vwap) and ema_bull and latest_rsi > 50:
         return "BULL"
-    if (not bool(price_above_vwap)) and ema_triple_bear and latest_rsi < 50:
+    if (not bool(price_above_vwap)) and ema_bear and latest_rsi < 50:
         return "BEAR"
     return "CHOP"
 
@@ -217,6 +218,18 @@ def _confluence_score(rsi_result: dict, direction: str) -> tuple[int, list[str]]
         vetoes.append(f"RSI_OVEREXTENDED({latest_rsi:.1f}>={ENTRY_RSI_VETO_CALL_MAX})")
     if direction == "PUT" and latest_rsi <= ENTRY_RSI_VETO_PUT_MIN:
         vetoes.append(f"RSI_OVEREXTENDED({latest_rsi:.1f}<={ENTRY_RSI_VETO_PUT_MIN})")
+
+    atr_pct = rsi_result.get("atr_pct")
+    if atr_pct is not None and float(atr_pct) < ENTRY_ATR_PCT_MIN:
+        vetoes.append(f"CHOPPY(ATR%={float(atr_pct):.2f}<{ENTRY_ATR_PCT_MIN:.2f})")
+
+    if ENTRY_OPENING_ZONE_VETO_ENABLED and bool(rsi_result.get("in_opening_zone", False)):
+        vetoes.append("OPENING_ZONE(09:30-09:45)")
+
+    if bool(rsi_result.get("at_sr_wall", False)):
+        walls = rsi_result.get("sr_walls_hit") or []
+        vetoes.append(f"AT_SR_WALL({','.join(walls) if walls else 'level'})")
+
     if vetoes:
         return 0, vetoes
 
@@ -238,8 +251,9 @@ def _confluence_score(rsi_result: dict, direction: str) -> tuple[int, list[str]]
         if macd_line < macd_signal_val and macd_line < prev_macd_line:
             score += 1
 
-    # 3. Volume confirms (or data unavailable — don't penalise IEX gaps)
-    if volume_unavailable or volume_ratio >= ENTRY_CONFLUENCE_VOLUME_RATIO_MIN:
+    # 3. Volume confirms — only credit when actual volume passes the ratio gate.
+    # Previously also passed when volume_unavailable, which gave every IEX bar a free point.
+    if not volume_unavailable and volume_ratio >= ENTRY_CONFLUENCE_VOLUME_RATIO_MIN:
         score += 1
 
     # 4. Price-structure candle pattern agrees
