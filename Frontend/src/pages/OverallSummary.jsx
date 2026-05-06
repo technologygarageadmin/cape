@@ -1505,6 +1505,45 @@ export default function OverallSummary() {
                 const toBarPct = (v) =>
                   Math.max(0, Math.min(100, ((v - rangeMin) / (rangeMax - rangeMin)) * 100))
 
+                // ── Bracket order helpers ────────────────────────────────
+                const tpId      = (liveExit?.tp_order_ids || [])[0]
+                const slId      = (liveExit?.sl_order_ids || [])[0]
+                const tpPrice   = liveExit?.tp_price
+                const slPrice   = liveExit?.confirmed_sl_price
+                const slStatPct = liveExit?.sl_static_pct ?? null
+                const slLastPct = liveExit?.sl_last_placed_pct ?? null
+                const slDynPct  = liveExit?.sl_dynamic_pct ?? null
+                const tpFilled  = liveExit?.tp_order_filled
+                const slFilled  = liveExit?.sl_order_filled
+                const slPending      = slLastPct != null && slDynPct != null && (slDynPct - slLastPct) > 0.1
+                const slUpdated      = !slPending && slLastPct != null && slStatPct != null && (slLastPct - slStatPct) > 0.1
+                const slReplaceError = liveExit?.sl_replace_error || null
+                const shortId   = (id) => id ? `…${id.slice(-8)}` : '—'
+
+                const currentPrice    = Number(p.current_price) || 0
+                const tpAboveAlert    = !tpFilled && tpPrice != null && tpPrice > 0 && currentPrice > tpPrice
+                const monitorStalled  = !slFilled && !tpFilled && curPct > 1.0 &&
+                                        slDynPct != null && slStatPct != null && (slDynPct - slStatPct) < 0.5
+
+                const slStatusBadge = slFilled
+                  ? { label: 'FILLED',  bg: 'rgba(239,68,68,0.15)',    color: '#ef4444' }
+                  : slPending
+                  ? { label: 'PENDING', bg: 'rgba(245,158,11,0.14)',   color: '#d97706' }
+                  : slUpdated
+                  ? { label: 'UPDATED ↑', bg: 'rgba(245,158,11,0.14)', color: '#d97706' }
+                  : { label: 'ACTIVE',  bg: 'rgba(59,130,246,0.12)',   color: '#3b82f6' }
+
+                const tpUntracked   = !tpFilled && !tpId && tpPrice != null
+                const tpStatusBadge = tpFilled
+                  ? { label: 'FILLED',        bg: 'rgba(22,163,74,0.15)',    color: '#16a34a' }
+                  : tpAboveAlert
+                  ? { label: '⚠ ABOVE TP',    bg: 'rgba(245,158,11,0.14)',   color: '#d97706' }
+                  : tpUntracked
+                  ? { label: '⚠ UNTRACKED',   bg: 'rgba(239,68,68,0.1)',     color: '#ef4444' }
+                  : { label: 'ACTIVE',        bg: 'rgba(59,130,246,0.12)',   color: '#3b82f6' }
+
+                const hasBracket = !!(tpId || slId || tpPrice != null)
+
                 return (
                   <div key={i} style={S.posCard(isPos)}>
 
@@ -1516,160 +1555,239 @@ export default function OverallSummary() {
                         : 'linear-gradient(90deg,#dc2626,#ef4444)',
                     }} />
 
-                    {/* ── Card header: symbol left, P&L right ── */}
-                    <div style={{ padding: '0.85rem 1.1rem 0.7rem', display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+                    {/* ── Card header ── */}
+                    <div style={{ padding: '0.8rem 1rem 0.6rem', display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
                       <div>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', flexWrap: 'wrap' }}>
-                          <span style={{ fontWeight: 900, fontSize: '1.05rem', color: 'var(--text-h)' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', flexWrap: 'wrap' }}>
+                          <span style={{ fontWeight: 900, fontSize: '1.1rem', color: 'var(--text-h)', letterSpacing: '-0.01em' }}>
                             {opt ? opt.underlying : p.symbol}
                           </span>
                           <span style={{
-                            padding: '0.1rem 0.48rem', borderRadius: '4px',
-                            fontSize: '0.64rem', fontWeight: 800, textTransform: 'uppercase',
+                            padding: '0.08rem 0.42rem', borderRadius: '4px',
+                            fontSize: '0.62rem', fontWeight: 800, textTransform: 'uppercase',
                             background: side === 'LONG' ? 'rgba(22,163,74,0.12)' : 'rgba(239,68,68,0.12)',
                             color: side === 'LONG' ? '#16a34a' : '#ef4444',
                           }}>{side}</span>
                           {opt && (
                             <span style={{
-                              padding: '0.1rem 0.48rem', borderRadius: '4px',
-                              fontSize: '0.64rem', fontWeight: 800,
+                              padding: '0.08rem 0.42rem', borderRadius: '4px',
+                              fontSize: '0.62rem', fontWeight: 800,
                               background: opt.optType === 'CALL' ? 'rgba(59,130,246,0.1)' : 'rgba(168,85,247,0.1)',
                               color: opt.optType === 'CALL' ? '#2563eb' : '#7c3aed',
                             }}>{opt.optType}</span>
                           )}
                         </div>
-                        <div style={{ fontSize: '0.69rem', color: '#aaa', marginTop: '0.22rem', fontWeight: 500 }}>
-                          {opt
-                            ? `${opt.strike} · Exp ${opt.expiry} · Qty ${p.qty}`
-                            : `Qty: ${p.qty}`}
+                        <div style={{ fontSize: '0.67rem', color: '#999', marginTop: '0.18rem', fontWeight: 500 }}>
+                          {opt ? `${opt.strike} · Exp ${opt.expiry} · Qty ${p.qty}` : `Qty: ${p.qty}`}
                         </div>
                       </div>
-
-                      {/* P&L hero */}
+                      {/* P&L */}
                       <div style={{ textAlign: 'right', flexShrink: 0 }}>
-                        <div style={{ fontSize: '1.15rem', fontWeight: 900, color: isPos ? '#16a34a' : '#ef4444', lineHeight: 1 }}>
+                        <div style={{ fontSize: '1.2rem', fontWeight: 900, color: isPos ? '#16a34a' : '#ef4444', lineHeight: 1 }}>
                           {fmtPnl(uPl)}
                         </div>
-                        <div style={{ fontSize: '0.71rem', fontWeight: 700, color: isPos ? '#16a34a' : '#ef4444', opacity: 0.75, marginTop: '0.18rem' }}>
+                        <div style={{ fontSize: '0.69rem', fontWeight: 700, color: isPos ? '#16a34a' : '#ef4444', opacity: 0.72, marginTop: '0.15rem' }}>
                           {fmtPctSigned(curPct)}
                         </div>
                       </div>
                     </div>
 
-                    {/* ── Detail rows ── */}
-                    <div style={{ padding: '0.1rem 1.1rem 0.75rem', borderTop: '1px solid rgba(0,0,0,0.05)' }}>
+                    {/* ── Price grid (3 cols) ── */}
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3,1fr)', gap: '0', borderTop: '1px solid rgba(0,0,0,0.06)', borderBottom: '1px solid rgba(0,0,0,0.06)' }}>
                       {[
-                        ...((p.cross_time || p.signal_time) ? [{ k: 'Cross Happen Time', v: fmtDate(p.cross_time || p.signal_time) }] : []),
-                        { k: 'Entry Time',    v: fmtDate(p.entry_time) },
-                        { k: 'Entry Price',   v: `$${fmt2(p.avg_entry_price)}` },
-                        { k: 'Current Price', v: `$${fmt2(p.current_price)}`  },
-                        { k: 'Market Value',  v: `$${fmt2(p.market_value)}`   },
-                      ].map(({ k, v }) => (
-                        <div key={k} style={S.posRow}>
-                          <span style={S.posKey}>{k}</span>
-                          <span style={S.posVal}>{v}</span>
+                        { label: 'Entry',   val: `$${fmt2(p.avg_entry_price)}` },
+                        { label: 'Current', val: `$${fmt2(p.current_price)}` },
+                        { label: 'Mkt Val', val: `$${fmt2(p.market_value)}` },
+                      ].map(({ label, val }, ci) => (
+                        <div key={label} style={{
+                          padding: '0.5rem 0', textAlign: 'center',
+                          borderRight: ci < 2 ? '1px solid rgba(0,0,0,0.06)' : 'none',
+                        }}>
+                          <div style={{ fontSize: '0.58rem', color: '#aaa', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em' }}>{label}</div>
+                          <div style={{ fontSize: '0.82rem', fontWeight: 800, color: 'var(--text-h)', marginTop: '0.12rem' }}>{val}</div>
                         </div>
                       ))}
-                      {p.buy_order_id && (
-                        <div style={S.posRow}>
-                          <span style={S.posKey}>Buy Order ID</span>
-                          <span style={{ ...S.posVal, fontFamily: 'monospace', fontSize: '0.67rem', color: 'var(--text)', wordBreak: 'break-all' }}>{p.buy_order_id}</span>
+                    </div>
+
+                    {/* ── Times ── */}
+                    <div style={{ padding: '0.45rem 1rem 0', display: 'flex', flexDirection: 'column', gap: '0.18rem' }}>
+                      {(p.cross_time || p.signal_time) && (
+                        <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                          <span style={{ fontSize: '0.65rem', color: '#aaa', fontWeight: 600 }}>Signal Cross</span>
+                          <span style={{ fontSize: '0.65rem', color: 'var(--text)', fontWeight: 700 }}>{fmtDate(p.cross_time || p.signal_time)}</span>
+                        </div>
+                      )}
+                      {p.entry_time && (
+                        <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                          <span style={{ fontSize: '0.65rem', color: '#aaa', fontWeight: 600 }}>Entry Time</span>
+                          <span style={{ fontSize: '0.65rem', color: 'var(--text)', fontWeight: 700 }}>{fmtDate(p.entry_time)}</span>
                         </div>
                       )}
                     </div>
 
-                    {/* ── Exit criteria section ── */}
-                    <div style={{
-                      background: 'rgba(201,162,39,0.03)',
-                      borderTop: '1px dashed rgba(201,162,39,0.2)',
-                      padding: '0.6rem 1.1rem 0.85rem',
-                    }}>
-                      <div style={{ fontSize: '0.65rem', color: '#bbb', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.07em', marginBottom: '0.55rem' }}>
-                        Exit Criteria
+                    {/* ── Exit thresholds + bar ── */}
+                    <div style={{ padding: '0.6rem 1rem 0.7rem', borderTop: '1px dashed rgba(201,162,39,0.18)', marginTop: '0.45rem', background: 'rgba(201,162,39,0.02)' }}>
+                      <div style={{ fontSize: '0.6rem', color: '#bbb', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.07em', marginBottom: '0.45rem' }}>
+                        Exit Thresholds
                       </div>
-
-                      {/* TP / SL / QP tiles */}
-                      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3,1fr)', gap: '0.4rem', marginBottom: '0.65rem' }}>
+                      {/* SL / QP / TP tiles */}
+                      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3,1fr)', gap: '0.35rem', marginBottom: '0.6rem' }}>
                         {[
-                          { label: 'SL', value: fmtPctSigned(snap.slPct), color: '#ef4444', bg: 'rgba(239,68,68,0.07)' },
-                          { label: 'QP', value: fmtPctSigned(snap.qpPct), color: '#d97706', bg: 'rgba(245,158,11,0.08)' },
-                          { label: 'TP', value: fmtPctSigned(snap.tpPct), color: '#16a34a', bg: 'rgba(22,163,74,0.07)' },
+                          { label: 'Stop Loss', value: fmtPctSigned(snap.slPct), color: '#ef4444', bg: 'rgba(239,68,68,0.07)' },
+                          { label: 'QP Lock',   value: fmtPctSigned(snap.qpPct), color: '#d97706', bg: 'rgba(245,158,11,0.07)' },
+                          { label: 'Take Prof', value: fmtPctSigned(snap.tpPct), color: '#16a34a', bg: 'rgba(22,163,74,0.07)' },
                         ].map(({ label, value, color, bg }) => (
-                          <div key={label} style={{ textAlign: 'center', background: bg, borderRadius: '7px', padding: '0.38rem 0.15rem' }}>
-                            <div style={{ fontSize: '0.61rem', color: '#bbb', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.04em' }}>{label}</div>
-                            <div style={{ fontSize: '0.84rem', fontWeight: 900, color, marginTop: '0.1rem' }}>{value}</div>
+                          <div key={label} style={{ textAlign: 'center', background: bg, borderRadius: '6px', padding: '0.35rem 0.1rem' }}>
+                            <div style={{ fontSize: '0.57rem', color: '#aaa', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.04em' }}>{label}</div>
+                            <div style={{ fontSize: '0.82rem', fontWeight: 900, color, marginTop: '0.08rem' }}>{value}</div>
                           </div>
                         ))}
                       </div>
-
                       {/* Progress bar */}
                       <div style={{ position: 'relative', height: '5px', background: 'rgba(0,0,0,0.07)', borderRadius: '999px' }}>
-                        {/* SL marker */}
-                        <div style={{
-                          position: 'absolute', left: `${toBarPct(snap.slPct)}%`,
-                          top: '-4px', width: '2px', height: '13px',
-                          background: '#ef4444', borderRadius: '1px', transform: 'translateX(-50%)',
-                        }} />
-                        {/* QP marker */}
-                        <div style={{
-                          position: 'absolute', left: `${toBarPct(snap.qpPct)}%`,
-                          top: '-4px', width: '2px', height: '13px',
-                          background: '#d97706', borderRadius: '1px', transform: 'translateX(-50%)',
-                        }} />
-                        {/* TP marker */}
-                        <div style={{
-                          position: 'absolute', left: `${toBarPct(snap.tpPct)}%`,
-                          top: '-4px', width: '2px', height: '13px',
-                          background: '#16a34a', borderRadius: '1px', transform: 'translateX(-50%)',
-                        }} />
-                        {/* Fill */}
-                        <div style={{
-                          position: 'absolute', left: 0, top: 0, height: '100%',
-                          width: `${toBarPct(curPct)}%`,
-                          background: isPos ? 'rgba(22,163,74,0.35)' : 'rgba(239,68,68,0.35)',
-                          borderRadius: '999px 0 0 999px',
-                        }} />
-                        {/* Current dot */}
-                        <div style={{
-                          position: 'absolute', left: `${toBarPct(curPct)}%`, top: '50%',
-                          width: '11px', height: '11px', borderRadius: '50%',
-                          background: isPos ? '#16a34a' : '#ef4444',
-                          border: '2px solid #fff',
-                          boxShadow: '0 1px 5px rgba(0,0,0,0.22)',
-                          transform: 'translate(-50%,-50%)', zIndex: 2,
-                        }} />
+                        <div style={{ position: 'absolute', left: `${toBarPct(snap.slPct)}%`, top: '-4px', width: '2px', height: '13px', background: '#ef4444', borderRadius: '1px', transform: 'translateX(-50%)' }} />
+                        {snap.qpPct !== 0 && <div style={{ position: 'absolute', left: `${toBarPct(snap.qpPct)}%`, top: '-4px', width: '2px', height: '13px', background: '#d97706', borderRadius: '1px', transform: 'translateX(-50%)' }} />}
+                        <div style={{ position: 'absolute', left: `${toBarPct(snap.tpPct)}%`, top: '-4px', width: '2px', height: '13px', background: '#16a34a', borderRadius: '1px', transform: 'translateX(-50%)' }} />
+                        <div style={{ position: 'absolute', left: 0, top: 0, height: '100%', width: `${toBarPct(curPct)}%`, background: isPos ? 'rgba(22,163,74,0.32)' : 'rgba(239,68,68,0.32)', borderRadius: '999px 0 0 999px' }} />
+                        <div style={{ position: 'absolute', left: `${toBarPct(curPct)}%`, top: '50%', width: '11px', height: '11px', borderRadius: '50%', background: isPos ? '#16a34a' : '#ef4444', border: '2px solid #fff', boxShadow: '0 1px 5px rgba(0,0,0,0.22)', transform: 'translate(-50%,-50%)', zIndex: 2 }} />
                       </div>
-
-                      {/* Bar labels */}
-                      <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: '0.38rem' }}>
-                        <span style={{ fontSize: '0.59rem', color: '#ef4444', fontWeight: 700 }}>SL {fmtPctSigned(snap.slPct)}</span>
-                        <span style={{ fontSize: '0.59rem', fontWeight: 800, color: isPos ? '#16a34a' : '#ef4444' }}>Now {fmtPctSigned(curPct)}</span>
-                        <span style={{ fontSize: '0.59rem', color: '#16a34a', fontWeight: 700 }}>TP {fmtPctSigned(snap.tpPct)}</span>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: '0.35rem' }}>
+                        <span style={{ fontSize: '0.58rem', color: '#ef4444', fontWeight: 700 }}>SL {fmtPctSigned(snap.slPct)}</span>
+                        <span style={{ fontSize: '0.58rem', fontWeight: 800, color: isPos ? '#16a34a' : '#ef4444' }}>Now {fmtPctSigned(curPct)}</span>
+                        <span style={{ fontSize: '0.58rem', color: '#16a34a', fontWeight: 700 }}>TP {fmtPctSigned(snap.tpPct)}</span>
                       </div>
                     </div>
 
-                    {/* ── Sell Now button (when in profit) ── */}
-                    {/* {isPos && (
-                      <div style={{ padding: '0 1.1rem 0.85rem', textAlign: 'center' }}>
-                        <button
-                          disabled={sellingSymbol === p.symbol}
-                          onClick={() => handleSellPosition(p.symbol)}
-                          style={{
-                            width: '100%', padding: '0.55rem 0', borderRadius: '8px',
-                            border: 'none', cursor: sellingSymbol === p.symbol ? 'wait' : 'pointer',
-                            fontSize: '0.82rem', fontWeight: 800, letterSpacing: '0.03em',
-                            background: sellingSymbol === p.symbol
-                              ? '#ccc'
-                              : 'linear-gradient(135deg, #16a34a, #22c55e)',
-                            color: '#fff',
-                            boxShadow: '0 2px 8px rgba(22,163,74,0.25)',
-                            transition: 'all 0.15s',
-                          }}
-                        >
-                          {sellingSymbol === p.symbol ? 'Selling…' : `Sell Now · Lock ${fmtPnl(uPl)}`}
-                        </button>
+                    {/* ── Bracket Orders ── */}
+                    {hasBracket && (
+                      <div style={{ borderTop: '1px solid rgba(0,0,0,0.07)', padding: '0.6rem 1rem 0.75rem', background: 'rgba(0,0,0,0.015)' }}>
+                        <div style={{ fontSize: '0.6rem', color: '#bbb', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.07em', marginBottom: '0.5rem' }}>
+                          Bracket Orders
+                        </div>
+
+                        {/* TP Order row */}
+                        {(tpId || tpPrice != null) && (
+                          <div style={{ marginBottom: '0.38rem' }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', flexWrap: 'wrap' }}>
+                              {/* Type badge */}
+                              <span style={{ fontSize: '0.6rem', fontWeight: 800, color: '#16a34a', background: 'rgba(22,163,74,0.12)', borderRadius: '4px', padding: '0.1rem 0.4rem', minWidth: '22px', textAlign: 'center' }}>TP</span>
+                              {/* Broker badge */}
+                              <span style={{ fontSize: '0.58rem', fontWeight: 700, color: '#6366f1', background: 'rgba(99,102,241,0.1)', borderRadius: '4px', padding: '0.08rem 0.35rem' }}>BROKER</span>
+                              {/* Order ID */}
+                              <span style={{ fontFamily: 'monospace', fontSize: '0.63rem', color: '#888', flexGrow: 1 }} title={tpId || ''}>{shortId(tpId)}</span>
+                              {/* Price */}
+                              {tpPrice != null && (
+                                <span style={{ fontFamily: 'monospace', fontSize: '0.72rem', fontWeight: 800, color: '#16a34a' }}>${fmt2(tpPrice)}</span>
+                              )}
+                              {/* Status */}
+                              <span style={{ fontSize: '0.6rem', fontWeight: 700, padding: '0.1rem 0.38rem', borderRadius: '4px', background: tpStatusBadge.bg, color: tpStatusBadge.color, whiteSpace: 'nowrap' }}>
+                                {tpStatusBadge.label}
+                              </span>
+                            </div>
+                            {tpAboveAlert && (
+                              <div style={{ marginTop: '0.22rem', padding: '0.18rem 0.42rem', borderRadius: '4px', background: 'rgba(245,158,11,0.08)', border: '1px solid rgba(245,158,11,0.22)' }}>
+                                <span style={{ fontSize: '0.58rem', color: '#d97706', fontWeight: 600 }}>
+                                  Current ${fmt2(currentPrice)} has passed TP limit — order may have expired (DAY) or not yet placed
+                                </span>
+                              </div>
+                            )}
+                            {tpUntracked && !tpAboveAlert && (
+                              <div style={{ marginTop: '0.22rem', padding: '0.18rem 0.42rem', borderRadius: '4px', background: 'rgba(239,68,68,0.06)', border: '1px solid rgba(239,68,68,0.18)' }}>
+                                <span style={{ fontSize: '0.58rem', color: '#ef4444', fontWeight: 600 }}>
+                                  No order ID — TP may have expired (DAY order) or was not placed. Verify in Alpaca dashboard.
+                                </span>
+                              </div>
+                            )}
+                          </div>
+                        )}
+
+                        {/* SL Order row */}
+                        {slId && (
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', flexWrap: 'wrap' }}>
+                            {/* Type badge */}
+                            <span style={{ fontSize: '0.6rem', fontWeight: 800, color: '#ef4444', background: 'rgba(239,68,68,0.12)', borderRadius: '4px', padding: '0.1rem 0.4rem', minWidth: '22px', textAlign: 'center' }}>SL</span>
+                            {/* Broker badge */}
+                            <span style={{ fontSize: '0.58rem', fontWeight: 700, color: '#6366f1', background: 'rgba(99,102,241,0.1)', borderRadius: '4px', padding: '0.08rem 0.35rem' }}>BROKER</span>
+                            {/* Order ID */}
+                            <span style={{ fontFamily: 'monospace', fontSize: '0.63rem', color: '#888', flexGrow: 1 }} title={slId}>{shortId(slId)}</span>
+                            {/* Price */}
+                            {slPrice != null && (
+                              <span style={{ fontFamily: 'monospace', fontSize: '0.72rem', fontWeight: 800, color: '#ef4444' }}>${fmt2(slPrice)}</span>
+                            )}
+                            {/* Status */}
+                            <span style={{ fontSize: '0.6rem', fontWeight: 700, padding: '0.1rem 0.38rem', borderRadius: '4px', background: slStatusBadge.bg, color: slStatusBadge.color, whiteSpace: 'nowrap' }}>
+                              {slStatusBadge.label}
+                            </span>
+                          </div>
+                        )}
+
+                        {/* SL ratchet detail row */}
+                        {slId && slLastPct != null && (() => {
+                          const fillPx      = Number(p.avg_entry_price) || 0
+                          const placedPx    = fillPx > 0 ? fillPx * (1 + slLastPct / 100) : null
+                          const targetPx    = slPending && slDynPct != null && fillPx > 0 ? fillPx * (1 + slDynPct / 100) : null
+                          const initSlPx    = slStatPct != null && fillPx > 0 ? fillPx * (1 + slStatPct / 100) : null
+                          return (
+                            <div style={{ marginTop: '0.35rem', paddingTop: '0.32rem', borderTop: '1px dashed rgba(0,0,0,0.07)', display: 'grid', gap: '0.18rem' }}>
+                              {placedPx != null && (
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
+                                  <span style={{ fontSize: '0.6rem', color: '#aaa', fontWeight: 600 }}>Placed at</span>
+                                  <span style={{ fontFamily: 'monospace', fontSize: '0.65rem', fontWeight: 800, color: slUpdated ? '#d97706' : '#888' }}>${fmt2(placedPx)}</span>
+                                  {slPending && targetPx != null && (
+                                    <>
+                                      <span style={{ fontSize: '0.6rem', color: '#aaa' }}>→</span>
+                                      <span style={{ fontFamily: 'monospace', fontSize: '0.65rem', fontWeight: 800, color: '#d97706' }}>${fmt2(targetPx)}</span>
+                                      <span style={{ fontSize: '0.59rem', fontWeight: 700, color: '#d97706', background: 'rgba(245,158,11,0.1)', borderRadius: '4px', padding: '0.06rem 0.3rem' }}>update queued</span>
+                                    </>
+                                  )}
+                                  {slPending && slReplaceError && (
+                                    <div style={{ gridColumn: '1/-1', marginTop: '0.22rem', padding: '0.25rem 0.45rem', borderRadius: '5px', background: 'rgba(239,68,68,0.07)', border: '1px solid rgba(239,68,68,0.18)' }}>
+                                      <span style={{ fontSize: '0.58rem', color: '#ef4444', fontWeight: 700 }}>Replace error: </span>
+                                      <span style={{ fontSize: '0.58rem', color: '#ef4444', fontFamily: 'monospace', wordBreak: 'break-all' }}>{slReplaceError}</span>
+                                    </div>
+                                  )}
+                                  {slUpdated && (
+                                    <span style={{ fontSize: '0.59rem', fontWeight: 700, color: '#16a34a', background: 'rgba(22,163,74,0.1)', borderRadius: '4px', padding: '0.06rem 0.3rem' }}>ratcheted ↑</span>
+                                  )}
+                                </div>
+                              )}
+                              {initSlPx != null && slUpdated && (
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                                  <span style={{ fontSize: '0.6rem', color: '#aaa', fontWeight: 600 }}>Original SL</span>
+                                  <span style={{ fontFamily: 'monospace', fontSize: '0.63rem', fontWeight: 700, color: '#aaa', textDecoration: 'line-through' }}>${fmt2(initSlPx)}</span>
+                                </div>
+                              )}
+                              {/* Market fallback trigger */}
+                              {slDynPct != null && fillPx > 0 && (() => {
+                                const mktTrigger = fillPx * (1 + slDynPct / 100)
+                                return (
+                                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                                    <span style={{ fontSize: '0.6rem', color: '#f97316', fontWeight: 700 }}>Market SL</span>
+                                    <span style={{ fontFamily: 'monospace', fontSize: '0.63rem', fontWeight: 800, color: '#f97316' }}>${fmt2(mktTrigger)}</span>
+                                    <span style={{ fontSize: '0.58rem', color: '#aaa', fontWeight: 500 }}>fires if broker SL misses</span>
+                                  </div>
+                                )
+                              })()}
+                            </div>
+                          )
+                        })()}
+
+                        {/* Monitor stall warning */}
+                        {monitorStalled && (
+                          <div style={{ marginTop: '0.38rem', padding: '0.22rem 0.45rem', borderRadius: '5px', background: 'rgba(245,158,11,0.07)', border: '1px solid rgba(245,158,11,0.22)' }}>
+                            <span style={{ fontSize: '0.58rem', color: '#d97706', fontWeight: 700 }}>⚠ SL not ratcheting in profit — monitoring may be stalled or not running</span>
+                          </div>
+                        )}
+
+                        {/* Buy Order ID */}
+                        {p.buy_order_id && (
+                          <div style={{ marginTop: '0.45rem', paddingTop: '0.32rem', borderTop: '1px dashed rgba(0,0,0,0.07)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                            <span style={{ fontSize: '0.6rem', color: '#aaa', fontWeight: 600 }}>Buy Order</span>
+                            <span style={{ fontFamily: 'monospace', fontSize: '0.63rem', color: '#888' }} title={p.buy_order_id}>{shortId(p.buy_order_id)}</span>
+                          </div>
+                        )}
                       </div>
-                    )} */}
+                    )}
 
                   </div>
                 )

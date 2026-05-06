@@ -2872,23 +2872,20 @@ def close_position_endpoint(symbol: str) -> dict[str, Any]:
             try:
                 order = place_market_order(trading_client, ticker, qty, sell_side, allow_limit=False)
                 order_id = str(getattr(order, "id", "") or "")
-                # If we have a registry buy_order_id, mark it as SELLING now
+                # Mark registry as closed immediately — the market sell is submitted and
+                # will fill asynchronously. Don't wait 60s for fill confirmation to update
+                # the registry (that leaves the card showing as "SELLING" indefinitely).
                 if buy_order_id_for_contract and order_id:
                     try:
                         mark_selling(buy_order_id_for_contract, order_id)
+                        close_position(buy_order_id_for_contract)
                     except Exception:
                         pass
 
-                # Wait briefly for fill to capture filled price for the log
+                # Wait briefly for fill to capture filled price for the trade log only.
                 try:
                     filled = wait_for_fill(trading_client, order_id, FILL_WAIT_SEC)
                     result = _serialize_order(filled or order)
-                    # If we have a registered lot, finalize it as closed
-                    if buy_order_id_for_contract and getattr(filled or order, "status", None) and str(getattr(filled or order, "status", "")).lower() == "filled":
-                        try:
-                            close_position(buy_order_id_for_contract)
-                        except Exception:
-                            pass
                 except Exception:
                     # Fill may not complete within timeout — still return submitted order
                     result = _serialize_order(order) if order is not None else None
@@ -2899,6 +2896,12 @@ def close_position_endpoint(symbol: str) -> dict[str, Any]:
                     result = _serialize_order(response) if response is not None else None
                 except Exception:
                     result = None
+                # Still remove from Cape registry on fallback path.
+                if buy_order_id_for_contract:
+                    try:
+                        close_position(buy_order_id_for_contract)
+                    except Exception:
+                        pass
         else:
             # No broker-side position detected — use client-close as a fallback
             try:
@@ -2906,6 +2909,11 @@ def close_position_endpoint(symbol: str) -> dict[str, Any]:
                 result = _serialize_order(response) if response is not None else None
             except Exception:
                 result = None
+            if buy_order_id_for_contract:
+                try:
+                    close_position(buy_order_id_for_contract)
+                except Exception:
+                    pass
     except Exception:
         result = None
 

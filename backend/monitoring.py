@@ -52,7 +52,7 @@ from config import (
     WS_MAX_WAIT_SEC,
     WS_ORDER_CHECK_SEC,
 )
-from logger import debug, info
+from logger import debug, info, _append_system_log
 from order_execution import set_live_exit_reason, update_live_exit_state, place_market_order, wait_for_fill
 from rsi_analyer import analyze_rsi
 
@@ -76,6 +76,8 @@ logging.getLogger("alpaca.data.live.websocket").setLevel(logging.CRITICAL)
 _LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "monitoring_debug.log")
 _dbg_logger = logging.getLogger("monitoring_debug")
 _dbg_logger.setLevel(logging.DEBUG)
+# Prevent uvicorn/FastAPI dictConfig from swallowing records via the root logger.
+_dbg_logger.propagate = False
 
 _LOG_FMT = "%(asctime)s ET | %(levelname)-5s | %(message)s"
 _LOG_DATEFMT = "%Y-%m-%d %H:%M:%S"
@@ -91,25 +93,27 @@ class _ETFormatter(logging.Formatter):
 
 
 def _attach_debug_log_handler() -> None:
-    fh = logging.FileHandler(_LOG_FILE)
-    fh.setLevel(logging.DEBUG)
-    fh.setFormatter(_ETFormatter(_LOG_FMT, _LOG_DATEFMT))
-    _dbg_logger.addHandler(fh)
+    try:
+        fh = logging.FileHandler(_LOG_FILE, encoding="utf-8")
+        fh.setLevel(logging.DEBUG)
+        fh.setFormatter(_ETFormatter(_LOG_FMT, _LOG_DATEFMT))
+        _dbg_logger.addHandler(fh)
+    except Exception as _fh_ex:
+        print(f"[monitoring_debug] WARNING: could not open log file {_LOG_FILE!r}: {_fh_ex}")
 
 
 if not _dbg_logger.handlers:
     _attach_debug_log_handler()
 
-
-def _clear_debug_log() -> None:
-    """Truncate monitoring_debug.log and reattach a fresh handler. Called at each trade entry."""
-    for h in list(_dbg_logger.handlers):
-        if isinstance(h, logging.FileHandler):
-            _dbg_logger.removeHandler(h)
-            h.close()
-    with open(_LOG_FILE, "w"):
+# Startup marker — confirms the handler is live when the module is first imported.
+_dbg_logger.info(f"[MONITORING STARTUP] module loaded, log={_LOG_FILE}")
+for _h in _dbg_logger.handlers:
+    try:
+        _h.flush()
+    except Exception:
         pass
-    _attach_debug_log_handler()
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 
 try:
@@ -392,6 +396,11 @@ def _seed_bracket_exit_orders(tc, exit_state: dict, buy_order_id: str | None) ->
         info(
             f"[BRACKET] Seeded parent={buy_order_id} tp={len(tp_ids)} sl={len(sl_ids)}"
         )
+        _append_system_log(
+            f"[BRACKET IDS] parent={buy_order_id}"
+            f" | tp_order_ids={tp_ids}"
+            f" | sl_order_ids={sl_ids}"
+        )
 
 
 def _iso_now_utc() -> str:
@@ -545,6 +554,38 @@ def _append_timeline_tick(
     timeline.append(tick)
     if "last_tick_actions" in exit_state:
         exit_state.pop("last_tick_actions", None)
+
+    # Write a compact tick row to monitoring_debug.log (file only, not console).
+    try:
+        _sel  = f"${tick['sellable_price']:.4f}" if tick.get("sellable_price") is not None else "—"
+        _bid  = f"${tick['bid_price']:.4f}"      if tick.get("bid_price")      is not None else "—"
+        _mid  = f"${tick['mid_price']:.4f}"      if tick.get("mid_price")      is not None else "—"
+        _pnl  = f"{tick['pnl_pct']:+.2f}%"       if tick.get("pnl_pct")        is not None else "—"
+        _qplm = f"${tick['qp_limit_price']:.4f}" if tick.get("qp_limit_price") is not None else "—"
+        _qpd  = f"{tick['qp_dynamic_pct']:+.2f}%" if tick.get("qp_dynamic_pct") is not None else "—"
+        _sld  = f"{tick['sl_dynamic_pct']:+.2f}%" if tick.get("sl_dynamic_pct") is not None else "—"
+        _peak = f"{tick['max_pnl_pct']:+.2f}%"   if tick.get("max_pnl_pct")    is not None else "—"
+        _pkpx = (
+            f"${fill_price * (1 + tick['max_pnl_pct'] / 100):.4f}"
+            if tick.get("max_pnl_pct") is not None and fill_price > 0
+            else "—"
+        )
+        _tp   = str(tick.get("tp_action") or "—")
+        _sla  = str(tick.get("sl_order_action") or tick.get("sl_action") or "—")
+        _dbg_logger.debug(
+            f"[TICK] {tick_ts} | {str(source).upper()}"
+            f" | sell={_sel} bid={_bid} mid={_mid}"
+            f" | pnl={_pnl} | qp_lmt={_qplm} qp_dyn={_qpd}"
+            f" | trail_sl={_sld} | peak={_peak} peak_px={_pkpx}"
+            f" | tp={_tp} sl={_sla}"
+        )
+        for _h in _dbg_logger.handlers:
+            try:
+                _h.flush()
+            except Exception:
+                pass
+    except Exception:
+        pass
 
 
 def _append_sell_tick(
@@ -874,6 +915,7 @@ def _place_sl_stop_order(tc, exit_state: dict, contract_symbol: str | None, qty:
             exit_state["sl_order_ids"] = [new_id]
             exit_state["sl_last_placed_pct"] = sl_dynamic_pct
             exit_state["confirmed_sl_price"] = stop_price
+            exit_state["sl_replace_error"] = None
             new_submitted_at = _to_iso(
                 getattr(replaced, "submitted_at", None)
                 or getattr(replaced, "created_at", None)
@@ -989,6 +1031,7 @@ def _place_sl_stop_order(tc, exit_state: dict, contract_symbol: str | None, qty:
         exit_state["sl_order_ids"] = [new_order_id]
         exit_state["sl_last_placed_pct"] = sl_dynamic_pct
         exit_state["confirmed_sl_price"] = stop_price
+        exit_state["sl_replace_error"] = None
         submitted_at = _to_iso(
             getattr(order, "submitted_at", None)
             or getattr(order, "created_at", None)
@@ -1056,6 +1099,7 @@ def _place_sl_stop_order(tc, exit_state: dict, contract_symbol: str | None, qty:
 
         log_and_print("error", f"[SL ERROR] Failed to upsert for {contract_symbol}: {ex}")
         info(f"[{label} STOP] Failed to upsert for {contract_symbol}: {ex}")
+        exit_state["sl_replace_error"] = str(ex)[:200]
         timeline.append({
             "ts": _iso_now_utc(),
             "source": "order_placed" if not existing_id else "order_replaced",
@@ -2161,10 +2205,30 @@ def _resolve_sellable_price(quoted_price: float, bid_price: float) -> float:
 def log_and_print(level: str, message: str) -> None:
     """Print to terminal AND write to monitoring_debug.log simultaneously."""
     print(message)
+    # Re-arm if uvicorn dictConfig wiped our handlers, reset the level, or marked disabled.
+    if _dbg_logger.disabled:
+        _dbg_logger.disabled = False
+    if not _dbg_logger.handlers:
+        _attach_debug_log_handler()
+    if _dbg_logger.level > logging.DEBUG:
+        _dbg_logger.setLevel(logging.DEBUG)
     _log = getattr(_dbg_logger, level if level in ("debug", "info", "warning", "error", "critical") else "info")
-    _log(message)
+    try:
+        _log(message)
+    except Exception as _log_ex:
+        print(f"[monitoring_debug] WARNING: file write failed: {_log_ex}")
     for _h in _dbg_logger.handlers:
-        _h.flush()
+        try:
+            _h.flush()
+        except Exception:
+            pass
+
+
+# Route all info() calls inside this module to the debug log as well.
+# info() is imported from logger.py as a console-only print; re-bind it here
+# so every info(...) in monitoring.py goes to both terminal AND monitoring_debug.log.
+def info(message: str) -> None:  # noqa: F811
+    log_and_print("info", message)
 
 
 def log_sl_state(exit_state: dict, broker_order=None) -> None:
@@ -2275,7 +2339,8 @@ def monitor_with_polling(
     hold_notice_emitted = False
     entry_ts = time.time()
     bad_entry_fired = False
-    _clear_debug_log()
+    _tp_ids = exit_state.get("tp_order_ids") or []
+    _sl_ids = exit_state.get("sl_order_ids") or []
     log_and_print(
         "info",
         f"\n[TRADE ENTRY] POLLING\n"
@@ -2284,6 +2349,9 @@ def monitor_with_polling(
         f"  tp_price={tp_price}\n"
         f"  sl_price={sl_price}\n"
         f"  qty={qty}\n"
+        f"  tp_order_ids={_tp_ids}\n"
+        f"  sl_order_ids={_sl_ids}\n"
+        f"  buy_order_id={buy_order_id}\n"
         f"  ts={_iso_now_utc()}\n",
     )
 
@@ -2712,7 +2780,8 @@ def monitor_with_websocket(
                     _place_sl_stop_order(tc, state["exit_state"], contract_symbol, qty, buy_order_id)
                 except Exception as _sl_ex:
                     log_and_print("error", f"[SL ERROR] _place_sl_stop_order raised for {contract_symbol}: {_sl_ex}")
-        _clear_debug_log()
+        _tp_ids = state["exit_state"].get("tp_order_ids") or []
+        _sl_ids = state["exit_state"].get("sl_order_ids") or []
         log_and_print(
             "info",
             f"\n[TRADE ENTRY] WEBSOCKET\n"
@@ -2721,6 +2790,9 @@ def monitor_with_websocket(
             f"  tp_price={tp_price}\n"
             f"  sl_price={sl_price}\n"
             f"  qty={qty}\n"
+            f"  tp_order_ids={_tp_ids}\n"
+            f"  sl_order_ids={_sl_ids}\n"
+            f"  buy_order_id={buy_order_id}\n"
             f"  ts={_iso_now_utc()}\n",
         )
         _append_timeline_tick(

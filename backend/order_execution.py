@@ -178,6 +178,10 @@ def update_live_exit_state(buy_order_id: str, exit_state: dict, pnl_pct: float, 
         live["sl_order_id_filled"] = exit_state.get("sl_order_id_filled")
         live["sl_order_fill_price"] = exit_state.get("sl_order_fill_price")
         live["sl_order_exit_reason"] = exit_state.get("sl_order_exit_reason")
+        live["sl_last_placed_pct"] = exit_state.get("sl_last_placed_pct")
+        live["confirmed_sl_price"] = exit_state.get("confirmed_sl_price")
+        live["tp_price"] = exit_state.get("tp_price")
+        live["sl_replace_error"] = exit_state.get("sl_replace_error")
         live["timeline"] = list(exit_state.get("timeline") or [])[-300:]
         live["broker_safety_sl_order_id"] = exit_state.get("broker_safety_sl_order_id")
         live["broker_safety_sl_stop_price"] = exit_state.get("broker_safety_sl_stop_price")

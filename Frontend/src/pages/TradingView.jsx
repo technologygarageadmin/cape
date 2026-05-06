@@ -246,7 +246,10 @@ const formatEntryStrategies = (trade) => {
 }
 
 export default function TradingView() {
-  const [selected, setSelected]       = useState(() => STOCK_SYMBOLS.find(s => s.symbol === 'TSLA') ?? STOCK_SYMBOLS[0])
+  const [selected, setSelected]       = useState(() => {
+    const saved = localStorage.getItem('cape_last_symbol')
+    return STOCK_SYMBOLS.find(s => s.symbol === saved) ?? STOCK_SYMBOLS[0]
+  })
   const [interval, setInterval_]      = useState('1m')
   const [strategy, setStrategy]       = useState('ATR Momentum')
   const [candles, setCandles]         = useState(() => { const spy = STOCK_SYMBOLS.find(s => s.symbol === 'SPY') ?? STOCK_SYMBOLS[0]; return generateCandles(spy.basePrice) })
@@ -625,6 +628,7 @@ export default function TradingView() {
 
   const handleSymbolSelect = (stock) => {
     if (tradeActive) return
+    localStorage.setItem('cape_last_symbol', stock.symbol)
     setSelected(stock)
     setCandles(generateCandles(stock.basePrice)) // show immediately; API fetch will replace
     setRsi(null)
@@ -758,6 +762,10 @@ export default function TradingView() {
       }
 
       setLivePositions(prev => prev.filter(p => p.symbol !== symbol))
+      setRegistryPositions(prev => prev.filter(lp => {
+        const contract = String(lp.contract_symbol || lp.symbol || '')
+        return contract !== symbol
+      }))
       pushToast(`Liquidated ${symbol}`, 'success')
     } catch (err) {
       pushToast(`Failed to liquidate: ${err.message}`, 'error')
@@ -2364,105 +2372,155 @@ export default function TradingView() {
                         </div>
                       ))}
 
-                      <div style={{
-                        marginTop: '0.55rem',
-                        borderTop: '1px dashed rgba(201,162,39,0.22)',
-                        paddingTop: '0.5rem',
-                      }}>
-                        <div style={{
-                          fontSize: '0.62rem',
-                          color: '#b2a27d',
-                          fontWeight: 800,
-                          textTransform: 'uppercase',
-                          letterSpacing: '0.05em',
-                          marginBottom: '0.35rem',
-                        }}>
-                          Exit Watch
-                        </div>
+                      {/* ── Bracket Orders ── */}
+                      {(() => {
+                        const bTpId      = (live?.tp_order_ids || [])[0]
+                        const bSlId      = (live?.sl_order_ids || [])[0]
+                        const bTpPrice   = live?.tp_price
+                        const bSlPrice   = live?.confirmed_sl_price
+                        const bSlStatPct = live?.sl_static_pct ?? null
+                        const bSlLastPct = live?.sl_last_placed_pct ?? null
+                        const bSlDynPct  = live?.sl_dynamic_pct ?? null
+                        const bTpFilled  = live?.tp_order_filled
+                        const bSlFilled  = live?.sl_order_filled
+                        const bSlPending      = bSlLastPct != null && bSlDynPct != null && (bSlDynPct - bSlLastPct) > 0.1
+                        const bSlUpdated      = !bSlPending && bSlLastPct != null && bSlStatPct != null && (bSlLastPct - bSlStatPct) > 0.1
+                        const bSlReplaceError = live?.sl_replace_error || null
+                        const shortId    = (id) => id ? `…${id.slice(-8)}` : '—'
 
-                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '0.3rem', marginBottom: '0.45rem' }}>
-                          {[
-                            { k: 'SL', v: slSellPrice != null ? `$${fmt(slSellPrice)}` : '—', c: '#ef4444', bg: 'rgba(239,68,68,0.07)' },
-                            { k: 'QP LMT', v: qpLimitSell != null ? `$${fmt(qpLimitSell)}` : '—', c: '#d97706', bg: 'rgba(245,158,11,0.08)' },
-                            { k: 'TP', v: tpSellPrice != null ? `$${fmt(tpSellPrice)}` : '—', c: '#16a34a', bg: 'rgba(22,163,74,0.07)' },
-                          ].map(tile => (
-                            <div key={tile.k} style={{ textAlign: 'center', borderRadius: '6px', background: tile.bg, padding: '0.25rem 0.15rem' }}>
-                              <div style={{ fontSize: '0.56rem', fontWeight: 800, color: '#bbb', letterSpacing: '0.05em' }}>{tile.k}</div>
-                              <div style={{ fontSize: '0.72rem', fontWeight: 900, color: tile.c }}>{tile.v}</div>
+                        // Initial SL price from static % (the original bracket SL before any ratchet)
+                        const initSlPrice = bSlStatPct != null && entryPrice > 0
+                          ? entryPrice * (1 + bSlStatPct / 100)
+                          : null
+
+                        const bTpAboveAlert   = !bTpFilled && bTpPrice != null && bTpPrice > 0 && currentPrice > bTpPrice
+                        const bMonitorStalled = !bSlFilled && !bTpFilled && curPct > 1.0 &&
+                                                bSlDynPct != null && bSlStatPct != null && (bSlDynPct - bSlStatPct) < 0.5
+
+                        const bTpUntracked = !bTpFilled && !bTpId && bTpPrice != null
+                        const tpBadge = bTpFilled
+                          ? { label: 'FILLED',        bg: 'rgba(22,163,74,0.15)',    color: '#16a34a' }
+                          : bTpAboveAlert
+                          ? { label: '⚠ ABOVE TP',    bg: 'rgba(245,158,11,0.14)',   color: '#d97706' }
+                          : bTpUntracked
+                          ? { label: '⚠ UNTRACKED',   bg: 'rgba(239,68,68,0.1)',     color: '#ef4444' }
+                          : { label: 'ACTIVE',        bg: 'rgba(59,130,246,0.12)',   color: '#3b82f6' }
+                        const slBadge = bSlFilled
+                          ? { label: 'FILLED',    bg: 'rgba(239,68,68,0.15)',  color: '#ef4444' }
+                          : bSlPending
+                          ? { label: 'PENDING',   bg: 'rgba(245,158,11,0.14)', color: '#d97706' }
+                          : bSlUpdated
+                          ? { label: 'UPDATED ↑', bg: 'rgba(245,158,11,0.14)', color: '#d97706' }
+                          : { label: 'ACTIVE',    bg: 'rgba(59,130,246,0.12)', color: '#3b82f6' }
+
+                        // Show section if we have at least a price or ID for either order
+                        if (!bTpId && bTpPrice == null && !bSlId && bSlPrice == null) return null
+                        return (
+                          <div style={{ marginTop: '0.55rem', borderTop: '1px solid rgba(0,0,0,0.07)', paddingTop: '0.5rem' }}>
+                            <div style={{ fontSize: '0.59rem', color: '#bbb', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: '0.42rem' }}>
+                              Bracket Orders
                             </div>
-                          ))}
-                        </div>
 
-                        <div style={{
-                          display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-                          fontSize: '0.64rem', color: '#a16207', fontWeight: 700, marginBottom: '0.35rem',
-                        }}>
-                          <span>QP = dynamic limit sell floor</span>
-                          <span style={{ color: '#92400e' }}>{qpLimitSell != null ? `$${fmt(qpLimitSell)}` : '—'}</span>
-                        </div>
+                            {/* TP row — show even without order ID if price is known */}
+                            {(bTpId || bTpPrice != null) && (
+                              <div style={{ marginBottom: '0.32rem' }}>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', flexWrap: 'wrap' }}>
+                                  <span style={{ fontSize: '0.59rem', fontWeight: 800, color: '#16a34a', background: 'rgba(22,163,74,0.12)', borderRadius: '4px', padding: '0.08rem 0.38rem' }}>TP</span>
+                                  <span style={{ fontSize: '0.58rem', fontWeight: 700, color: '#6366f1', background: 'rgba(99,102,241,0.1)', borderRadius: '4px', padding: '0.06rem 0.32rem' }}>BROKER</span>
+                                  <span style={{ fontFamily: 'monospace', fontSize: '0.62rem', color: '#888', flexGrow: 1 }} title={bTpId || ''}>{bTpId ? shortId(bTpId) : '—'}</span>
+                                  {bTpPrice != null && <span style={{ fontFamily: 'monospace', fontSize: '0.7rem', fontWeight: 800, color: '#16a34a' }}>${fmt(bTpPrice)}</span>}
+                                  <span style={{ fontSize: '0.59rem', fontWeight: 700, padding: '0.08rem 0.35rem', borderRadius: '4px', background: tpBadge.bg, color: tpBadge.color }}>{tpBadge.label}</span>
+                                </div>
+                                {bTpAboveAlert && (
+                                  <div style={{ marginTop: '0.2rem', padding: '0.16rem 0.4rem', borderRadius: '4px', background: 'rgba(245,158,11,0.08)', border: '1px solid rgba(245,158,11,0.22)' }}>
+                                    <span style={{ fontSize: '0.57rem', color: '#d97706', fontWeight: 600 }}>
+                                      Current ${fmt(currentPrice)} has passed TP limit — order may have expired (DAY) or not yet placed
+                                    </span>
+                                  </div>
+                                )}
+                                {bTpUntracked && !bTpAboveAlert && (
+                                  <div style={{ marginTop: '0.2rem', padding: '0.16rem 0.4rem', borderRadius: '4px', background: 'rgba(239,68,68,0.06)', border: '1px solid rgba(239,68,68,0.18)' }}>
+                                    <span style={{ fontSize: '0.57rem', color: '#ef4444', fontWeight: 600 }}>
+                                      No order ID — TP may have expired (DAY order) or was not placed. Verify in Alpaca dashboard.
+                                    </span>
+                                  </div>
+                                )}
+                              </div>
+                            )}
 
-                        <div style={{
-                          display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-                          fontSize: '0.64rem', color: '#7c2d12', fontWeight: 800, marginBottom: '0.25rem',
-                        }}>
-                          <span>Safety SL delta</span>
-                          <span style={{ color: '#7c2d12' }}>{safetyDeltaText}</span>
-                        </div>
+                            {/* SL row — current (ratcheted) */}
+                            {(bSlId || bSlPrice != null) && (
+                              <div style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', flexWrap: 'wrap' }}>
+                                <span style={{ fontSize: '0.59rem', fontWeight: 800, color: '#ef4444', background: 'rgba(239,68,68,0.12)', borderRadius: '4px', padding: '0.08rem 0.38rem' }}>SL</span>
+                                <span style={{ fontSize: '0.58rem', fontWeight: 700, color: '#6366f1', background: 'rgba(99,102,241,0.1)', borderRadius: '4px', padding: '0.06rem 0.32rem' }}>BROKER</span>
+                                <span style={{ fontFamily: 'monospace', fontSize: '0.62rem', color: '#888', flexGrow: 1 }} title={bSlId || ''}>{bSlId ? shortId(bSlId) : '—'}</span>
+                                {bSlPrice != null && <span style={{ fontFamily: 'monospace', fontSize: '0.7rem', fontWeight: 800, color: '#ef4444' }}>${fmt(bSlPrice)}</span>}
+                                <span style={{ fontSize: '0.59rem', fontWeight: 700, padding: '0.08rem 0.35rem', borderRadius: '4px', background: slBadge.bg, color: slBadge.color }}>{slBadge.label}</span>
+                              </div>
+                            )}
 
-                        <div style={{ display: 'grid', gap: '0.2rem' }}>
-                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '0.67rem' }}>
-                            <span style={{ color: '#ef4444', fontWeight: 800 }}>{slHit ? 'Hit Safety SL' : 'Safety SL'}</span>
-                            <span style={{ color: 'var(--text)', fontWeight: 700 }}>
-                              {safetySlSellPrice == null
-                                ? '—'
-                                : slHit
-                                  ? `@ $${fmt(safetySlSellPrice)}`
-                                  : `${slDeltaAbs != null ? `$${fmt(slDeltaAbs)} away` : '—'} · @ $${fmt(safetySlSellPrice)}`}
-                            </span>
-                          </div>
-                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '0.67rem' }}>
-                            <span style={{ color: '#16a34a', fontWeight: 800 }}>{tpHit ? 'Hit TP' : 'TP'}</span>
-                            <span style={{ color: 'var(--text)', fontWeight: 700 }}>
-                              {tpSellPrice == null
-                                ? '—'
-                                : tpHit
-                                  ? `@ $${fmt(tpSellPrice)}`
-                                  : `${tpDeltaAbs != null ? `$${fmt(tpDeltaAbs)} away` : '—'} · @ $${fmt(tpSellPrice)}`}
-                            </span>
-                          </div>
-                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '0.67rem' }}>
-                            <span style={{ color: '#d97706', fontWeight: 700 }}>
-                              {!qpArmed ? 'QP limit not armed' : qpHit ? 'Hit QP limit' : 'Will hit QP limit'}
-                            </span>
-                            <span style={{ color: 'var(--text)', fontWeight: 700 }}>
-                              {qpPct == null
-                                ? '—'
-                                : !qpArmed
-                                  ? `Peak ${peakPx != null ? `$${fmt(peakPx)}` : '—'} · LMT ${qpLimitSell != null ? `$${fmt(qpLimitSell)}` : '—'}`
-                                  : qpHit
-                                    ? `${qpLimitSell != null ? `@ $${fmt(qpLimitSell)}` : '—'}`
-                                    : `${qpDeltaAbs != null ? `$${fmt(qpDeltaAbs)} above` : '—'} · @ ${qpLimitSell != null ? `$${fmt(qpLimitSell)}` : '—'}`}
-                            </span>
-                          </div>
-                        </div>
+                            {/* SL detail: placed-at price + original SL price */}
+                            {(bSlId || bSlPrice != null) && (() => {
+                              const placedPrice  = bSlLastPct != null && entryPrice > 0 ? entryPrice * (1 + bSlLastPct / 100) : null
+                              const targetPrice  = bSlPending && bSlDynPct != null && entryPrice > 0 ? entryPrice * (1 + bSlDynPct / 100) : null
+                              return (
+                                <div style={{ marginTop: '0.3rem', paddingTop: '0.28rem', borderTop: '1px dashed rgba(0,0,0,0.07)', display: 'grid', gap: '0.18rem' }}>
+                                  {/* Ratchet row */}
+                                  {placedPrice != null && (
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', flexWrap: 'wrap' }}>
+                                      <span style={{ fontSize: '0.59rem', color: '#aaa', fontWeight: 600 }}>Placed at</span>
+                                      <span style={{ fontFamily: 'monospace', fontSize: '0.63rem', fontWeight: 800, color: bSlUpdated ? '#d97706' : '#888' }}>
+                                        ${fmt(placedPrice)}
+                                      </span>
+                                      {bSlPending && targetPrice != null && (
+                                        <>
+                                          <span style={{ fontSize: '0.59rem', color: '#aaa' }}>→</span>
+                                          <span style={{ fontFamily: 'monospace', fontSize: '0.63rem', fontWeight: 800, color: '#d97706' }}>${fmt(targetPrice)}</span>
+                                          <span style={{ fontSize: '0.58rem', fontWeight: 700, color: '#d97706', background: 'rgba(245,158,11,0.1)', borderRadius: '4px', padding: '0.05rem 0.28rem' }}>update queued</span>
+                                        </>
+                                      )}
+                                      {bSlPending && bSlReplaceError && (
+                                        <div style={{ width: '100%', marginTop: '0.22rem', padding: '0.25rem 0.4rem', borderRadius: '5px', background: 'rgba(239,68,68,0.07)', border: '1px solid rgba(239,68,68,0.18)' }}>
+                                          <span style={{ fontSize: '0.57rem', color: '#ef4444', fontWeight: 700 }}>Replace error: </span>
+                                          <span style={{ fontSize: '0.57rem', color: '#ef4444', fontFamily: 'monospace', wordBreak: 'break-all' }}>{bSlReplaceError}</span>
+                                        </div>
+                                      )}
+                                      {bSlUpdated && (
+                                        <span style={{ fontSize: '0.58rem', fontWeight: 700, color: '#16a34a', background: 'rgba(22,163,74,0.1)', borderRadius: '4px', padding: '0.05rem 0.28rem' }}>ratcheted ↑</span>
+                                      )}
+                                    </div>
+                                  )}
+                                  {/* Original SL price row */}
+                                  {initSlPrice != null && bSlUpdated && (
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                                      <span style={{ fontSize: '0.59rem', color: '#aaa', fontWeight: 600 }}>Original SL</span>
+                                      <span style={{ fontFamily: 'monospace', fontSize: '0.63rem', fontWeight: 700, color: '#aaa', textDecoration: 'line-through' }}>${fmt(initSlPrice)}</span>
+                                    </div>
+                                  )}
+                                  {/* Market fallback trigger price */}
+                                  {bSlDynPct != null && entryPrice > 0 && (() => {
+                                    const mktTrigger = entryPrice * (1 + bSlDynPct / 100)
+                                    return (
+                                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', marginTop: '0.08rem' }}>
+                                        <span style={{ fontSize: '0.59rem', color: '#f97316', fontWeight: 700 }}>Market SL</span>
+                                        <span style={{ fontFamily: 'monospace', fontSize: '0.63rem', fontWeight: 800, color: '#f97316' }}>${fmt(mktTrigger)}</span>
+                                        <span style={{ fontSize: '0.57rem', color: '#aaa', fontWeight: 500 }}>fires if broker SL misses</span>
+                                      </div>
+                                    )
+                                  })()}
+                                </div>
+                              )
+                            })()}
 
-                        <div style={{ marginTop: '0.45rem', display: 'grid', gap: '0.2rem' }}>
-                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '0.67rem' }}>
-                            <span style={{ color: 'var(--text-h)', fontWeight: 800 }}>
-                              {sellNowPrice == null ? 'Will sell at' : (qpArmed ? 'Will sell at (QP LMT)' : 'Will sell at (SL)')}
-                            </span>
-                            <span style={{ color: 'var(--text-h)', fontWeight: 900 }}>
-                              {sellNowPrice != null ? `$${fmt(sellNowPrice)}` : '—'}
-                            </span>
+                            {/* Monitor stall warning */}
+                            {bMonitorStalled && (
+                              <div style={{ marginTop: '0.38rem', padding: '0.2rem 0.42rem', borderRadius: '5px', background: 'rgba(245,158,11,0.07)', border: '1px solid rgba(245,158,11,0.22)' }}>
+                                <span style={{ fontSize: '0.57rem', color: '#d97706', fontWeight: 700 }}>⚠ SL not ratcheting in profit — monitoring may be stalled or not running</span>
+                              </div>
+                            )}
                           </div>
-                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '0.67rem' }}>
-                            <span style={{ color: '#16a34a', fontWeight: 800 }}>TP price</span>
-                            <span style={{ color: '#16a34a', fontWeight: 900 }}>
-                              {tpSellPrice != null ? `$${fmt(tpSellPrice)}` : '—'}
-                            </span>
-                          </div>
-                        </div>
-                      </div>
+                        )
+                      })()}
 
                       <div style={{ marginTop: '0.65rem', display: 'flex', justifyContent: 'flex-end' }}>
                         <button
@@ -2844,7 +2902,7 @@ export default function TradingView() {
         </div>
 
         {/* Entry Strategy Toggles */}
-        <div style={{
+        {/* <div style={{
           background: 'var(--card-bg)', border: '1px solid rgba(201,162,39,0.18)', borderRadius: '14px',
           padding: '0.95rem 0.9rem', boxShadow: '0 2px 10px rgba(0,0,0,0.04)', flexShrink: 0,
         }}>
@@ -2906,7 +2964,7 @@ export default function TradingView() {
               )
             })}
           </div>
-        </div>
+        </div> */}
 
         {/* ── MANUAL TRADE SECTION ── always visible; Buy/Sell hidden in AI mode */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
