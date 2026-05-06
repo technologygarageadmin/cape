@@ -3915,7 +3915,7 @@ def get_manual_trades(
     if symbol:
         q["symbol"] = symbol.strip().upper()
 
-    rows = list(_options_log_col.find(q, {"timeline": 0}).sort("created_at", -1).limit(limit))
+    rows = list(_options_log_col.find(q).sort("created_at", -1).limit(limit))
     trades = []
     for r in rows:
         trades.append(
@@ -3954,7 +3954,7 @@ def get_manual_trades(
                 "qpArmPrice":    r.get("qp_arm_price"),
                 "qpArmPnlPct":   r.get("qp_arm_pnl_pct"),
                 "qpArmPeakPct":  r.get("qp_arm_peak_pct"),
-                "timeline":      [],
+                "timeline":      r.get("timeline") or [],
             }
         )
 
@@ -3991,7 +3991,7 @@ def get_options_log(
     # compound index and skip MANUAL docs without a full collection scan.
     q["trade_type"] = {"$in": ["AIT", "STRADDLE", "RECOVERY", "MONITOR_EXIT"]}
 
-    rows = list(_options_log_col.find(q, {"timeline": 0}).sort("created_at", -1).limit(limit))
+    rows = list(_options_log_col.find(q).sort("created_at", -1).limit(limit))
     trades = []
     for r in rows:
         trades.append(
@@ -4055,7 +4055,7 @@ def get_options_log(
                 "qpArmPrice":    r.get("qp_arm_price"),
                 "qpArmPnlPct":   r.get("qp_arm_pnl_pct"),
                 "qpArmPeakPct":  r.get("qp_arm_peak_pct"),
-                "timeline":      [],
+                "timeline":      r.get("timeline") or [],
             }
         )
 

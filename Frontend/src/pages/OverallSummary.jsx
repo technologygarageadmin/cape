@@ -13,7 +13,17 @@ const GOLD_DEEP = '#A07C10'
 const GOLD_LIGHT = '#F5C518'
 
 const SYMBOLS = ['ALL','SPY','QQQ','AAPL','MSFT','NVDA','AMZN','META','TSLA','GOOGL','AMD','NFLX','AVGO']
-const DATE_FILTERS  = ['1H','3H','TODAY','WEEK','MONTH','ALL TIME']
+const DATE_FILTERS  = ['1H','3H','TODAY','YESTERDAY','WEEK','MONTH','ALL TIME','CUSTOM']
+const HOUR_FILTERS  = [
+  { key: 'ALL',         label: 'All Hours',   range: null },
+  { key: 'OPEN_HOUR',   label: '8:30–9:30',   range: '8:30 – 9:30 CT' },
+  { key: 'SECOND_HOUR', label: '9:30–10:30',  range: '9:30 – 10:30 CT' },
+  { key: 'THIRD_HOUR',  label: '10:30–11:30', range: '10:30 – 11:30 CT' },
+  { key: 'FOURTH_HOUR', label: '11:30–12:30', range: '11:30 – 12:30 CT' },
+  { key: 'FIFTH_HOUR',  label: '12:30–1:30',  range: '12:30 – 1:30 CT' },
+  { key: 'LAST_SLOT',   label: '1:30–3:00',   range: '1:30 – 3:00 CT' },
+  { key: 'MARKET',      label: 'Full Day',     range: '8:30 – 3:00 CT' },
+]
 const RESULT_FILTERS = ['ALL','WIN','LOSS']
 const TYPE_FILTERS = ['ALL','AIT','MANUAL']
 
@@ -158,47 +168,74 @@ function cdtDateKey(dateObj) {
   }).format(dateObj)
 }
 
-function isWithinRange(dateStr, range) {
+// Returns minutes-since-midnight in Chicago time for a given Date.
+// Accepts any Date with a correct UTC value — Intl handles CT conversion.
+function ctMinutes(d) {
+  try {
+    const p = new Intl.DateTimeFormat('en-US', {
+      timeZone: 'America/Chicago', hour: '2-digit', minute: '2-digit', hour12: false,
+    }).formatToParts(d).reduce((acc, x) => { if (x.type !== 'literal') acc[x.type] = x.value; return acc }, {})
+    return parseInt(p.hour || '0', 10) * 60 + parseInt(p.minute || '0', 10)
+  } catch { return -1 }
+}
+
+// Format a Date as CT date label (e.g. "Wed, May 7, 2026") for display.
+function fmtCtDate(d) {
+  return new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/Chicago', weekday: 'short', month: 'short', day: 'numeric', year: 'numeric',
+  }).format(d)
+}
+
+const MARKET_OPEN  = 8 * 60 + 30   // 8:30 CT
+const MARKET_CLOSE = 15 * 60        // 15:00 CT
+
+function isWithinRange(dateStr, range, customFrom, customTo) {
   if (!dateStr || range === 'ALL TIME') return true
   const d = parseApiDate(dateStr)
   if (!d) return true
 
-  if (range === '1H') {
-    return d >= new Date(Date.now() - 60 * 60 * 1000)
-  }
-  if (range === '3H') {
-    return d >= new Date(Date.now() - 3 * 60 * 60 * 1000)
-  }
+  // Use Date.now() / new Date() — always correct UTC regardless of browser timezone.
+  // cdtDateKey and ctMinutes both use Intl with timeZone:'America/Chicago' so they
+  // convert correctly from any UTC value.
+  if (range === '1H') return d >= new Date(Date.now() - 60 * 60 * 1000)
+  if (range === '3H') return d >= new Date(Date.now() - 3 * 60 * 60 * 1000)
+
+  const now = new Date()   // correct UTC — Intl does CT conversion
 
   if (range === 'TODAY') {
-    // Use Intl.formatToParts to get the Chicago-local date/time components for the
-    // trade `d` and for now. This avoids creating Date objects via locale strings
-    // which can be interpreted in the host timezone and lead to mismatches.
-    try {
-      const fmt = new Intl.DateTimeFormat('en-US', {
-        timeZone: 'America/Chicago', year: 'numeric', month: '2-digit', day: '2-digit',
-        hour: '2-digit', minute: '2-digit', hour12: false,
-      })
-      const extract = (dt) => fmt.formatToParts(dt).reduce((acc, p) => { if (p.type !== 'literal') acc[p.type] = p.value; return acc }, {})
-      const dParts = extract(d)
-      const nowParts = extract(new Date())
-      // Require same Chicago calendar day
-      if (dParts.year !== nowParts.year || dParts.month !== nowParts.month || dParts.day !== nowParts.day) return false
-      // Check market hours: 08:30 -> 15:00 CT
-      const dMinutes = (parseInt(dParts.hour || '0', 10) * 60) + parseInt(dParts.minute || '0', 10)
-      return dMinutes >= (8 * 60 + 30) && dMinutes <= (15 * 60)
-    } catch (e) {
-      // Fallback to calendar-day equality if Intl fails for any reason
-      const nowCDT = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Chicago' }))
-      return cdtDateKey(d) === cdtDateKey(nowCDT)
-    }
+    if (cdtDateKey(d) !== cdtDateKey(now)) return false
+    const m = ctMinutes(d)
+    return m >= MARKET_OPEN && m <= MARKET_CLOSE
   }
-  if (range === 'WEEK') {
-    const w = new Date(nowCDT); w.setDate(w.getDate() - 7); return d >= w
+  if (range === 'YESTERDAY') {
+    const yesterday = new Date(Date.now() - 86400000)  // exactly 24h ago in UTC
+    if (cdtDateKey(d) !== cdtDateKey(yesterday)) return false
+    const m = ctMinutes(d)
+    return m >= MARKET_OPEN && m <= MARKET_CLOSE
   }
-  if (range === 'MONTH') {
-    const m = new Date(nowCDT); m.setMonth(m.getMonth() - 1); return d >= m
+  if (range === 'WEEK')  return d >= new Date(Date.now() - 7  * 86400000)
+  if (range === 'MONTH') return d >= new Date(Date.now() - 30 * 86400000)
+  if (range === 'CUSTOM') {
+    if (customFrom && d < new Date(customFrom)) return false
+    if (customTo   && d > new Date(customTo))   return false
+    return true
   }
+  return true
+}
+
+function isWithinHours(dateStr, hourFilter) {
+  if (!hourFilter || hourFilter === 'ALL') return true
+  const d = parseApiDate(dateStr)
+  if (!d) return true
+  const m = ctMinutes(d)
+  if (m < 0) return true
+  if (hourFilter === 'OPEN_HOUR')   return m >= (8*60+30)  && m <  (9*60+30)
+  if (hourFilter === 'SECOND_HOUR') return m >= (9*60+30)  && m <  (10*60+30)
+  if (hourFilter === 'THIRD_HOUR')  return m >= (10*60+30) && m <  (11*60+30)
+  if (hourFilter === 'FOURTH_HOUR') return m >= (11*60+30) && m <  (12*60+30)
+  if (hourFilter === 'FIFTH_HOUR')  return m >= (12*60+30) && m <  (13*60+30)
+  if (hourFilter === 'LAST_SLOT')   return m >= (13*60+30) && m <= (15*60)
+  if (hourFilter === 'MARKET')      return m >= (8*60+30)  && m <= (15*60)
   return true
 }
 
@@ -418,16 +455,38 @@ function TradeTimeline({ timeline, fillPrice, qpArmed, qpArmTime, qpArmPrice, qp
           <div style={{ overflowX: 'auto', overflowY: 'auto', maxHeight: '240px' }}>
             <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '10.5px', minWidth: '480px' }}>
               <thead>
-                <tr style={{ background: '#fdfaf4', position: 'sticky', top: 0, zIndex: 1 }}>
+                <tr style={{ background: 'var(--card-bg)', position: 'sticky', top: 0, zIndex: 1 }}>
                   {['Time', 'Src', 'Sellable', 'Bid', 'Mid', 'PnL%', 'QP Lmt', 'QP Dyn%', 'Trailing SL Dyn', 'Peak', 'Peak Px', 'TP', 'SL Action', 'SL Update', 'Armed', 'Orders'].map(h => (
                     <th key={h} style={{ padding: '3px 6px', textAlign: 'left', fontWeight: 800, color: '#bbb', borderBottom: '1px solid #eee', whiteSpace: 'nowrap', fontSize: '9px', textTransform: 'uppercase', letterSpacing: '0.4px' }}>{h}</th>
                   ))}
                 </tr>
               </thead>
               <tbody>
-                {ticks.slice(0, 200).map((tick, idx) => {
-                  const isArm = qpArmIdx === idx
-                  const isPeak = peakIdx === idx
+                {(() => {
+                  const ticksToShow = ticks.length > 100
+                    ? [
+                        ...ticks.slice(0, 50).map((t, i) => ({ ...t, __idx: i })),
+                        { __separator: true, hidden: ticks.length - 100 },
+                        ...ticks.slice(-50).map((t, i) => ({ ...t, __idx: ticks.length - 50 + i })),
+                      ]
+                    : ticks.map((t, i) => ({ ...t, __idx: i }))
+                  return ticksToShow.map((tick, idx) => {
+                    if (tick.__separator) {
+                      return (
+                        <tr key="sep">
+                          <td colSpan={16} style={{
+                            padding: '6px 10px', textAlign: 'center',
+                            color: '#d97706', fontSize: '10px', fontWeight: 700,
+                            background: 'rgba(217,119,6,0.06)',
+                            border: '1px dashed rgba(217,119,6,0.25)',
+                          }}>
+                            ··· {tick.hidden} ticks in the middle not shown — first 50 + last 50 shown ···
+                          </td>
+                        </tr>
+                      )
+                    }
+                  const isArm = qpArmIdx === tick.__idx
+                  const isPeak = peakIdx === tick.__idx
                   const isEntry = tick.source === 'entry'
                   const isSell = tick.source === 'sell'
                   const isExitFilled = tick.source === 'exit_filled'
@@ -530,7 +589,7 @@ function TradeTimeline({ timeline, fillPrice, qpArmed, qpArmTime, qpArmPrice, qp
                     <tr key={idx} style={{ background: rowBg, fontWeight: isSell ? 700 : undefined }}>
                       <td style={{ padding: '2px 6px', fontFamily: 'monospace', color: 'var(--text)', whiteSpace: 'nowrap' }}>{fmtTickTime(tick.ts)}</td>
                       <td style={{ padding: '2px 6px', color: srcColor, textTransform: 'uppercase', fontSize: '9px', fontWeight: 700 }}>{srcLabel}</td>
-                      <td style={{ padding: '2px 6px', fontFamily: 'monospace', fontWeight: 700, color: isSell ? '#ef4444' : '#111' }}>${fmt2(tick.sellable_price)}</td>
+                      <td style={{ padding: '2px 6px', fontFamily: 'monospace', fontWeight: 700, color: isSell ? '#ef4444' : 'var(--text-h)' }}>${fmt2(tick.sellable_price)}</td>
                       <td style={{ padding: '2px 6px', fontFamily: 'monospace', color: 'var(--text)' }}>{tick.bid_price != null ? `$${fmt2(tick.bid_price)}` : '—'}</td>
                       <td style={{ padding: '2px 6px', fontFamily: 'monospace', color: 'var(--text)' }}>{tick.mid_price != null ? `$${fmt2(tick.mid_price)}` : '—'}</td>
                       <td style={{ padding: '2px 6px', fontFamily: 'monospace', fontWeight: 800, color: pnlColor }}>{fmtPctSigned(tick.pnl_pct)}</td>
@@ -557,14 +616,8 @@ function TradeTimeline({ timeline, fillPrice, qpArmed, qpArmTime, qpArmPrice, qp
                       </td>
                     </tr>
                   )
-                })}
-                {ticks.length > 200 && (
-                  <tr>
-                    <td colSpan={16} style={{ padding: '4px 6px', textAlign: 'center', color: '#bbb', fontSize: '10px', fontStyle: 'italic' }}>
-                      +{ticks.length - 200} more ticks not shown
-                    </td>
-                  </tr>
-                )}
+                  })
+                })()}
               </tbody>
             </table>
           </div>
@@ -589,56 +642,62 @@ const S = {
 
   // filter bar
   filterBar: {
-    display: 'flex', flexWrap: 'wrap', gap: '0.65rem', alignItems: 'center',
-    background: 'var(--card-bg)', border: '1px solid rgba(201,162,39,0.18)',
-    borderRadius: '12px', padding: '0.65rem 1rem',
-    boxShadow: '0 2px 8px rgba(201,162,39,0.06)',
+    background: 'var(--card-bg)',
+    border: '1px solid rgba(201,162,39,0.13)',
+    borderRadius: '14px',
+    padding: '0.7rem 1rem',
+    boxShadow: '0 2px 12px rgba(0,0,0,0.04)',
   },
-  filterGroup: { display: 'flex', alignItems: 'center', gap: '0.35rem' },
+  filterRow: { display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '0.3rem' },
+  filterGroup: { display: 'flex', alignItems: 'center', gap: '0.25rem' },
   filterLabel: {
-    fontSize: '0.73rem', fontWeight: 700, color: '#bbb',
-    textTransform: 'uppercase', letterSpacing: '0.06em',
-    display: 'flex', alignItems: 'center', gap: '0.3rem',
-    marginRight: '0.15rem',
+    fontSize: '0.67rem', fontWeight: 700, color: '#999',
+    textTransform: 'uppercase', letterSpacing: '0.08em',
+    display: 'flex', alignItems: 'center', gap: '0.25rem',
+    paddingRight: '0.2rem', whiteSpace: 'nowrap',
   },
   btn: (active) => ({
-    padding: '0.35rem 0.85rem', borderRadius: '999px', border: 'none', cursor: 'pointer',
-    fontSize: '0.78rem', fontWeight: 700, transition: 'all 0.18s',
-    background: active ? `linear-gradient(135deg,${GOLD} 0%,${GOLD_LIGHT} 100%)` : 'rgba(201,162,39,0.07)',
-    color: active ? '#111' : '#888',
-    boxShadow: active ? '0 2px 6px rgba(201,162,39,0.28)' : 'none',
+    padding: '0.26rem 0.65rem', borderRadius: '6px', border: 'none', cursor: 'pointer',
+    fontSize: '0.74rem', fontWeight: 600, transition: 'all 0.15s',
+    background: active ? `linear-gradient(135deg,${GOLD} 0%,${GOLD_LIGHT} 100%)` : 'transparent',
+    color: active ? '#111' : 'var(--text)',
+    boxShadow: active ? '0 1px 5px rgba(201,162,39,0.35)' : 'none',
+    letterSpacing: active ? '0' : '0',
   }),
-  divider: { width: '1px', height: '22px', background: 'rgba(201,162,39,0.18)', margin: '0 0.2rem' },
+  divider: { width: '1px', height: '18px', background: 'rgba(201,162,39,0.15)', margin: '0 0.3rem', flexShrink: 0 },
+  filterSep: { width: '100%', height: '1px', background: 'rgba(201,162,39,0.08)', margin: '0.45rem 0' },
 
   refreshBtn: {
-    display: 'flex', alignItems: 'center', gap: '0.45rem',
-    padding: '0.5rem 1.1rem', background: `linear-gradient(135deg,${GOLD} 0%,${GOLD_LIGHT} 100%)`,
+    display: 'flex', alignItems: 'center', gap: '0.4rem',
+    padding: '0.45rem 1rem', background: `linear-gradient(135deg,${GOLD} 0%,${GOLD_LIGHT} 100%)`,
     border: 'none', borderRadius: '8px', cursor: 'pointer',
-    fontSize: '0.82rem', fontWeight: 700, color: 'var(--text-h)',
-    boxShadow: '0 2px 8px rgba(201,162,39,0.22)', transition: 'all 0.2s',
+    fontSize: '0.8rem', fontWeight: 700, color: '#111',
+    boxShadow: '0 2px 8px rgba(201,162,39,0.3)', transition: 'all 0.18s',
   },
 
   // stats grid
   statsGrid: {
     display: 'grid',
-    gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))',
-    gap: '0.9rem', marginBottom: '1.5rem',
+    gridTemplateColumns: 'repeat(auto-fit, minmax(155px, 1fr))',
+    gap: '0.75rem', marginBottom: '1.4rem',
   },
-  statCard: {
+  statCard: (accent) => ({
     background: 'var(--card-bg)', borderRadius: '12px',
-    border: '1px solid rgba(201,162,39,0.15)',
-    padding: '1.1rem 1.25rem',
-    boxShadow: '0 2px 10px rgba(201,162,39,0.05)',
-  },
+    border: '1px solid rgba(201,162,39,0.1)',
+    borderLeft: `3px solid ${accent || 'rgba(201,162,39,0.5)'}`,
+    padding: '0.95rem 1.1rem 0.85rem',
+    boxShadow: '0 1px 6px rgba(0,0,0,0.04)',
+    transition: 'box-shadow 0.15s',
+  }),
   statIcon: (bg) => ({
-    width: '34px', height: '34px', borderRadius: '8px',
+    width: '28px', height: '28px', borderRadius: '7px',
     background: bg || 'rgba(201,162,39,0.1)',
     display: 'flex', alignItems: 'center', justifyContent: 'center',
-    marginBottom: '0.65rem',
+    flexShrink: 0,
   }),
-  statLabel: { fontSize: '0.71rem', fontWeight: 700, color: '#aaa', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: '0.25rem' },
-  statVal: (color) => ({ fontSize: '1.5rem', fontWeight: 900, color: color || '#111', lineHeight: 1 }),
-  statSub: { fontSize: '0.7rem', color: '#bbb', marginTop: '0.35rem' },
+  statLabel: { fontSize: '0.67rem', fontWeight: 700, color: '#999', textTransform: 'uppercase', letterSpacing: '0.07em' },
+  statVal: (color) => ({ fontSize: '1.45rem', fontWeight: 900, color: color || 'var(--text-h)', lineHeight: 1.05, letterSpacing: '-0.02em' }),
+  statSub: { fontSize: '0.68rem', color: '#aaa', marginTop: '0.3rem', fontWeight: 500 },
 
   // section card
   card: {
@@ -762,11 +821,13 @@ function SymbolDropdown({ value, onChange }) {
 }
 
 // ── Stat card ──────────────────────────────────────────────────────────────
-function StatCard({ icon, iconBg, label, value, sub, valueColor }) {
+function StatCard({ icon, iconBg, label, value, sub, valueColor, accent }) {
   return (
-    <div style={S.statCard}>
-      <div style={S.statIcon(iconBg)}>{icon}</div>
-      <div style={S.statLabel}>{label}</div>
+    <div className="stat-card" style={S.statCard(accent || valueColor)}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '0.55rem' }}>
+        <span style={S.statLabel}>{label}</span>
+        <div style={S.statIcon(iconBg)}>{icon}</div>
+      </div>
       <div style={S.statVal(valueColor)}>{value}</div>
       {sub && <div style={S.statSub}>{sub}</div>}
     </div>
@@ -801,6 +862,9 @@ export default function OverallSummary() {
   const [hideRecovery, setHideRecovery]  = useState(false)
   const [sellingSymbol, setSellingSymbol] = useState(null)
   const alertedPositionKeysRef = useRef(new Set())
+  const [customFrom,   setCustomFrom]   = useState('')
+  const [customTo,     setCustomTo]     = useState('')
+  const [hourFilter,   setHourFilter]   = useState('ALL')
   const lastDingAtRef = useRef(0)
 
   // ── Fetch history (trades + positions + config) — refreshes every 30s ──────
@@ -952,14 +1016,16 @@ export default function OverallSummary() {
     allTrades.filter(t => {
       if (hideStraddle && t.tradeTypeTag === 'STRADDLE') return false
       if (hideRecovery && String(t.tradeTypeTag || '').toUpperCase() === 'RECOVERY') return false
-      const dateOk = isWithinRange(t.createdAt || t.entryTime, dateFilter)
+      const ts = t.createdAt || t.entryTime
+      const dateOk = isWithinRange(ts, dateFilter, customFrom, customTo)
+      const hourOk = isWithinHours(ts, hourFilter)
       const resOk  = resultFilter === 'ALL' || t.result === resultFilter
       const symOk  = symbolFilter === 'ALL' || t.symbol === symbolFilter
       const tag = String(t.tradeTypeTag || t.trade_type || t.tradeType || '').toUpperCase()
       const typeOk = typeFilter === 'ALL' || (typeFilter === 'AIT' && tag === 'AIT') || (typeFilter === 'MANUAL' && tag === 'MANUAL')
-      return dateOk && resOk && symOk && typeOk
+      return dateOk && hourOk && resOk && symOk && typeOk
     })
-  ), [allTrades, dateFilter, resultFilter, symbolFilter, hideStraddle, hideRecovery, typeFilter])
+  ), [allTrades, dateFilter, customFrom, customTo, hourFilter, resultFilter, symbolFilter, hideStraddle, hideRecovery, typeFilter])
 
   // History card display list — same as filtered (unified filter)
   const historyDisplayed = filtered
@@ -1159,15 +1225,16 @@ export default function OverallSummary() {
         @keyframes spin { to { transform: rotate(360deg) } }
         .os-tr:hover td { background: rgba(201,162,39,0.03) !important; }
         .sym-opt:hover { background: rgba(201,162,39,0.1) !important; }
+        .stat-card:hover { box-shadow: 0 4px 16px rgba(0,0,0,0.08) !important; }
         .trade-card {
           transition: box-shadow 0.18s, transform 0.14s;
-          box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+          box-shadow: 0 1px 4px rgba(0,0,0,0.05);
           content-visibility: auto;
           contain-intrinsic-size: 320px;
         }
         .trade-card:hover {
-          box-shadow: 0 8px 28px rgba(0,0,0,0.12) !important;
-          transform: translateY(-2px);
+          box-shadow: 0 6px 24px rgba(0,0,0,0.1) !important;
+          transform: translateY(-1px);
         }
       `}</style>
 
@@ -1192,172 +1259,208 @@ export default function OverallSummary() {
         </div>
 
         {/* ── FILTER BAR ──────────────────────────────────────────────────── */}
-        <div style={S.filterBar}>
-          {/* Date range */}
-          <div style={S.filterGroup}>
-            <span style={S.filterLabel}><Activity size={11} /> Period</span>
-            {DATE_FILTERS.map(f => (
-              <button key={f} style={S.btn(dateFilter === f)} onClick={() => setDateFilter(f)}>{f}</button>
-            ))}
+        <div style={{ ...S.filterBar, display: 'flex', flexDirection: 'column', gap: '0' }}>
+
+          {/* Row 1 — Period */}
+          <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '0.2rem', paddingBottom: '0.55rem' }}>
+            <span style={S.filterLabel}><Activity size={10} /> Period</span>
+            <div style={{ display: 'flex', gap: '0.15rem', background: 'rgba(201,162,39,0.06)', borderRadius: '7px', padding: '0.18rem' }}>
+              {DATE_FILTERS.filter(f => f !== 'CUSTOM').map(f => (
+                <button key={f} style={S.btn(dateFilter === f)} onClick={() => setDateFilter(f)}>{f}</button>
+              ))}
+            </div>
+            <button
+              style={{
+                ...S.btn(dateFilter === 'CUSTOM'),
+                border: '1px dashed rgba(201,162,39,0.3)',
+                marginLeft: '0.25rem',
+              }}
+              onClick={() => setDateFilter('CUSTOM')}
+            >Custom</button>
+
+            {/* Active date label */}
+            {(dateFilter === 'TODAY' || dateFilter === 'YESTERDAY') && (() => {
+              const base = dateFilter === 'YESTERDAY' ? new Date(Date.now() - 86400000) : new Date()
+              const label = fmtCtDate(base)
+              return (
+                <span style={{
+                  marginLeft: '0.5rem', fontSize: '0.71rem', fontWeight: 700,
+                  color: GOLD_DEEP, padding: '0.18rem 0.6rem',
+                  background: 'rgba(201,162,39,0.08)',
+                  borderRadius: '5px', border: '1px solid rgba(201,162,39,0.18)',
+                  whiteSpace: 'nowrap',
+                }}>
+                  {label} · 8:30 AM – 3:00 PM CT
+                </span>
+              )
+            })()}
+
+            {dateFilter === 'CUSTOM' && (
+              <>
+                <input type="datetime-local" value={customFrom} onChange={e => setCustomFrom(e.target.value)}
+                  style={{ padding: '0.22rem 0.5rem', borderRadius: '6px', fontSize: '0.73rem', fontWeight: 500, border: '1px solid rgba(201,162,39,0.3)', background: 'var(--bg)', color: 'var(--text)', outline: 'none', marginLeft: '0.4rem' }}
+                />
+                <span style={{ color: '#bbb', fontSize: '0.7rem' }}>→</span>
+                <input type="datetime-local" value={customTo} onChange={e => setCustomTo(e.target.value)}
+                  style={{ padding: '0.22rem 0.5rem', borderRadius: '6px', fontSize: '0.73rem', fontWeight: 500, border: '1px solid rgba(201,162,39,0.3)', background: 'var(--bg)', color: 'var(--text)', outline: 'none' }}
+                />
+                {(customFrom || customTo) && (
+                  <span style={{ marginLeft: '0.4rem', fontSize: '0.7rem', fontWeight: 600, color: GOLD_DEEP, padding: '0.18rem 0.5rem', background: 'rgba(201,162,39,0.08)', borderRadius: '5px', border: '1px solid rgba(201,162,39,0.18)', whiteSpace: 'nowrap' }}>
+                    {customFrom ? new Date(customFrom).toLocaleString('en-US', { month:'short', day:'numeric', hour:'2-digit', minute:'2-digit' }) : '…'}
+                    {' → '}
+                    {customTo ? new Date(customTo).toLocaleString('en-US', { month:'short', day:'numeric', hour:'2-digit', minute:'2-digit' }) : 'now'}
+                  </span>
+                )}
+              </>
+            )}
           </div>
 
-          <div style={S.divider} />
+          <div style={S.filterSep} />
 
-          {/* Result */}
-          <div style={S.filterGroup}>
-            <span style={S.filterLabel}><Filter size={11} /> Result</span>
+          {/* Row 2 — Hours */}
+          <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '0.2rem', padding: '0.55rem 0' }}>
+            <span style={S.filterLabel}><Clock size={10} /> Hours (CT)</span>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.15rem', background: 'rgba(201,162,39,0.06)', borderRadius: '7px', padding: '0.18rem' }}>
+              {HOUR_FILTERS.map(f => (
+                <button key={f.key} style={S.btn(hourFilter === f.key)} onClick={() => setHourFilter(f.key)}>{f.label}</button>
+              ))}
+            </div>
+            {hourFilter !== 'ALL' && (() => {
+              const active = HOUR_FILTERS.find(f => f.key === hourFilter)
+              return active?.range
+                ? <span style={{ marginLeft: '0.5rem', fontSize: '0.7rem', fontWeight: 700, color: GOLD_DEEP, padding: '0.18rem 0.55rem', background: 'rgba(201,162,39,0.08)', borderRadius: '5px', border: '1px solid rgba(201,162,39,0.18)' }}>{active.range}</span>
+                : null
+            })()}
+          </div>
+
+          <div style={S.filterSep} />
+
+          {/* Row 3 — Result · Type · Symbol · Toggles · Reset */}
+          <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '0.25rem', paddingTop: '0.55rem' }}>
+            <span style={S.filterLabel}>Result</span>
             {RESULT_FILTERS.map(f => (
               <button key={f} style={S.btn(resultFilter === f)} onClick={() => setResultFilter(f)}>{f}</button>
             ))}
-          </div>
 
-          <div style={S.divider} />
+            <div style={S.divider} />
 
-          {/* Type */}
-          <div style={S.filterGroup}>
-            <span style={S.filterLabel}><Filter size={11} /> Type</span>
+            <span style={S.filterLabel}>Type</span>
             {TYPE_FILTERS.map(f => (
               <button key={f} style={S.btn(typeFilter === f)} onClick={() => setTypeFilter(f)}>{f === 'MANUAL' ? 'MT' : f}</button>
             ))}
-          </div>
 
-          <div style={S.divider} />
+            <div style={S.divider} />
 
-          {/* Symbol */}
-          <div style={S.filterGroup}>
-            <span style={S.filterLabel}><Layers size={11} /> Symbol</span>
+            <span style={S.filterLabel}><Layers size={10} /> Symbol</span>
             <SymbolDropdown value={symbolFilter} onChange={setSymbolFilter} />
-          </div>
 
-          <div style={S.divider} />
+            <div style={S.divider} />
 
-          {/* Hide Straddle toggle */}
-          <div style={S.filterGroup}>
-            <span style={S.filterLabel}><Filter size={11} /> Straddle</span>
-            <button
-              style={{
-                padding: '0.35rem 0.85rem', borderRadius: '999px',
-                border: `1px solid ${hideStraddle ? 'rgba(239,68,68,0.3)' : 'rgba(22,163,74,0.3)'}`,
-                cursor: 'pointer', fontSize: '0.74rem', fontWeight: 700,
-                background: hideStraddle ? 'rgba(239,68,68,0.08)' : 'rgba(22,163,74,0.08)',
-                color: hideStraddle ? '#ef4444' : '#16a34a',
-                display: 'flex', alignItems: 'center', gap: '0.3rem', transition: 'all 0.15s',
-              }}
-              onClick={() => setHideStraddle(h => !h)}
-            >
-              {hideStraddle ? '✕ Hidden' : '✓ Included'}
+            {/* Straddle toggle */}
+            <button onClick={() => setHideStraddle(h => !h)} style={{
+              padding: '0.22rem 0.6rem', borderRadius: '6px', cursor: 'pointer',
+              fontSize: '0.71rem', fontWeight: 600, transition: 'all 0.15s', border: 'none',
+              background: hideStraddle ? 'rgba(239,68,68,0.08)' : 'rgba(22,163,74,0.08)',
+              color: hideStraddle ? '#ef4444' : '#16a34a',
+            }}>
+              {hideStraddle ? '✕' : '✓'} Straddle
             </button>
-          </div>
 
-          <div style={S.divider} />
-
-          {/* Hide Recovery toggle */}
-          <div style={S.filterGroup}>
-            <span style={S.filterLabel}><Filter size={11} /> Recovery</span>
-            <button
-              style={{
-                padding: '0.35rem 0.85rem', borderRadius: '999px',
-                border: `1px solid ${hideRecovery ? 'rgba(239,68,68,0.3)' : 'rgba(22,163,74,0.3)'}`,
-                cursor: 'pointer', fontSize: '0.74rem', fontWeight: 700,
-                background: hideRecovery ? 'rgba(239,68,68,0.08)' : 'rgba(22,163,74,0.08)',
-                color: hideRecovery ? '#ef4444' : '#16a34a',
-                display: 'flex', alignItems: 'center', gap: '0.3rem', transition: 'all 0.15s',
-              }}
-              onClick={() => setHideRecovery(h => !h)}
-            >
-              {hideRecovery ? '✕ Hidden' : '✓ Included'}
+            {/* Recovery toggle */}
+            <button onClick={() => setHideRecovery(h => !h)} style={{
+              padding: '0.22rem 0.6rem', borderRadius: '6px', cursor: 'pointer',
+              fontSize: '0.71rem', fontWeight: 600, transition: 'all 0.15s', border: 'none',
+              background: hideRecovery ? 'rgba(239,68,68,0.08)' : 'rgba(22,163,74,0.08)',
+              color: hideRecovery ? '#ef4444' : '#16a34a',
+            }}>
+              {hideRecovery ? '✕' : '✓'} Recovery
             </button>
-          </div>
 
-          {/* Clear filters */}
-          {(dateFilter !== 'ALL TIME' || resultFilter !== 'ALL' || symbolFilter !== 'ALL' || !hideStraddle || !hideRecovery || typeFilter !== 'ALL') && (
-            <>
-              <div style={S.divider} />
-              <button
-                onClick={() => { setDateFilter('ALL TIME'); setResultFilter('ALL'); setSymbolFilter('ALL'); setHideStraddle(true); setHideRecovery(true); setTypeFilter('ALL') }}
-                style={{
-                  padding: '0.35rem 0.85rem', borderRadius: '999px', border: '1px solid rgba(239,68,68,0.25)',
-                  cursor: 'pointer', fontSize: '0.76rem', fontWeight: 700,
-                  background: 'rgba(239,68,68,0.06)', color: '#ef4444',
-                  display: 'flex', alignItems: 'center', gap: '0.3rem', transition: 'all 0.15s',
-                }}
-              >
-                ✕ Clear Filters
-              </button>
-            </>
-          )}
+            {(dateFilter !== 'TODAY' || resultFilter !== 'ALL' || symbolFilter !== 'ALL' || !hideStraddle || !hideRecovery || typeFilter !== 'ALL' || hourFilter !== 'ALL') && (
+              <>
+                <div style={S.divider} />
+                <button
+                  onClick={() => {
+                    setDateFilter('TODAY'); setResultFilter('ALL'); setSymbolFilter('ALL')
+                    setHideStraddle(true); setHideRecovery(true); setTypeFilter('ALL')
+                    setHourFilter('ALL'); setCustomFrom(''); setCustomTo('')
+                  }}
+                  style={{
+                    padding: '0.22rem 0.6rem', borderRadius: '6px', border: 'none',
+                    cursor: 'pointer', fontSize: '0.71rem', fontWeight: 600,
+                    background: 'rgba(239,68,68,0.08)', color: '#ef4444', transition: 'all 0.15s',
+                  }}
+                >
+                  ✕ Reset
+                </button>
+              </>
+            )}
+          </div>
         </div>
 
         {/* ── STATS GRID ──────────────────────────────────────────────────── */}
-        <div style={{ ...S.statsGrid, marginTop: '1.1rem' }}>
+        <div style={{ ...S.statsGrid, marginTop: '0.85rem' }}>
           <StatCard
-            icon={<BarChart3 size={16} color={GOLD_DEEP} />}
+            icon={<BarChart3 size={14} color={GOLD_DEEP} />}
             iconBg="rgba(201,162,39,0.1)"
             label="Total Trades"
             value={filtered.length}
-            sub={`AIT: ${aitCount} · Manual: ${manualCount}${breakevens > 0 ? ' · BE: ' + breakevens : ''}`}
+            sub={`AIT: ${aitCount} · MT: ${manualCount}${breakevens > 0 ? ' · BE: ' + breakevens : ''}`}
+            accent={GOLD}
           />
           <StatCard
-            icon={<TrendingUp size={16} color="#16a34a" />}
+            icon={<TrendingUp size={14} color="#16a34a" />}
             iconBg="rgba(22,163,74,0.1)"
             label="Wins"
             value={wins}
-            sub={`Win Rate: ${winRate}%`}
+            sub={`Win rate: ${winRate}%`}
             valueColor="#16a34a"
           />
           <StatCard
-            icon={<TrendingDown size={16} color="#ef4444" />}
+            icon={<TrendingDown size={14} color="#ef4444" />}
             iconBg="rgba(239,68,68,0.1)"
             label="Losses"
             value={losses}
-            sub={`${filtered.length > 0 ? ((losses/filtered.length)*100).toFixed(1) : '—'}% loss rate`}
+            sub={`Loss rate: ${filtered.length > 0 ? ((losses/filtered.length)*100).toFixed(1) : '—'}%`}
             valueColor="#ef4444"
           />
           <StatCard
-            icon={<ArrowUpRight size={16} color="#16a34a" />}
+            icon={<ArrowUpRight size={14} color="#16a34a" />}
             iconBg="rgba(22,163,74,0.08)"
             label="Total Profit"
             value={`$${fmt2(totalProfit)}`}
             valueColor="#16a34a"
           />
           <StatCard
-            icon={<ArrowDownRight size={16} color="#ef4444" />}
+            icon={<ArrowDownRight size={14} color="#ef4444" />}
             iconBg="rgba(239,68,68,0.08)"
             label="Total Loss"
             value={`$${fmt2(Math.abs(totalLoss))}`}
             valueColor="#ef4444"
           />
           <StatCard
-            icon={<DollarSign size={16} color={netPnl >= 0 ? '#16a34a' : '#ef4444'} />}
+            icon={<DollarSign size={14} color={netPnl >= 0 ? '#16a34a' : '#ef4444'} />}
             iconBg={netPnl >= 0 ? 'rgba(22,163,74,0.1)' : 'rgba(239,68,68,0.1)'}
             label="Net P&L"
             value={fmtPnl(netPnl)}
-            sub={`Avg per trade: ${avgPnl !== '—' ? fmtPnl(avgPnl) : '—'}`}
+            sub={`Per trade: ${avgPnl !== '—' ? fmtPnl(avgPnl) : '—'}`}
             valueColor={netPnl >= 0 ? '#16a34a' : '#ef4444'}
           />
           <StatCard
-            icon={<Clock size={16} color="#6366f1" />}
+            icon={<Clock size={14} color="#6366f1" />}
             iconBg="rgba(99,102,241,0.1)"
             label="Avg Duration"
             value={avgDuration}
-            sub={avgPnlPct != null ? `Avg PnL: ${fmtPctSigned(avgPnlPct)}` : null}
+            sub={avgPnlPct != null ? `Avg PnL: ${fmtPctSigned(avgPnlPct)}` : undefined}
             valueColor="#6366f1"
           />
           <StatCard
-            icon={<Target size={16} color="#d97706" />}
+            icon={<Target size={14} color="#d97706" />}
             iconBg="rgba(217,119,6,0.1)"
             label="Avg Entry RSI"
             value={avgEntryRsi ?? '—'}
-            sub={avgEntryRsi ? (Number(avgEntryRsi) > 50 ? 'Bullish bias' : 'Bearish bias') : null}
+            sub={avgEntryRsi ? (Number(avgEntryRsi) > 50 ? 'Bullish bias' : 'Bearish bias') : undefined}
             valueColor="#d97706"
-          />
-          <StatCard
-            icon={<Zap size={16} color="#16a34a" />}
-            iconBg="rgba(22,163,74,0.08)"
-            label="Best Trade"
-            value={bestTrade != null ? fmtPnl(bestTrade) : '—'}
-            sub={worstTrade != null ? `Worst: ${fmtPnl(worstTrade)}` : null}
-            valueColor="#16a34a"
           />
         </div>
 
