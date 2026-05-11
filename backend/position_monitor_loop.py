@@ -40,7 +40,7 @@ from monitoring import (
     monitor_with_websocket,
 )
 from order_execution import get_open_positions, place_market_order, wait_for_fill
-from order_execution import get_externally_managed_symbols
+from order_execution import get_externally_managed_symbols, get_exiting_symbols
 
 
 _OPTION_RE = re.compile(r"^([A-Z]+)(\d{6})([CP])(\d{8})$")
@@ -414,6 +414,9 @@ def run_monitor_all_positions() -> None:
                 if lot.get("status") != "CLOSED"
             }
             managed_symbols |= get_externally_managed_symbols()
+            # Block generic monitor spawn for positions still in cleanup window (exit fired
+            # but broker position not yet settled). Covers the CLOSED-but-still-visible gap.
+            managed_symbols |= get_exiting_symbols()
 
             for pos in positions:
                 symbol = str(getattr(pos, "symbol", "") or "")

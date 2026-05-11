@@ -1711,7 +1711,9 @@ def _ait_trade_loop(
                     print(f"[AIT:{symbol}] {exit_reason} via Alpaca SL stop-limit order filled at {sell_price:.4f}")
                     break
 
-                if exit_reason in market_fallback_reasons:
+                # Any non-None, non-FORCED exit reason means the monitor decided to exit.
+                # Broker fills were already handled above; everything else requires a market sell.
+                if exit_reason and exit_reason != "FORCED_EXIT_NO_SIGNAL":
                     print(f"[AIT:{symbol}] {exit_reason} -> forcing MARKET sell")
                     sell_order = place_market_order(
                         tc,
@@ -1742,8 +1744,7 @@ def _ait_trade_loop(
                     break
 
                 print(
-                    f"[AIT:{symbol}] Waiting for broker TP/SL child fill "
-                    f"(exit_reason={exit_reason})"
+                    f"[AIT:{symbol}] No exit signal — re-monitoring {contract_symbol}"
                 )
                 time.sleep(CHECK_INTERVAL_SEC)
                 continue
@@ -2090,7 +2091,9 @@ def _recovery_monitor_thread(
             print(f"[RECOVERY:{underlying}] {exit_reason} via Alpaca SL stop-limit order at {sell_price:.4f}")
             break
 
-        if exit_reason in market_fallback_reasons:
+        # Any non-None, non-FORCED exit reason means the monitor decided to exit.
+        # Broker fills were already handled above; everything else requires a market sell.
+        if exit_reason and exit_reason != "FORCED_EXIT_NO_SIGNAL":
             print(f"[RECOVERY:{underlying}] {exit_reason} -> forcing MARKET sell")
             sell_order = place_market_order(
                 tc,
@@ -2121,8 +2124,7 @@ def _recovery_monitor_thread(
             break
 
         print(
-            f"[RECOVERY:{underlying}] Waiting for broker TP/SL child fill "
-            f"(exit_reason={exit_reason})"
+            f"[RECOVERY:{underlying}] No exit signal — re-monitoring {contract_symbol}"
         )
         exit_reason = None
         time.sleep(CHECK_INTERVAL_SEC)
@@ -3646,7 +3648,9 @@ def _manual_trade_monitor_thread(
             print(f"[MT:{underlying}] {exit_reason} via Alpaca SL stop-limit order at {sell_price:.4f}")
             break
 
-        if exit_reason in market_fallback_reasons:
+        # Any non-None, non-FORCED exit reason means the monitor decided to exit.
+        # Broker fills were already handled above; everything else requires a market sell.
+        if exit_reason and exit_reason != "FORCED_EXIT_NO_SIGNAL":
             print(f"[MT:{underlying}] {exit_reason} -> forcing MARKET sell")
             try:
                 close_resp = tc.close_position(contract_symbol)
@@ -3695,8 +3699,7 @@ def _manual_trade_monitor_thread(
                 continue
 
         print(
-            f"[MT:{underlying}] Waiting for broker TP/SL child fill "
-            f"(exit_reason={exit_reason})"
+            f"[MT:{underlying}] No exit signal — re-monitoring {contract_symbol}"
         )
         time.sleep(CHECK_INTERVAL_SEC)
 

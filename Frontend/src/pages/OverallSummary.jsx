@@ -867,12 +867,12 @@ export default function OverallSummary() {
   const [hourFilter,   setHourFilter]   = useState('ALL')
   const lastDingAtRef = useRef(0)
 
-  // ── Fetch history (trades + positions + config) — refreshes every 30s ──────
+  // ── Fetch history (trades + positions + config) — refreshes every 5s ───────
   const fetchHistory = useCallback(async (silent = false) => {
     try {
       const [aitRes, manualRes, posRes, cfgRes] = await Promise.allSettled([
-        fetch(`${API_DISPLAY}/api/options-log?limit=200`),
-        fetch(`${API_DISPLAY}/api/manual-trades?limit=200`),
+        fetch(`${API_DISPLAY}/api/options-log?limit=500`),
+        fetch(`${API_DISPLAY}/api/manual-trades?limit=500`),
         fetch(`${API_DISPLAY}/api/positions`),
         fetch(`${API_DISPLAY}/api/config`),
       ])
@@ -959,7 +959,7 @@ export default function OverallSummary() {
 
   useEffect(() => {
     fetchAll()
-    const histId = setInterval(() => fetchHistory(true), 30_000)
+    const histId = setInterval(() => fetchHistory(true), 5_000)
     const liveId = setInterval(() => fetchLive(), 5_000)
     return () => { clearInterval(histId); clearInterval(liveId) }
   }, [fetchAll, fetchHistory, fetchLive])

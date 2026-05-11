@@ -78,6 +78,7 @@ def register_position(
             "leg_name": leg_name,
             "trade_type": trade_type,
             "status": "OPEN",   # OPEN | SELLING | CLOSED
+            "exit_in_progress": False,
             "sell_order_id": None,
             "registered_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "cross_time": signal_time,
@@ -118,6 +119,7 @@ def mark_selling(buy_order_id: str, sell_order_id: str) -> None:
         if pos:
             pos["status"] = "SELLING"
             pos["sell_order_id"] = sell_order_id
+            pos["exit_in_progress"] = True
     with _live_exit_lock:
         live = _live_exit_states.get(buy_order_id)
         if live:
@@ -135,7 +137,6 @@ def close_position(buy_order_id: str) -> dict | None:
         live = _live_exit_states.get(buy_order_id)
         if live:
             live["monitoring_active"] = False
-            live["is_closing"] = False
     info(f"[REGISTRY] {buy_order_id} → CLOSED")
     return pos
 
@@ -208,6 +209,39 @@ def begin_trade_closing(buy_order_id: str) -> None:
         live = _live_exit_states.get(buy_order_id)
         if live:
             live["is_closing"] = True
+
+
+def mark_exit_in_progress(buy_order_id: str) -> None:
+    """Set exit_in_progress in both registry and live-state the moment any exit path activates.
+    Called by the monitor before cancelling orders — blocks any concurrent or restarted monitor."""
+    with _positions_lock:
+        pos = _positions.get(buy_order_id)
+        if pos:
+            pos["exit_in_progress"] = True
+    with _live_exit_lock:
+        live = _live_exit_states.get(buy_order_id)
+        if live:
+            live["is_closing"] = True
+
+
+def is_position_exiting(buy_order_id: str) -> bool:
+    """True when any monitor has already started the exit sequence for this lot."""
+    with _positions_lock:
+        pos = _positions.get(buy_order_id)
+        if pos and pos.get("exit_in_progress"):
+            return True
+    return False
+
+
+def get_exiting_symbols() -> set[str]:
+    """Return contract_symbols of ALL positions (including CLOSED) with exit_in_progress=True.
+    Used by position_monitor_loop to block generic monitor spawn during the cleanup window."""
+    with _positions_lock:
+        return {
+            str(v.get("contract_symbol") or "")
+            for v in _positions.values()
+            if v.get("exit_in_progress") and v.get("contract_symbol")
+        }
 
 
 def cancel_broker_safety_sl(trading_client, buy_order_id: str) -> None:
