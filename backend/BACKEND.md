@@ -75,10 +75,12 @@ All trading behavior is controlled here. Never recompute prices inline — alway
 | `TAKE_PROFIT_PCT` | `0.25` | Absolute $0.25 above fill |
 | `STOP_LOSS_PCT` | `0.50` | Absolute $0.50 below fill |
 | `EXIT_BRACKET_QP_ENABLED` | `True` | Broker SL ratchet mode (primary) |
-| `EXIT_QUICK_PROFIT_ENABLED` | `False` | Internal QP market sell (off; broker SL handles QP) |
-| `EXIT_TRAILING_STOP_ENABLED` | `False` | Internal trailing SL market sell (off) |
-| `CAPE_QP_OFFSET` | `0.01` | QP floor = current_price − $0.01 |
+| `EXIT_QUICK_PROFIT_ENABLED` | `True` | QP logic enabled for dynamic ratchet updates |
+| `EXIT_TRAILING_STOP_ENABLED` | `True` | Trailing SL logic enabled |
+| `CAPE_QP_OFFSET` | `0.10` | QP floor = current_price − $0.10 |
 | `CAPE_TRAILING_SL_OFFSET` | `0.25` | Trailing SL = current_price − $0.25 |
+| `SL_STOP_LIMIT_BUFFER_PCT` | `0.20` | Profit-zone buffer gate before broker SL can cross above entry |
+| `_SL_MIN_PRICE_STEP` | `0.02` | Minimum $ ratchet step before sending replace to broker |
 | `SL_STOP_ORDERS_ENABLED` | `True` | Enables broker-side SL placement/replacement |
 | `MIN_TRADE_DURATION_SEC` | `30` | No exits for 30s after fill |
 | `POST_TRADE_COOLDOWN_BARS` | `5` | Bars blocked after any exit |
@@ -170,10 +172,12 @@ When `EXIT_BRACKET_QP_ENABLED = True`, `use_bracket_exit = True` is set.
 **QP Ratchet Mechanics**
 On each profit tick (`current_price > fill_price`):
 ```
-qp_price         = current_price − CAPE_QP_OFFSET        ($0.01)
+qp_price         = current_price − CAPE_QP_OFFSET        ($0.10)
 trailing_sl      = current_price − CAPE_TRAILING_SL_OFFSET ($0.25)
 sl_candidate     = max(existing_sl, qp_price, trailing_sl)  # only ever increases
 ```
+Current tuning: `CAPE_QP_OFFSET = 0.10`, `CAPE_TRAILING_SL_OFFSET = 0.25`, `SL_STOP_LIMIT_BUFFER_PCT = 0.20`, `_SL_MIN_PRICE_STEP = 0.02`.
+
 `_place_sl_stop_order()` replaces broker SL at the new level. When price reverses, broker SL triggers → fills at or better than limit price. Market exit only via `_detect_market_fallback_reason()`.
 
 **`_place_sl_stop_order` Replacement Chain**

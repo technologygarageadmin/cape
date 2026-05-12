@@ -2461,17 +2461,36 @@ export default function TradingView() {
 
                             {/* SL detail: placed-at price + original SL price */}
                             {(bSlId || bSlPrice != null) && (() => {
-                              const placedPrice  = bSlLastPct != null && entryPrice > 0 ? entryPrice * (1 + bSlLastPct / 100) : null
+                              const brokerPlacedPrice = bSlPrice != null ? Number(bSlPrice) : null
+                              const calcPlacedPrice   = bSlLastPct != null && entryPrice > 0 ? entryPrice * (1 + bSlLastPct / 100) : null
+                              const placedPrice       = brokerPlacedPrice ?? calcPlacedPrice
+                              const placedIsBroker    = brokerPlacedPrice != null
+                              const placedDrift       = brokerPlacedPrice != null && calcPlacedPrice != null
+                                ? Math.abs(brokerPlacedPrice - calcPlacedPrice)
+                                : 0
                               const targetPrice  = bSlPending && bSlDynPct != null && entryPrice > 0 ? entryPrice * (1 + bSlDynPct / 100) : null
                               return (
                                 <div style={{ marginTop: '0.3rem', paddingTop: '0.28rem', borderTop: '1px dashed rgba(0,0,0,0.07)', display: 'grid', gap: '0.18rem' }}>
                                   {/* Ratchet row */}
                                   {placedPrice != null && (
                                     <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', flexWrap: 'wrap' }}>
-                                      <span style={{ fontSize: '0.59rem', color: '#aaa', fontWeight: 600 }}>Placed at</span>
+                                      <span style={{ fontSize: '0.59rem', color: '#aaa', fontWeight: 600 }}>
+                                        {placedIsBroker ? 'Broker placed at' : 'Placed at (calc)'}
+                                      </span>
                                       <span style={{ fontFamily: 'monospace', fontSize: '0.63rem', fontWeight: 800, color: bSlUpdated ? '#d97706' : '#888' }}>
                                         ${fmt(placedPrice)}
                                       </span>
+                                      {placedIsBroker && (
+                                        <span style={{ fontSize: '0.58rem', fontWeight: 700, color: '#6366f1', background: 'rgba(99,102,241,0.1)', borderRadius: '4px', padding: '0.05rem 0.28rem' }}>live broker</span>
+                                      )}
+                                      {!placedIsBroker && (
+                                        <span style={{ fontSize: '0.58rem', fontWeight: 700, color: '#d97706', background: 'rgba(245,158,11,0.1)', borderRadius: '4px', padding: '0.05rem 0.28rem' }}>derived</span>
+                                      )}
+                                      {placedDrift >= 0.01 && (
+                                        <span style={{ fontSize: '0.58rem', fontWeight: 700, color: '#d97706', background: 'rgba(245,158,11,0.1)', borderRadius: '4px', padding: '0.05rem 0.28rem' }}>
+                                          calc mismatch ${fmt(placedDrift)}
+                                        </span>
+                                      )}
                                       {bSlPending && targetPrice != null && (
                                         <>
                                           <span style={{ fontSize: '0.59rem', color: '#aaa' }}>→</span>

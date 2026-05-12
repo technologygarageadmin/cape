@@ -1722,17 +1722,36 @@ export default function OverallSummary() {
                         )}
 
                         {/* SL ratchet detail row */}
-                        {slId && slLastPct != null && (() => {
+                        {slId && (slLastPct != null || slPrice != null) && (() => {
                           const fillPx      = Number(p.avg_entry_price) || 0
-                          const placedPx    = fillPx > 0 ? fillPx * (1 + slLastPct / 100) : null
+                          const brokerPlacedPx = slPrice != null ? Number(slPrice) : null
+                          const calcPlacedPx   = slLastPct != null && fillPx > 0 ? fillPx * (1 + slLastPct / 100) : null
+                          const placedPx       = brokerPlacedPx ?? calcPlacedPx
+                          const placedIsBroker = brokerPlacedPx != null
+                          const placedDrift    = brokerPlacedPx != null && calcPlacedPx != null
+                            ? Math.abs(brokerPlacedPx - calcPlacedPx)
+                            : 0
                           const targetPx    = slPending && slDynPct != null && fillPx > 0 ? fillPx * (1 + slDynPct / 100) : null
                           const initSlPx    = slStatPct != null && fillPx > 0 ? fillPx * (1 + slStatPct / 100) : null
                           return (
                             <div style={{ marginTop: '0.35rem', paddingTop: '0.32rem', borderTop: '1px dashed rgba(0,0,0,0.07)', display: 'grid', gap: '0.18rem' }}>
                               {placedPx != null && (
                                 <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
-                                  <span style={{ fontSize: '0.6rem', color: '#aaa', fontWeight: 600 }}>Placed at</span>
+                                  <span style={{ fontSize: '0.6rem', color: '#aaa', fontWeight: 600 }}>
+                                    {placedIsBroker ? 'Broker placed at' : 'Placed at (calc)'}
+                                  </span>
                                   <span style={{ fontFamily: 'monospace', fontSize: '0.65rem', fontWeight: 800, color: slUpdated ? '#d97706' : '#888' }}>${fmt2(placedPx)}</span>
+                                  {placedIsBroker && (
+                                    <span style={{ fontSize: '0.59rem', fontWeight: 700, color: '#6366f1', background: 'rgba(99,102,241,0.1)', borderRadius: '4px', padding: '0.06rem 0.3rem' }}>live broker</span>
+                                  )}
+                                  {!placedIsBroker && (
+                                    <span style={{ fontSize: '0.59rem', fontWeight: 700, color: '#d97706', background: 'rgba(245,158,11,0.1)', borderRadius: '4px', padding: '0.06rem 0.3rem' }}>derived</span>
+                                  )}
+                                  {placedDrift >= 0.01 && (
+                                    <span style={{ fontSize: '0.59rem', fontWeight: 700, color: '#d97706', background: 'rgba(245,158,11,0.1)', borderRadius: '4px', padding: '0.06rem 0.3rem' }}>
+                                      calc mismatch ${fmt2(placedDrift)}
+                                    </span>
+                                  )}
                                   {slPending && targetPx != null && (
                                     <>
                                       <span style={{ fontSize: '0.6rem', color: '#aaa' }}>→</span>

@@ -2208,20 +2208,18 @@ def _update_dynamic_thresholds(
     if fill_price > 0 and current_price is not None:
         live_price = float(current_price)
         if live_price > fill_price:
-            # PROFIT MODE — anchor ratchet to peak bid, not current bid.
-            # A momentary bid spike must form a genuine new high before the SL advances;
-            # the stop never chases a single-tick outlier.
-            # QP  = peak_bid - CAPE_QP_OFFSET
-            # TSL = peak_bid - CAPE_TRAILING_SL_OFFSET
-            # SL  = max(existing_SL, QP, TSL)  — only ever increases
+            # PROFIT MODE — ratchet from current sellable price with one-way lock.
+            # QP  = current_price - CAPE_QP_OFFSET
+            # TSL = current_price - CAPE_TRAILING_SL_OFFSET
+            # SL  = max(existing_SL, QP, TSL)  — only ever increases (never down)
             mode = "PROFIT"
             peak_bid = float(exit_state.get("peak_bid", fill_price) or fill_price)
             if live_price > peak_bid:
                 peak_bid = live_price
                 exit_state["peak_bid"] = peak_bid
 
-            qp_price = round(peak_bid - CAPE_QP_OFFSET, 2)
-            trailing_sl_price = round(peak_bid - CAPE_TRAILING_SL_OFFSET, 2)
+            qp_price = round(live_price - CAPE_QP_OFFSET, 2)
+            trailing_sl_price = round(live_price - CAPE_TRAILING_SL_OFFSET, 2)
             sl_candidate_price = max(existing_sl_price, qp_price, trailing_sl_price)
 
             qp_candidate_pct = _price_to_pct(qp_price)
