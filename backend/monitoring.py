@@ -2287,10 +2287,8 @@ def _update_dynamic_thresholds(
     )
     profit_sl_replace = (
         mode == "PROFIT"
-        and qp_price is not None
-        and sl_last_placed_price is not None
-        and qp_price > sl_last_placed_price
-        and (qp_price - sl_last_placed_price) >= _SL_MIN_PRICE_STEP
+        and sl_last_placed is not None
+        and current_sl_pct > float(sl_last_placed)
         and current_sl_pct > SL_STOP_LIMIT_BUFFER_PCT
     )
     sl_order_result = None
