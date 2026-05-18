@@ -73,6 +73,22 @@ _BROKER_POSITION_WAIT_POLL_SEC = 0.25
 # sell rather than sit unprotected indefinitely.
 POSITION_NOT_READY_DEADLINE_SEC = 30.0
 
+# Circuit breaker: freeze sl_dynamic_pct ratchet after this many consecutive
+# SL replacement failures (42210000 / position-not-ready) within the window below.
+SL_RATCHET_FREEZE_FAIL_COUNT = 3
+SL_RATCHET_FREEZE_WINDOW_SEC  = 2.0
+
+# Desync guard: if sl_dynamic_pct has drifted more than this many percentage
+# points ahead of the broker-confirmed sl_last_placed_pct, fire the QP guard
+# immediately (0-second grace) instead of waiting the normal 2s.
+SL_DESYNC_IMMEDIATE_EXIT_PCT = 0.4
+
+# Triggered-but-not-filled hard cap: if an SL order first touched its stop
+# price more than this many seconds ago and still has not filled, force a
+# market exit regardless of whether current price has bounced back above the
+# stop (bypasses the confirmed_sl early-out guard in the fallback detector).
+SL_TRIGGERED_HARD_CAP_SEC = 4.0
+
 # Prevent repeated Alpaca websocket auth tracebacks from flooding console/logs.
 logging.getLogger("alpaca.data.live.websocket").setLevel(logging.CRITICAL)
 
@@ -882,6 +898,16 @@ def _place_sl_stop_order(tc, exit_state: dict, contract_symbol: str | None, qty:
                 f"{_now - _first_seen:.1f}s — escalating to market-exit fallback. "
                 f"Broker has not made the position visible; monitor loop will attempt market sell.",
             )
+        _cb_now = time.time()
+        _cb_win = float(exit_state.get("sl_fail_window_start_ts", 0.0) or 0.0)
+        if _cb_win <= 0.0 or (_cb_now - _cb_win) > SL_RATCHET_FREEZE_WINDOW_SEC:
+            exit_state["sl_fail_window_start_ts"] = _cb_now
+            exit_state["sl_consecutive_fail_count"] = 1
+        else:
+            exit_state["sl_consecutive_fail_count"] = int(exit_state.get("sl_consecutive_fail_count", 0)) + 1
+        if exit_state.get("sl_consecutive_fail_count", 0) >= SL_RATCHET_FREEZE_FAIL_COUNT and not exit_state.get("sl_ratchet_frozen"):
+            exit_state["sl_ratchet_frozen"] = True
+            log_and_print("warning", f"[SL CIRCUIT BREAKER] {contract_symbol}: {exit_state['sl_consecutive_fail_count']} consecutive position-not-ready in {SL_RATCHET_FREEZE_WINDOW_SEC}s — ratchet FROZEN at broker-confirmed level ({exit_state.get('sl_last_placed_pct')}%)")
         return {"operation": "retry", "error": "position_not_ready"}
 
     # Past the position-not-ready gate — broker sees the position. Clear deadline tracking.
@@ -980,6 +1006,10 @@ def _place_sl_stop_order(tc, exit_state: dict, contract_symbol: str | None, qty:
             exit_state["confirmed_sl_price"] = stop_price
             exit_state["sl_replace_error"] = None
             exit_state["sl_replace_failed_ts"] = 0.0
+            # Reset circuit breaker on successful placement.
+            exit_state["sl_ratchet_frozen"] = False
+            exit_state["sl_consecutive_fail_count"] = 0
+            exit_state["sl_fail_window_start_ts"] = 0.0
             new_submitted_at = _to_iso(
                 getattr(replaced, "submitted_at", None)
                 or getattr(replaced, "created_at", None)
@@ -1098,6 +1128,10 @@ def _place_sl_stop_order(tc, exit_state: dict, contract_symbol: str | None, qty:
         exit_state["confirmed_sl_price"] = stop_price
         exit_state["sl_replace_error"] = None
         exit_state["sl_replace_failed_ts"] = 0.0
+        # Reset circuit breaker on successful placement.
+        exit_state["sl_ratchet_frozen"] = False
+        exit_state["sl_consecutive_fail_count"] = 0
+        exit_state["sl_fail_window_start_ts"] = 0.0
         submitted_at = _to_iso(
             getattr(order, "submitted_at", None)
             or getattr(order, "created_at", None)
@@ -1176,6 +1210,16 @@ def _place_sl_stop_order(tc, exit_state: dict, contract_symbol: str | None, qty:
                     f"[CRITICAL] 42210000 intent mismatch persists for {contract_symbol} after "
                     f"{_now42 - _first42:.1f}s — escalating to market-exit fallback.",
                 )
+            # Circuit breaker: track consecutive 42210000 failures within the window.
+            _cb42_win = float(exit_state.get("sl_fail_window_start_ts", 0.0) or 0.0)
+            if _cb42_win <= 0.0 or (_now42 - _cb42_win) > SL_RATCHET_FREEZE_WINDOW_SEC:
+                exit_state["sl_fail_window_start_ts"] = _now42
+                exit_state["sl_consecutive_fail_count"] = 1
+            else:
+                exit_state["sl_consecutive_fail_count"] = int(exit_state.get("sl_consecutive_fail_count", 0)) + 1
+            if exit_state.get("sl_consecutive_fail_count", 0) >= SL_RATCHET_FREEZE_FAIL_COUNT and not exit_state.get("sl_ratchet_frozen"):
+                exit_state["sl_ratchet_frozen"] = True
+                log_and_print("warning", f"[SL CIRCUIT BREAKER] {contract_symbol}: {exit_state['sl_consecutive_fail_count']} consecutive 42210000 in {SL_RATCHET_FREEZE_WINDOW_SEC}s — ratchet FROZEN at broker-confirmed level ({exit_state.get('sl_last_placed_pct')}%)")
             return {"operation": "retry", "error": err_str, "code": "42210000"}
 
         log_and_print("error", f"[SL ERROR] Failed to upsert for {contract_symbol}: {ex}")
@@ -1655,6 +1699,31 @@ def _detect_market_fallback_reason(tc, exit_state: dict, sellable_price: float) 
         # doesn't cause an instant fire on the next entry into the at-TP zone.
         exit_state.pop("tp_not_filling_seen_ts", None)
 
+    # Fix 4 — Triggered-but-not-filled hard cap.
+    # If any SL order first touched its stop price more than SL_TRIGGERED_HARD_CAP_SEC ago
+    # and still has not filled, force ORDER_SYSTEM_FAILURE regardless of whether price has
+    # since bounced back above the stop (bypasses the confirmed_sl early-out below).
+    _now_hc = time.time()
+    _sl_ids_hc = list(exit_state.get("sl_order_ids") or [])
+    for _oid_hc in _sl_ids_hc:
+        _tk_hc = f"sl_trigger_seen_ts:{_oid_hc}"
+        _first_hc = float(exit_state.get(_tk_hc, 0.0) or 0.0)
+        if _first_hc > 0 and (_now_hc - _first_hc) >= SL_TRIGGERED_HARD_CAP_SEC:
+            try:
+                _ord_hc = tc.get_order_by_id(_oid_hc)
+                _st_hc = str(getattr(_ord_hc, "status", "") or "").lower()
+                if "filled" not in _st_hc:
+                    _det_hc = (
+                        f"sl_triggered_hardcap:oid={_oid_hc}:"
+                        f"sellable={sellable_price:.4f}:"
+                        f"waited={_now_hc - _first_hc:.2f}s:"
+                        f"status={_st_hc}"
+                    )
+                    log_and_print("info", f"\n[FALLBACK TRIGGER]\n  reason=ORDER_SYSTEM_FAILURE_MARKET_EXIT\n  detail={_det_hc}\n  sell_price={sellable_price}\n")
+                    return "ORDER_SYSTEM_FAILURE_MARKET_EXIT", _det_hc
+            except Exception:
+                pass
+
     # If a confirmed SL price exists and market price has not yet breached it,
     # suppress all failure exits. The broker SL is either still active or will be
     # replaced on the next tick — there is no reason to force an exit while the
@@ -1799,18 +1868,22 @@ def _detect_market_fallback_reason(tc, exit_state: dict, sellable_price: float) 
             and _fill > 0
         ):
             _qp_trigger = _fill * (1.0 + _sl_dyn / 100.0)
+            # Fix 3: large desync between internal and broker SL → 0-second grace.
+            _drift = _sl_dyn - float(_sl_placed)
+            _eff_grace = 0.0 if (exit_state.get("sl_ratchet_frozen") and _drift > SL_DESYNC_IMMEDIATE_EXIT_PCT) else trigger_grace_sec
             if sellable_price <= _qp_trigger:
                 _qp_guard_key = "qp_guard_trigger_seen_ts"
                 _first_seen = float(exit_state.get(_qp_guard_key, 0.0) or 0.0)
                 _now = time.time()
-                if _first_seen <= 0.0:
+                if _first_seen <= 0.0 and _eff_grace > 0.0:
                     exit_state[_qp_guard_key] = _now
-                elif (_now - _first_seen) >= trigger_grace_sec:
+                elif _first_seen <= 0.0 or (_now - _first_seen) >= _eff_grace:
                     detail = (
                         f"qp_sl_not_replaced:sellable={sellable_price:.4f}:"
                         f"qp_trigger={_qp_trigger:.4f}:"
                         f"sl_dynamic={_sl_dyn:+.4f}%:"
                         f"sl_last_placed={float(_sl_placed):+.4f}%:"
+                        f"drift={_drift:+.4f}%:"
                         f"waited={_now - _first_seen:.2f}s"
                     )
                     log_and_print("info", f"\n[FALLBACK TRIGGER]\n  reason=QP_SL_REPLACE_FAILED_MARKET_EXIT\n  detail={detail}\n  sell_price={sellable_price}\n")
@@ -2264,7 +2337,14 @@ def _update_dynamic_thresholds(
             # broker SL to fill_price, whose limit = fill × 0.97 — a guaranteed loss fill.
             if 0.0 <= sl_candidate_pct <= SL_STOP_LIMIT_BUFFER_PCT:
                 sl_candidate_pct = existing_sl_pct
-            exit_state["sl_dynamic_pct"] = max(existing_sl_pct, sl_candidate_pct)
+            # Fix 1: when the circuit breaker has frozen the ratchet, cap sl_dynamic_pct
+            # at the last broker-confirmed level so internal state never runs ahead of
+            # broker reality during a replacement-failure streak.
+            if exit_state.get("sl_ratchet_frozen") and exit_state.get("sl_last_placed_pct") is not None:
+                _cap = float(exit_state["sl_last_placed_pct"])
+                exit_state["sl_dynamic_pct"] = max(existing_sl_pct, min(sl_candidate_pct, _cap))
+            else:
+                exit_state["sl_dynamic_pct"] = max(existing_sl_pct, sl_candidate_pct)
 
     current_sl_pct = float(exit_state.get("sl_dynamic_pct", sl_static_pct))
     profit_sl_moved = mode == "PROFIT" and current_sl_pct > prev_sl_pct

@@ -1442,6 +1442,10 @@ def _ait_run_straddle(
                     "exit_sl_pct":  round(float(exit_state.get("sl_dynamic_pct", 0.0)), 4),
                     "exit_qp_pct":  round(float(exit_state.get("qp_dynamic_pct", 0.0)), 4),
                     "exit_tp_pct":  round(float(exit_state.get("tp_pct", 0.0)), 4),
+                    "peak_price":    round(float(exit_state.get("peak_bid") or fill_price), 4),
+                    "exit_sl_price": round(fill_price * (1 + float(exit_state.get("sl_dynamic_pct", 0.0)) / 100), 4) if fill_price > 0 else None,
+                    "exit_qp_price": round(fill_price * (1 + float(exit_state.get("qp_dynamic_pct", 0.0)) / 100), 4) if fill_price > 0 and float(exit_state.get("qp_dynamic_pct", 0.0)) > 0 else None,
+                    "exit_tp_price": round(float(exit_state.get("tp_price", 0.0)), 4) if exit_state.get("tp_price") else None,
                     "qp_armed":       bool(exit_state.get("qp_armed", False)),
                     "qp_arm_time":    exit_state.get("qp_arm_time"),
                     "qp_arm_price":   exit_state.get("qp_arm_price"),
@@ -1812,6 +1816,10 @@ def _ait_trade_loop(
                     "exit_sl_pct":  round(float(exit_state.get("sl_dynamic_pct", 0.0)), 4),
                     "exit_qp_pct":  round(float(exit_state.get("qp_dynamic_pct", 0.0)), 4),
                     "exit_tp_pct":  round(float(exit_state.get("tp_pct", 0.0)), 4),
+                    "peak_price":    round(float(exit_state.get("peak_bid") or fill_price), 4),
+                    "exit_sl_price": round(fill_price * (1 + float(exit_state.get("sl_dynamic_pct", 0.0)) / 100), 4) if fill_price > 0 else None,
+                    "exit_qp_price": round(fill_price * (1 + float(exit_state.get("qp_dynamic_pct", 0.0)) / 100), 4) if fill_price > 0 and float(exit_state.get("qp_dynamic_pct", 0.0)) > 0 else None,
+                    "exit_tp_price": round(float(exit_state.get("tp_price", 0.0)), 4) if exit_state.get("tp_price") else None,
                     # QP arm metadata
                     "qp_armed":       bool(exit_state.get("qp_armed", False)),
                     "qp_arm_time":    exit_state.get("qp_arm_time"),
@@ -2195,6 +2203,10 @@ def _recovery_monitor_thread(
             "exit_sl_pct": round(float(exit_state.get("sl_dynamic_pct", 0.0)), 4),
             "exit_qp_pct": round(float(exit_state.get("qp_dynamic_pct", 0.0)), 4),
             "exit_tp_pct": round(float(exit_state.get("tp_pct", 0.0)), 4),
+            "peak_price":    round(float(exit_state.get("peak_bid") or entry_price), 4),
+            "exit_sl_price": round(float(entry_price) * (1 + float(exit_state.get("sl_dynamic_pct", 0.0)) / 100), 4) if float(entry_price) > 0 else None,
+            "exit_qp_price": round(float(entry_price) * (1 + float(exit_state.get("qp_dynamic_pct", 0.0)) / 100), 4) if float(entry_price) > 0 and float(exit_state.get("qp_dynamic_pct", 0.0)) > 0 else None,
+            "exit_tp_price": round(float(exit_state.get("tp_price", 0.0)), 4) if exit_state.get("tp_price") else None,
             "qp_armed":       bool(exit_state.get("qp_armed", False)),
             "qp_arm_time":    exit_state.get("qp_arm_time"),
             "qp_arm_price":   exit_state.get("qp_arm_price"),
@@ -2955,6 +2967,10 @@ def close_position_endpoint(symbol: str) -> dict[str, Any]:
                 "exit_sl_pct":  round(max(_sl_base, (_m_pnl_pct or 0.0) + _sl_base), 4),
                 "exit_qp_pct":  round(max(0.0, (_m_pnl_pct or 0.0) - QP_GAP_PCT) if (_m_pnl_pct or 0.0) > 0.0 else 0.0, 4),
                 "exit_tp_pct":  round(TAKE_PROFIT_PCT * 100, 4),
+                "peak_price":    round(float(sell_price), 4),
+                "exit_sl_price": round(float(buy_price) * (1 + max(_sl_base, (_m_pnl_pct or 0.0) + _sl_base) / 100), 4) if float(buy_price) > 0 else None,
+                "exit_qp_price": round(float(buy_price) * (1 + max(0.0, (_m_pnl_pct or 0.0) - QP_GAP_PCT) / 100), 4) if float(buy_price) > 0 and (_m_pnl_pct or 0.0) > 0.0 else None,
+                "exit_tp_price": round(float(buy_price) * (1 + TAKE_PROFIT_PCT), 4) if float(buy_price) > 0 else None,
             }
             _m_dur = None
             try:
@@ -3732,6 +3748,11 @@ def _manual_trade_monitor_thread(
     exit_sl_pct  = round(float(exit_state.get("sl_dynamic_pct", 0.0)), 4)
     exit_qp_pct  = round(float(exit_state.get("qp_dynamic_pct", 0.0)), 4)
     exit_tp_pct  = round(float(exit_state.get("tp_pct", 0.0)), 4)
+    _fp = float(entry_price) if entry_price else 0.0
+    peak_price    = round(float(exit_state.get("peak_bid") or _fp), 4)
+    exit_sl_price = round(_fp * (1 + exit_sl_pct / 100), 4) if _fp > 0 else None
+    exit_qp_price = round(_fp * (1 + exit_qp_pct / 100), 4) if _fp > 0 and exit_qp_pct > 0 else None
+    exit_tp_price = round(float(exit_state.get("tp_price", 0.0)), 4) if exit_state.get("tp_price") else None
 
     print(
         f"[MT:{underlying}] SOLD {contract_symbol}: {sell_price:.4f} "
@@ -3776,6 +3797,10 @@ def _manual_trade_monitor_thread(
                 "exit_sl_pct": exit_sl_pct,
                 "exit_tp_pct": exit_tp_pct,
                 "exit_qp_pct": exit_qp_pct,
+                "peak_price":    peak_price,
+                "exit_sl_price": exit_sl_price,
+                "exit_qp_price": exit_qp_price,
+                "exit_tp_price": exit_tp_price,
                 # QP arm metadata
                 "qp_armed":       bool(exit_state.get("qp_armed", False)),
                 "qp_arm_time":    exit_state.get("qp_arm_time"),
@@ -3952,6 +3977,10 @@ def get_manual_trades(
                 "exitSlPct": r.get("exit_sl_pct"),
                 "exitQpPct": r.get("exit_qp_pct"),
                 "exitTpPct": r.get("exit_tp_pct"),
+                "peakPrice":    r.get("peak_price"),
+                "exitSlPrice":  r.get("exit_sl_price"),
+                "exitQpPrice":  r.get("exit_qp_price"),
+                "exitTpPrice":  r.get("exit_tp_price"),
                 "createdAt": _to_iso(r.get("created_at")) or r.get("created_at"),
                 "buyFilledTime":  r.get("buy_filled_time") or r.get("entry_time"),
                 "buyFilledPrice": r.get("buy_price", 0),
@@ -4036,6 +4065,10 @@ def get_options_log(
                 "exitSlPct": r.get("exit_sl_pct"),
                 "exitQpPct": r.get("exit_qp_pct"),
                 "exitTpPct": r.get("exit_tp_pct"),
+                "peakPrice":    r.get("peak_price"),
+                "exitSlPrice":  r.get("exit_sl_price"),
+                "exitQpPrice":  r.get("exit_qp_price"),
+                "exitTpPrice":  r.get("exit_tp_price"),
                 "tradeType": r.get("trade_type"),
                 "createdAt": _to_iso(r.get("created_at")) or r.get("created_at"),
                 "buyOrderId": r.get("buy_order_id"),

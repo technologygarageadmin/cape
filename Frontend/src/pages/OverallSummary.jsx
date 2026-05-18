@@ -322,6 +322,7 @@ function fmtTickTime(ts) {
 
 function TradeTimeline({ timeline, fillPrice, qpArmed, qpArmTime, qpArmPrice, qpArmPnlPct, buyFilledTime, sellFilledTime }) {
   const [open, setOpen] = useState(false)
+  const [hoveredIdx, setHoveredIdx] = useState(-1)
   if (!timeline || timeline.length === 0) return null
 
   const ticks = timeline
@@ -424,7 +425,73 @@ function TradeTimeline({ timeline, fillPrice, qpArmed, qpArmTime, qpArmPrice, qp
                   </g>
                 )
               })()}
+              {/* Hovered crosshair */}
+              {hoveredIdx >= 0 && (() => {
+                const t = priceTicks[hoveredIdx]
+                if (!t) return null
+                const x = (hoveredIdx / Math.max(priceTicks.length - 1, 1)) * W
+                const y = H - ((t.sellable_price - minP) / range) * (H - 4) - 2
+                return (
+                  <g style={{ pointerEvents: 'none' }}>
+                    <line x1={x} x2={x} y1={0} y2={H} stroke="rgba(100,116,139,0.4)" strokeWidth="1" strokeDasharray="2,2" />
+                    <circle cx={x} cy={y} r={3.5} fill="#64748b" stroke="#fff" strokeWidth="1.5" />
+                  </g>
+                )
+              })()}
+              {/* Transparent mouse-tracking overlay — must be last (on top) */}
+              <rect
+                x={0} y={0} width={W} height={H}
+                fill="transparent"
+                style={{ cursor: 'crosshair' }}
+                onMouseMove={(e) => {
+                  const svgRect = e.currentTarget.closest('svg').getBoundingClientRect()
+                  const mouseX = e.clientX - svgRect.left
+                  const idx = Math.round((mouseX / W) * (priceTicks.length - 1))
+                  setHoveredIdx(Math.max(0, Math.min(priceTicks.length - 1, idx)))
+                }}
+                onMouseLeave={() => setHoveredIdx(-1)}
+              />
             </svg>
+            {/* Hover tooltip */}
+            {hoveredIdx >= 0 && (() => {
+              const t = priceTicks[hoveredIdx]
+              if (!t) return null
+              const x = (hoveredIdx / Math.max(priceTicks.length - 1, 1)) * W
+              const isPeak = hoveredIdx === peakIdx
+              const isQpArm = hoveredIdx === qpArmIdx
+              const toLeft = x > W * 0.55
+              const pnlColor = (t.pnl_pct ?? 0) > 0 ? '#4ade80' : (t.pnl_pct ?? 0) < 0 ? '#f87171' : '#aaa'
+              return (
+                <div style={{
+                  position: 'absolute',
+                  top: '20px',
+                  left: toLeft ? `${x - 8}px` : `${x + 8}px`,
+                  transform: toLeft ? 'translateX(-100%)' : 'none',
+                  background: 'rgba(15,15,25,0.95)',
+                  border: '1px solid rgba(255,255,255,0.12)',
+                  borderRadius: '6px', padding: '6px 9px',
+                  fontSize: '10px', fontFamily: 'monospace',
+                  color: '#ddd', pointerEvents: 'none',
+                  zIndex: 20, whiteSpace: 'nowrap',
+                  boxShadow: '0 4px 12px rgba(0,0,0,0.4)',
+                  lineHeight: '1.6',
+                }}>
+                  {isPeak && <div style={{ color: '#818cf8', fontWeight: 800, fontSize: '9px', letterSpacing: '0.4px', marginBottom: '2px' }}>▲ PEAK</div>}
+                  {isQpArm && <div style={{ color: '#d97706', fontWeight: 800, fontSize: '9px', letterSpacing: '0.4px', marginBottom: '2px' }}>◉ QP ARM</div>}
+                  <div style={{ color: '#94a3b8', fontSize: '9px' }}>{fmtTickTime(t.ts)}</div>
+                  <div>sell <span style={{ color: '#f1f5f9', fontWeight: 700 }}>${fmt2(t.sellable_price)}</span></div>
+                  {t.bid_price != null && <div>bid <span style={{ color: '#cbd5e1' }}>${fmt2(t.bid_price)}</span></div>}
+                  {t.mid_price != null && <div>mid <span style={{ color: '#94a3b8' }}>${fmt2(t.mid_price)}</span></div>}
+                  <div>pnl <span style={{ color: pnlColor, fontWeight: 700 }}>{fmtPctSigned(t.pnl_pct ?? 0)}</span></div>
+                  {(t.max_pnl_pct ?? 0) !== 0 && <div>peak <span style={{ color: '#818cf8' }}>{fmtPctSigned(t.max_pnl_pct)}</span></div>}
+                  <div>trail_sl <span style={{ color: '#f87171' }}>{fmtPctSigned(t.sl_dynamic_pct ?? 0)}</span></div>
+                  {(t.qp_dynamic_pct ?? 0) > 0 && <div>qp_dyn <span style={{ color: '#d97706' }}>{fmtPctSigned(t.qp_dynamic_pct)}</span></div>}
+                  {t.sl_action && t.sl_action !== 'NO_CHANGE' && (
+                    <div style={{ color: '#fbbf24', fontSize: '9px', marginTop: '2px', fontWeight: 700 }}>SL {t.sl_action}</div>
+                  )}
+                </div>
+              )
+            })()}
             {/* Price range labels */}
             <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '9px', color: '#bbb', marginTop: '2px' }}>
               <span>${fmt2(minP)}</span>
