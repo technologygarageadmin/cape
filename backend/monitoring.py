@@ -868,6 +868,12 @@ def _place_sl_stop_order(tc, exit_state: dict, contract_symbol: str | None, qty:
         # API round-trip between the price read and the order reaching the broker.
         stop_price = round(current_price - 0.05, 2)
         log_and_print("debug", f"[SL CLAMP] stop_price clamped {clamped_from} → {stop_price} (current={current_price})")
+        # Never replace with a stop lower than what's already confirmed at the broker —
+        # that would make protection worse, not better.
+        _confirmed_sl = float(exit_state.get("confirmed_sl_price") or 0.0)
+        if _confirmed_sl > 0.0 and stop_price < _confirmed_sl:
+            log_and_print("debug", f"[SL CLAMP SKIP] {contract_symbol}: clamped stop {stop_price} < confirmed_sl {_confirmed_sl} — keeping existing stop")
+            return {"operation": "no_change", "reason": "clamped_below_confirmed"}
     label = "TRAIL SL" if is_trailing else "SL"
     timeline = exit_state.setdefault("timeline", [])
     existing_ids = list(exit_state.get("sl_order_ids") or [])
