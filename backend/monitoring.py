@@ -1134,10 +1134,11 @@ def _place_sl_stop_order(tc, exit_state: dict, contract_symbol: str | None, qty:
         exit_state["confirmed_sl_price"] = stop_price
         exit_state["sl_replace_error"] = None
         exit_state["sl_replace_failed_ts"] = 0.0
-        # Reset circuit breaker on successful placement.
+        # Reset circuit breaker and cancel+fresh counter on successful placement.
         exit_state["sl_ratchet_frozen"] = False
         exit_state["sl_consecutive_fail_count"] = 0
         exit_state["sl_fail_window_start_ts"] = 0.0
+        exit_state["sl_42_cancel_attempts"] = 0
         submitted_at = _to_iso(
             getattr(order, "submitted_at", None)
             or getattr(order, "created_at", None)
@@ -1226,6 +1227,31 @@ def _place_sl_stop_order(tc, exit_state: dict, contract_symbol: str | None, qty:
             if exit_state.get("sl_consecutive_fail_count", 0) >= SL_RATCHET_FREEZE_FAIL_COUNT and not exit_state.get("sl_ratchet_frozen"):
                 exit_state["sl_ratchet_frozen"] = True
                 log_and_print("warning", f"[SL CIRCUIT BREAKER] {contract_symbol}: {exit_state['sl_consecutive_fail_count']} consecutive 42210000 in {SL_RATCHET_FREEZE_WINDOW_SEC}s — ratchet FROZEN at broker-confirmed level ({exit_state.get('sl_last_placed_pct')}%)")
+
+            # Profit-zone cancel+fresh: replace_order_by_id consistently fails with 42210000
+            # when stop_price > fill_price. Cancel the existing order so next tick places a
+            # fresh StopOrderRequest instead of retrying the same replace. Bounded at 2
+            # attempts before falling back to plain retry to avoid an infinite cancel loop.
+            if existing_id and sl_dynamic_pct > 0:
+                _cf_count = int(exit_state.get("sl_42_cancel_attempts", 0))
+                if _cf_count < 2:
+                    exit_state["sl_42_cancel_attempts"] = _cf_count + 1
+                    try:
+                        tc.cancel_order_by_id(existing_id)
+                        exit_state["sl_order_ids"] = []
+                        log_and_print("info",
+                            f"[SL STOP] 42210000 profit-zone cancel: {existing_id} cancelled — "
+                            f"fresh stop at {stop_price} queued for next tick "
+                            f"(attempt {_cf_count + 1}/2)")
+                    except Exception as _ce:
+                        log_and_print("warning",
+                            f"[SL STOP] 42210000 profit-zone cancel failed for {existing_id}: {_ce}")
+                else:
+                    exit_state["sl_42_cancel_attempts"] = 0
+                    log_and_print("warning",
+                        f"[SL STOP] 42210000 cancel+fresh exhausted for {contract_symbol} "
+                        f"— reverting to plain retry")
+
             return {"operation": "retry", "error": err_str, "code": "42210000"}
 
         log_and_print("error", f"[SL ERROR] Failed to upsert for {contract_symbol}: {ex}")

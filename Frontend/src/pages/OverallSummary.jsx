@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react'
+import React, { useState, useEffect, useLayoutEffect, useCallback, useRef, useMemo } from 'react'
 import {
   TrendingUp, TrendingDown, DollarSign, BarChart3,
   RefreshCw, Filter, Activity, Layers, ChevronDown,
@@ -933,6 +933,9 @@ export default function OverallSummary() {
   const [customTo,     setCustomTo]     = useState('')
   const [hourFilter,   setHourFilter]   = useState('ALL')
   const lastDingAtRef = useRef(0)
+  const userScrolledRef = useRef(false)
+  const tradeCardsRef = useRef(null)
+  const tradeCardsScrollRef = useRef(0)
 
   // ── Fetch history (trades + positions + config) — refreshes every 5s ───────
   const fetchHistory = useCallback(async (silent = false) => {
@@ -943,6 +946,10 @@ export default function OverallSummary() {
         fetch(`${API_DISPLAY}/api/positions`),
         fetch(`${API_DISPLAY}/api/config`),
       ])
+
+      // Skip list updates during background polls while user is scrolled — prevents
+      // layout shifts that jump the user's reading position.
+      const skipListUpdates = silent && userScrolledRef.current
 
       if (aitRes.status === 'fulfilled' && aitRes.value.ok) {
         const d = await aitRes.value.json()
@@ -970,8 +977,12 @@ export default function OverallSummary() {
             entryStrategyNames: resolveEntryStrategyNames(t),
           }
         })
-        setAitTrades(all)
-      } else {
+        if (!skipListUpdates) {
+          setAitTrades(prev =>
+            prev.length === all.length && JSON.stringify(prev) === JSON.stringify(all) ? prev : all
+          )
+        }
+      } else if (!silent) {
         setAitTrades([])
       }
 
@@ -989,10 +1000,15 @@ export default function OverallSummary() {
             entryReason_raw: 'MANUAL',
           }
         })
-        setManualTrades(manual)
-      } else {
+        if (!skipListUpdates) {
+          setManualTrades(prev =>
+            prev.length === manual.length && JSON.stringify(prev) === JSON.stringify(manual) ? prev : manual
+          )
+        }
+      } else if (!silent) {
         setManualTrades([])
       }
+
       if (posRes.status === 'fulfilled' && posRes.value.ok) {
         const d = await posRes.value.json()
         const rows = Array.isArray(d)
@@ -1000,7 +1016,11 @@ export default function OverallSummary() {
           : Array.isArray(d?.positions)
             ? d.positions
             : []
-        setPositions(rows)
+        if (!skipListUpdates) {
+          setPositions(prev =>
+            prev.length === rows.length && JSON.stringify(prev) === JSON.stringify(rows) ? prev : rows
+          )
+        }
       }
       if (cfgRes.status === 'fulfilled' && cfgRes.value.ok) {
         setCfg(await cfgRes.value.json())
@@ -1015,7 +1035,10 @@ export default function OverallSummary() {
       const res = await fetch(`${API_DISPLAY}/api/live-positions`)
       if (res.ok) {
         const d = await res.json()
-        setLivePositions(d.positions || [])
+        const next = d.positions || []
+        setLivePositions(prev =>
+          prev.length === next.length && JSON.stringify(prev) === JSON.stringify(next) ? prev : next
+        )
       }
     } catch (_) {}
   }, [])
@@ -1030,6 +1053,20 @@ export default function OverallSummary() {
     const liveId = setInterval(() => fetchLive(), 5_000)
     return () => { clearInterval(histId); clearInterval(liveId) }
   }, [fetchAll, fetchHistory, fetchLive])
+
+  // Track whether user has scrolled down — used to pause list re-renders during polls
+  useEffect(() => {
+    const onScroll = () => { userScrolledRef.current = window.scrollY > 300 }
+    window.addEventListener('scroll', onScroll, { passive: true })
+    return () => window.removeEventListener('scroll', onScroll)
+  }, [])
+
+  // Restore inner trade-cards scroll position after re-render caused by data updates
+  useLayoutEffect(() => {
+    if (tradeCardsRef.current) {
+      tradeCardsRef.current.scrollTop = tradeCardsScrollRef.current
+    }
+  }, [sorted])
 
   // ── Sell position handler ────────────────────────────────────────────────
   const handleSellPosition = async (symbol) => {
@@ -1940,7 +1977,11 @@ export default function OverallSummary() {
               </div>
 
               {/* ── Trade cards ── */}
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem', padding: '1rem 1.25rem 1.5rem', maxHeight: '720px', overflowY: 'auto' }}>
+              <div
+                ref={tradeCardsRef}
+                onScroll={e => { tradeCardsScrollRef.current = e.currentTarget.scrollTop }}
+                style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem', padding: '1rem 1.25rem 1.5rem', maxHeight: '720px', overflowY: 'auto' }}
+              >
                 {sorted.map((t, i) => {
                   const pnl    = Number(t.pnl) || 0
                   const pnlPos = pnl >= 0
