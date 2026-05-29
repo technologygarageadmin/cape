@@ -4,7 +4,11 @@
       "Bash(python -c \"import ast; ast.parse\\(open\\('c:/Users/MuthamizhS/OneDrive - Technology Garage/Desktop/Cape New UI/backend/api_server.py'\\).read\\(\\)\\); print\\('syntax OK'\\)\")",
       "Read(//c/Users/MuthamizhS/OneDrive - Technology Garage/Desktop/Cape New UI/**)",
       "Bash(xargs wc *)",
-      "Bash(python -m py_compile monitoring.py)"
+      "Bash(python -m py_compile monitoring.py)",
+      "Bash(grep -oE 'P&L +: [+-]\\\\$[0-9.]+' logs/trade.log)",
+      "Bash(awk '{s+=$1} END{printf \"net P&L today: %+.2f over %d trades\\\\n\", s, NR}')",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('monitoring.py'\\).read\\(\\)\\); print\\('syntax OK'\\)\")",
+      "Bash(awk '/^─{20,}$/{n++} {a[NR]=$0} END{ for\\(i=NR;i>=1;i--\\){ if\\(a[i] ~ /^\\\\[20[0-9][0-9]-/\\){ start=i; break } } for\\(i=start-1;i<=NR;i++\\) print a[i] }' logs/trade.log)"
     ]
   }
 }

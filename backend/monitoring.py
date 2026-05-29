@@ -757,14 +757,14 @@ def _place_sl_stop_order(tc, exit_state: dict, contract_symbol: str | None, qty:
         return None
 
     # Throttle: if the last replace attempt failed verification or raised within the last
-    # ~1s, skip this tick to avoid hammering the broker with retries when verification
+    # ~2s, skip this tick to avoid hammering the broker with retries when verification
     # is consistently failing (rate-limit risk + price drift from blocking sleeps in
     # _verify_sl_order). The timestamp is cleared on any verified success below, so a
     # transient failure does not permanently slow the ratchet.
     _last_fail_ts = float(exit_state.get("sl_replace_failed_ts", 0.0) or 0.0)
     if _last_fail_ts > 0:
         _elapsed = time.time() - _last_fail_ts
-        if _elapsed < 1.0:
+        if _elapsed < 2.0:
             return {"operation": "throttled", "elapsed_sec": round(_elapsed, 3)}
     # If a standalone TP limit order is open (but not yet filled) AND there is currently
     # no tracked SL order, skip this SL placement tick — the broker will reject it with
@@ -1007,8 +1007,11 @@ def _place_sl_stop_order(tc, exit_state: dict, contract_symbol: str | None, qty:
                 }
 
             # Verified: update sl_last_placed_pct and confirmed_sl_price.
+            # Use the actual placed pct (derived from stop_price) — not sl_dynamic_pct.
+            # When the clamp fires, stop_price < sl_dynamic_pct * fill_price, so tracking
+            # sl_dynamic_pct would falsely suppress the ratchet and blind the QP guard.
             exit_state["sl_order_ids"] = [new_id]
-            exit_state["sl_last_placed_pct"] = sl_dynamic_pct
+            exit_state["sl_last_placed_pct"] = round((stop_price / fill_price - 1) * 100, 4)
             exit_state["confirmed_sl_price"] = stop_price
             exit_state["sl_replace_error"] = None
             exit_state["sl_replace_failed_ts"] = 0.0
@@ -1129,16 +1132,18 @@ def _place_sl_stop_order(tc, exit_state: dict, contract_symbol: str | None, qty:
             }
 
         # Verified: commit sl_last_placed_pct and confirmed_sl_price.
+        # Use the actual placed pct (derived from stop_price) — not sl_dynamic_pct.
+        # When the clamp fires, stop_price < sl_dynamic_pct * fill_price, so tracking
+        # sl_dynamic_pct would falsely suppress the ratchet and blind the QP guard.
         exit_state["sl_order_ids"] = [new_order_id]
-        exit_state["sl_last_placed_pct"] = sl_dynamic_pct
+        exit_state["sl_last_placed_pct"] = round((stop_price / fill_price - 1) * 100, 4)
         exit_state["confirmed_sl_price"] = stop_price
         exit_state["sl_replace_error"] = None
         exit_state["sl_replace_failed_ts"] = 0.0
-        # Reset circuit breaker and cancel+fresh counter on successful placement.
+        # Reset circuit breaker on successful placement.
         exit_state["sl_ratchet_frozen"] = False
         exit_state["sl_consecutive_fail_count"] = 0
         exit_state["sl_fail_window_start_ts"] = 0.0
-        exit_state["sl_42_cancel_attempts"] = 0
         submitted_at = _to_iso(
             getattr(order, "submitted_at", None)
             or getattr(order, "created_at", None)
@@ -1228,30 +1233,14 @@ def _place_sl_stop_order(tc, exit_state: dict, contract_symbol: str | None, qty:
                 exit_state["sl_ratchet_frozen"] = True
                 log_and_print("warning", f"[SL CIRCUIT BREAKER] {contract_symbol}: {exit_state['sl_consecutive_fail_count']} consecutive 42210000 in {SL_RATCHET_FREEZE_WINDOW_SEC}s — ratchet FROZEN at broker-confirmed level ({exit_state.get('sl_last_placed_pct')}%)")
 
-            # Profit-zone cancel+fresh: replace_order_by_id consistently fails with 42210000
-            # when stop_price > fill_price. Cancel the existing order so next tick places a
-            # fresh StopOrderRequest instead of retrying the same replace. Bounded at 2
-            # attempts before falling back to plain retry to avoid an infinite cancel loop.
-            if existing_id and sl_dynamic_pct > 0:
-                _cf_count = int(exit_state.get("sl_42_cancel_attempts", 0))
-                if _cf_count < 2:
-                    exit_state["sl_42_cancel_attempts"] = _cf_count + 1
-                    try:
-                        tc.cancel_order_by_id(existing_id)
-                        exit_state["sl_order_ids"] = []
-                        log_and_print("info",
-                            f"[SL STOP] 42210000 profit-zone cancel: {existing_id} cancelled — "
-                            f"fresh stop at {stop_price} queued for next tick "
-                            f"(attempt {_cf_count + 1}/2)")
-                    except Exception as _ce:
-                        log_and_print("warning",
-                            f"[SL STOP] 42210000 profit-zone cancel failed for {existing_id}: {_ce}")
-                else:
-                    exit_state["sl_42_cancel_attempts"] = 0
-                    log_and_print("warning",
-                        f"[SL STOP] 42210000 cancel+fresh exhausted for {contract_symbol} "
-                        f"— reverting to plain retry")
-
+            # Keep the existing broker stop intact and retry the replace next tick. Do NOT
+            # cancel it on 42210000: the broker rejects the *replace* (intent mismatch right
+            # after fill) but the order already at the venue is valid protection. Cancelling
+            # leaves the position naked during the cancel→re-place window, and since a freshly
+            # accepted order resets the attempt counter, the bound never trips and it churns
+            # cancel/place indefinitely until the 30s deadline forces an ORDER_SYSTEM_FAILURE
+            # market exit. The circuit breaker (above) freezes the ratchet at the last
+            # broker-confirmed level so the existing stop continues to protect the position.
             return {"operation": "retry", "error": err_str, "code": "42210000"}
 
         log_and_print("error", f"[SL ERROR] Failed to upsert for {contract_symbol}: {ex}")
