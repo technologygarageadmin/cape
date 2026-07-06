@@ -114,7 +114,7 @@ The broker SL order is in `rejected`, `expired`, `canceled`, or `cancelled` stat
 The broker SL is active but `sellable_price <= stop_price` AND `sellable_price < limit_price` (only meaningful for the original bracket stop-limit child; standalone replacements are stop-market and have no `limit_price`). The stop triggered but the market gapped below the limit floor, so the stop-limit cannot fill. Forced market exit immediately.
 
 **Condition 3 — Triggered but unfilled** (`ORDER_SYSTEM_FAILURE_MARKET_EXIT`)
-`sellable_price <= stop_price` (stop triggered) but the order has not filled after a 2-second grace period. The broker acknowledged the trigger but did not fill — treated as an order-system failure.
+`sellable_price <= stop_price` (stop triggered) but the order has not filled after a 2-second grace period. The broker acknowledged the trigger but did not fill — treated as an order-system failure. A 4-second hard cap (`SL_TRIGGERED_HARD_CAP_SEC`) also fires from before the `confirmed_sl_price` early-out. Both timers **reset when the bid recovers above the order's stop** (each order's stop is remembered in `sl_trigger_stop:{oid}` at arming) — a transient one-tick bid touch of the stop must not keep the countdown running, only a sustained breach fires.
 
 **Condition 4 — SL orders unconfirmable at trigger price** (`ORDER_SYSTEM_FAILURE_MARKET_EXIT`)
 `sl_order_ids` is non-empty but every `get_order_by_id` call raised an exception (broker unreachable) AND `sellable_price` is at or below the `sl_dynamic_pct` trigger price. Fires only when price is in the triggered zone so normal above-SL ticks do not false-trigger.
@@ -186,7 +186,7 @@ All trading behavior is driven by `config.py`. Key knobs:
 | `EXIT_TRAILING_STOP_ENABLED` | `True` | Trailing SL enabled |
 | `CAPE_QP_OFFSET` | `0.05` | Legacy; superseded by tier ladder (QP_TIER_*) |
 | `CAPE_TRAILING_SL_OFFSET` | `0.10` | Legacy; superseded by tier ladder |
-| `QP_TIER_1_TRIGGER_PCT` | `3.0` | Arm ratchet at +3% peak (Tier 1 = breakeven lock) |
+| `QP_TIER_1_TRIGGER_PCT` | `3.0` | Arm ratchet at +3% peak (Tier 1 locks +0.5%; must stay above the 0.20 buffer-zone guard or the lock is silently discarded) |
 | `QP_TIER_2_TRIGGER_PCT` | `6.0` | Tier 2 = lock 50% of peak |
 | `QP_TIER_3_TRIGGER_PCT` | `10.0` | Tier 3 = lock 70% of peak |
 | `SL_REPLACE_MIN_STEP_USD` | `0.05` | Min $ stop move before broker replacement call |

@@ -28,6 +28,10 @@ EXIT_MAX_HOLD_PNL_THRESHOLD_PCT = 1.0
 EXIT_LOSS_CUT_ENABLED = True
 EXIT_LOSS_CUT_PNL_PCT = -2.0
 EXIT_LOSS_CUT_HOLD_SEC = 120
+
+# ─── QP Tier 1 lock (was 0.0 = breakeven — DEAD: the buffer-zone guard
+#     reverts any SL candidate in [0, 0.20], so Tier 1 never moved the stop) ───
+QP_TIER_1_LOCK_PCT = 0.5
 ```
 
 The new `EXIT_LOSS_CUT_*` constants are **required** — `monitoring.py` imports them

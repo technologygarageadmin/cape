@@ -1732,9 +1732,27 @@ def _detect_market_fallback_reason(tc, exit_state: dict, sellable_price: float) 
         exit_state.pop("tp_not_filling_seen_ts", None)
 
     # Fix 4 — Triggered-but-not-filled hard cap.
-    # If any SL order first touched its stop price more than SL_TRIGGERED_HARD_CAP_SEC ago
-    # and still has not filled, force ORDER_SYSTEM_FAILURE regardless of whether price has
-    # since bounced back above the stop (bypasses the confirmed_sl early-out below).
+    # Recovery reset: a trigger timer armed by a transient bid touch must be cleared
+    # the moment the bid recovers above that order's stop. Without this, the
+    # confirmed_sl early-out below returns before the stale-timer cleanup at the
+    # bottom of the SL loop ever runs, so a one-tick quote kiss of the stop kept the
+    # hardcap countdown alive and force-sold healthy positions ~4s later
+    # (mislabelled ORDER_SYSTEM_FAILURE — 2026-07-06 trade 3, SPY 751C).
+    for _k_r in [k for k in list(exit_state.keys()) if str(k).startswith("sl_trigger_seen_ts:")]:
+        _oid_r = str(_k_r).split(":", 1)[1]
+        _stop_r = float(exit_state.get(f"sl_trigger_stop:{_oid_r}", 0.0) or 0.0)
+        if _stop_r > 0 and sellable_price > _stop_r + 0.01:
+            log_and_print(
+                "debug",
+                f"[SL TRIGGER RESET] {_oid_r}: sellable {sellable_price:.4f} recovered above "
+                f"stop {_stop_r:.4f} — clearing trigger/hardcap timer",
+            )
+            exit_state.pop(_k_r, None)
+            exit_state.pop(f"sl_trigger_stop:{_oid_r}", None)
+
+    # If any SL order first touched its stop price more than SL_TRIGGERED_HARD_CAP_SEC ago,
+    # has not filled, and the bid has NOT recovered above the stop (see reset above),
+    # force ORDER_SYSTEM_FAILURE (bypasses the confirmed_sl early-out below).
     _now_hc = time.time()
     _sl_ids_hc = list(exit_state.get("sl_order_ids") or [])
     for _oid_hc in _sl_ids_hc:
@@ -1815,6 +1833,9 @@ def _detect_market_fallback_reason(tc, exit_state: dict, sellable_price: float) 
             key = f"sl_trigger_seen_ts:{oid}"
             first_seen = float(exit_state.get(key, 0.0) or 0.0)
             now_ts = time.time()
+            # Remember this order's stop so the recovery reset (top of function)
+            # can clear the timer when the bid climbs back above it.
+            exit_state[f"sl_trigger_stop:{oid}"] = stop_price
             if first_seen <= 0.0:
                 exit_state[key] = now_ts
                 continue
@@ -1837,7 +1858,7 @@ def _detect_market_fallback_reason(tc, exit_state: dict, sellable_price: float) 
 
     # Clear stale trigger timers once price is above all tracked SL stops.
     if not triggered_but_unfilled:
-        for k in [k for k in list(exit_state.keys()) if str(k).startswith("sl_trigger_seen_ts:")]:
+        for k in [k for k in list(exit_state.keys()) if str(k).startswith(("sl_trigger_seen_ts:", "sl_trigger_stop:"))]:
             exit_state.pop(k, None)
 
     # If SL ids exist but broker cannot confirm any of them while in triggered zone,
