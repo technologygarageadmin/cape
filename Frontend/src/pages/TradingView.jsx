@@ -2065,7 +2065,7 @@ export default function TradingView() {
           const timeline = Array.isArray(live.timeline) ? live.timeline : []
           if (timeline.length === 0) return null
 
-          const recentTicks = timeline.slice(-180)
+          const recentTicks = [...timeline].slice(-180).reverse()
           const fillPx = toNum(live.fill_price ?? activePos?.fill_price)
 
           return (
