@@ -193,8 +193,11 @@ All trading behavior is driven by `config.py`. Key knobs:
 | `SL_REPLACE_MIN_INTERVAL_SEC` | `5.0` | Min seconds between broker replacements |
 | `SL_STOP_ORDERS_ENABLED` | `True` | Enables broker-side SL stop-market placement/replacement |
 | `EXIT_MAX_HOLD_ENABLED` | `True` | Exit stale trades after max hold time |
-| `EXIT_MAX_HOLD_SEC` | `300` | 5-minute max hold for sub-1% open positions |
+| `EXIT_MAX_HOLD_SEC` | `300` | 5-minute max hold for any position below +1% PnL (including losers) |
 | `EXIT_MAX_HOLD_PNL_THRESHOLD_PCT` | `1.0` | Max-hold only fires if PnL < +1% |
+| `EXIT_LOSS_CUT_ENABLED` | `True` | Staged loss cut: exit sustained bleeders before the −4% stop |
+| `EXIT_LOSS_CUT_PNL_PCT` | `-2.0` | Loss-cut timer arms when PnL ≤ −2% |
+| `EXIT_LOSS_CUT_HOLD_SEC` | `120` | Exit after 2 min continuously at/below −2% (timer resets on recovery) |
 | `POST_TRADE_COOLDOWN_BARS` | `5` | Bars blocked after any exit |
 | `MIN_TRADE_DURATION_SEC` | `30` | Min hold before discretionary exits (NOT safety exits) |
 | `ENTRY_SR_PROXIMITY_PCT` | `0.0015` | S/R wall dead-zone: ±0.15% of PDH/PDL (VWAP removed) |

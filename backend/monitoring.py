@@ -26,6 +26,9 @@ from config import (
     EXIT_BAD_ENTRY_EXIT_THRESHOLD_PCT,
     EXIT_BAD_ENTRY_MAX_PEAK_PCT,
     EXIT_BAD_ENTRY_WINDOW_SEC,
+    EXIT_LOSS_CUT_ENABLED,
+    EXIT_LOSS_CUT_PNL_PCT,
+    EXIT_LOSS_CUT_HOLD_SEC,
     EXIT_MAX_HOLD_ENABLED,
     EXIT_MAX_HOLD_SEC,
     EXIT_MAX_HOLD_PNL_THRESHOLD_PCT,
@@ -2705,6 +2708,29 @@ def _verify_sl_order(tc, order_id: str, expected_stop: float, label: str = "SL")
     return False
 
 
+def _loss_cut_elapsed(exit_state, pnl_pct, now_ts):
+    """Staged loss cut: track how long PnL has stayed at/below EXIT_LOSS_CUT_PNL_PCT.
+
+    Returns the continuous underwater duration in seconds once it reaches
+    EXIT_LOSS_CUT_HOLD_SEC (caller should exit), else None. The timer resets
+    whenever PnL recovers above the threshold, so only sustained bleeders are
+    cut — a transient spread dip does not trigger.
+    """
+    if not EXIT_LOSS_CUT_ENABLED:
+        return None
+    if pnl_pct > EXIT_LOSS_CUT_PNL_PCT:
+        exit_state["loss_cut_seen_ts"] = None
+        return None
+    seen_ts = exit_state.get("loss_cut_seen_ts")
+    if not seen_ts:
+        exit_state["loss_cut_seen_ts"] = now_ts
+        return None
+    elapsed = now_ts - seen_ts
+    if elapsed >= EXIT_LOSS_CUT_HOLD_SEC:
+        return elapsed
+    return None
+
+
 def monitor_with_polling(
     option_data_client,
     contract_symbol,
@@ -2932,11 +2958,11 @@ def monitor_with_polling(
                 _append_sell_tick(exit_state, _bk_tp_reason, sellable_price, fill_price, bid_price=bid_price if bid_price > 0 else None, mid_price=price)
                 return _bk_tp_reason, sellable_price, exit_state
             # B4 max-hold in bracket mode: _evaluate_priority_exit is skipped, so enforce here.
+            # No lower PnL bound: a stale losing position must also be cut, not only 0..+1%.
             _bk_hold_age = now_ts - entry_ts
             if (
                 EXIT_MAX_HOLD_ENABLED
                 and _bk_hold_age >= EXIT_MAX_HOLD_SEC
-                and pnl_pct >= 0
                 and pnl_pct < EXIT_MAX_HOLD_PNL_THRESHOLD_PCT
             ):
                 _bk_mh_reason = "MAX_HOLD_TIME_EXIT"
@@ -2950,6 +2976,20 @@ def monitor_with_polling(
                 _append_sell_tick(exit_state, _bk_mh_reason, sellable_price, fill_price, bid_price=bid_price if bid_price > 0 else None, mid_price=price)
                 _log_exit("POLLING", _bk_mh_reason, sellable_price, fill_price)
                 return _bk_mh_reason, sellable_price, exit_state
+            # Staged loss cut: sustained bleeders exit before the static SL is hit.
+            _bk_lc_elapsed = _loss_cut_elapsed(exit_state, pnl_pct, now_ts)
+            if _bk_lc_elapsed is not None:
+                _bk_lc_reason = "LOSS_CUT_TIME_EXIT"
+                if buy_order_id:
+                    set_live_exit_reason(buy_order_id, _bk_lc_reason)
+                info(
+                    f"{label}{_bk_lc_reason} (bracket) - pnl={pnl_pct:+.2f}% <= {EXIT_LOSS_CUT_PNL_PCT}% "
+                    f"for {_bk_lc_elapsed:.0f}s (>{EXIT_LOSS_CUT_HOLD_SEC}s) - cutting loss"
+                )
+                _cancel_exit_orders(tc, exit_state)
+                _append_sell_tick(exit_state, _bk_lc_reason, sellable_price, fill_price, bid_price=bid_price if bid_price > 0 else None, mid_price=price)
+                _log_exit("POLLING", _bk_lc_reason, sellable_price, fill_price)
+                return _bk_lc_reason, sellable_price, exit_state
             continue
 
         # ── Bad entry detection: exit early if trade shows no momentum ──
@@ -2982,7 +3022,6 @@ def monitor_with_polling(
             EXIT_MAX_HOLD_ENABLED
             and use_extended_exit_criteria
             and hold_age >= EXIT_MAX_HOLD_SEC
-            and pnl_pct >= 0
             and pnl_pct < EXIT_MAX_HOLD_PNL_THRESHOLD_PCT
         ):
             reason = "MAX_HOLD_TIME_EXIT"
@@ -2992,6 +3031,21 @@ def monitor_with_polling(
                 f"{label}{reason} - held {hold_age:.0f}s (>{EXIT_MAX_HOLD_SEC}s), "
                 f"pnl={pnl_pct:+.2f}% < {EXIT_MAX_HOLD_PNL_THRESHOLD_PCT}% - "
                 f"freeing capital at {sellable_price:.4f}"
+            )
+            _cancel_exit_orders(tc, exit_state)
+            _append_sell_tick(exit_state, reason, sellable_price, fill_price, bid_price=bid_price if bid_price > 0 else None, mid_price=price)
+            _log_exit("POLLING", reason, sellable_price, fill_price)
+            return reason, sellable_price, exit_state
+
+        # ── Staged loss cut: sustained bleeders exit before the static SL is hit ──
+        lc_elapsed = _loss_cut_elapsed(exit_state, pnl_pct, now_ts)
+        if lc_elapsed is not None and use_extended_exit_criteria:
+            reason = "LOSS_CUT_TIME_EXIT"
+            if buy_order_id:
+                set_live_exit_reason(buy_order_id, reason)
+            info(
+                f"{label}{reason} - pnl={pnl_pct:+.2f}% <= {EXIT_LOSS_CUT_PNL_PCT}% "
+                f"for {lc_elapsed:.0f}s (>{EXIT_LOSS_CUT_HOLD_SEC}s) - cutting loss at {sellable_price:.4f}"
             )
             _cancel_exit_orders(tc, exit_state)
             _append_sell_tick(exit_state, reason, sellable_price, fill_price, bid_price=bid_price if bid_price > 0 else None, mid_price=price)
@@ -3446,12 +3500,12 @@ def monitor_with_websocket(
                     stop_stream(stream)
                     return
                 # B4 max-hold in bracket mode (WS path)
+                # No lower PnL bound: a stale losing position must also be cut, not only 0..+1%.
                 _ws_entry_ts = float(state["exit_state"].get("entry_ts") or 0.0)
                 _ws_hold_age = now - _ws_entry_ts if _ws_entry_ts > 0 else 0.0
                 if (
                     EXIT_MAX_HOLD_ENABLED
                     and _ws_hold_age >= EXIT_MAX_HOLD_SEC
-                    and pnl_pct >= 0
                     and pnl_pct < EXIT_MAX_HOLD_PNL_THRESHOLD_PCT
                 ):
                     _ws_mh_reason = "MAX_HOLD_TIME_EXIT"
@@ -3465,6 +3519,23 @@ def monitor_with_websocket(
                     state["last_price"] = sellable_price
                     state["exit_reason"] = _ws_mh_reason
                     _append_sell_tick(state["exit_state"], _ws_mh_reason, sellable_price, fill_price, bid_price=bid if bid > 0 else None, mid_price=price)
+                    done.set()
+                    stop_stream(stream)
+                    return
+                # Staged loss cut: sustained bleeders exit before the static SL is hit.
+                _ws_lc_elapsed = _loss_cut_elapsed(state["exit_state"], pnl_pct, now)
+                if _ws_lc_elapsed is not None:
+                    _ws_lc_reason = "LOSS_CUT_TIME_EXIT"
+                    if buy_order_id:
+                        set_live_exit_reason(buy_order_id, _ws_lc_reason)
+                    info(
+                        f"{label}{_ws_lc_reason} (bracket/WS) - pnl={pnl_pct:+.2f}% <= {EXIT_LOSS_CUT_PNL_PCT}% "
+                        f"for {_ws_lc_elapsed:.0f}s (>{EXIT_LOSS_CUT_HOLD_SEC}s) - cutting loss"
+                    )
+                    _cancel_exit_orders(tc, state["exit_state"])
+                    state["last_price"] = sellable_price
+                    state["exit_reason"] = _ws_lc_reason
+                    _append_sell_tick(state["exit_state"], _ws_lc_reason, sellable_price, fill_price, bid_price=bid if bid > 0 else None, mid_price=price)
                     done.set()
                     stop_stream(stream)
                     return
