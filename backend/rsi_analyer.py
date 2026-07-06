@@ -671,14 +671,15 @@ def analyze_rsi(symbol: str = SYMBOL) -> dict:
 			return False
 		return abs(price - float(level)) / float(level) <= pct
 
+	# A2.1: VWAP removed — it directly contradicts the Tier 1 regime gate (which uses
+	# VWAP direction). Only PDH/PDL are genuine structural walls. Proximity tightened
+	# to ±0.15% via ENTRY_SR_PROXIMITY_PCT (0.0015); ±0.5% was removing too much range.
 	sr_pct = float(ENTRY_SR_PROXIMITY_PCT)
 	sr_walls_hit: list[str] = []
 	if _within_pct(current_close, prev_day_high, sr_pct):
 		sr_walls_hit.append("PDH")
 	if _within_pct(current_close, prev_day_low, sr_pct):
 		sr_walls_hit.append("PDL")
-	if _within_pct(current_close, vwap_val, sr_pct):
-		sr_walls_hit.append("VWAP")
 	result["at_sr_wall"] = bool(sr_walls_hit)
 	result["sr_walls_hit"] = sr_walls_hit
 

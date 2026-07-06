@@ -9,7 +9,6 @@ from config import (
     ENTRY_ORDER_TYPE,
     ENTRY_TIME_IN_FORCE,
     FILL_CHECK_INTERVAL_SEC,
-    SL_STOP_LIMIT_BUFFER_PCT,
     SL_STOP_ORDERS_ENABLED,
 )
 from logger import debug, info
@@ -279,9 +278,7 @@ def upsert_broker_safety_sl(
     if trading_client is None or not contract_symbol or fill_price <= 0:
         return None
 
-    # Round prices to 2 decimals for broker order payloads (Alpaca requires 2-decimal limit prices)
     stop_price = round(float(fill_price) * (1.0 + float(sl_dynamic_pct) / 100.0), 2)
-    limit_price = round(stop_price * (1.0 - SL_STOP_LIMIT_BUFFER_PCT / 100.0), 2)
 
     with _live_exit_lock:
         live = _live_exit_states.get(buy_order_id)

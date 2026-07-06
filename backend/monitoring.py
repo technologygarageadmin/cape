@@ -42,8 +42,16 @@ from config import (
     EXIT_STOP_LOSS_MODE,
     PRICE_POLL_SEC,
     QP_GAP_PCT,
+    QP_TIER_1_TRIGGER_PCT,
+    QP_TIER_2_TRIGGER_PCT,
+    QP_TIER_3_TRIGGER_PCT,
+    QP_TIER_1_LOCK_PCT,
+    QP_TIER_2_LOCK_RATIO,
+    QP_TIER_3_LOCK_RATIO,
     RSI_EXIT_CHECK_SEC,
     SECRET_KEY,
+    SL_REPLACE_MIN_STEP_USD,
+    SL_REPLACE_MIN_INTERVAL_SEC,
     SL_STOP_LIMIT_BUFFER_PCT,
     SL_STOP_ORDERS_ENABLED,
     SYMBOL,
@@ -2302,46 +2310,61 @@ def _update_dynamic_thresholds(
     if fill_price > 0 and current_price is not None:
         live_price = float(current_price)
         if live_price > fill_price:
-            # PROFIT MODE — ratchet from current sellable price with one-way lock.
-            # QP  = current_price - CAPE_QP_OFFSET
-            # TSL = current_price - CAPE_TRAILING_SL_OFFSET
-            # SL  = max(existing_SL, QP, TSL)  — only ever increases (never down)
+            # PROFIT MODE — peak-based tier ladder (B2).
+            # Tier 0: peak <  QP_TIER_1_TRIGGER_PCT → hold static SL, nothing armed.
+            # Tier 1: peak >= QP_TIER_1_TRIGGER_PCT → lock at fill × (1 + QP_TIER_1_LOCK_PCT/100).
+            # Tier 2: peak >= QP_TIER_2_TRIGGER_PCT → lock fill × (1 + LOCK_RATIO × peak%).
+            # Tier 3: peak >= QP_TIER_3_TRIGGER_PCT → lock 70% of peak.
+            # One-way ratchet: sl_candidate only ever increases.
             mode = "PROFIT"
             peak_bid = float(exit_state.get("peak_bid", fill_price) or fill_price)
             if live_price > peak_bid:
                 peak_bid = live_price
                 exit_state["peak_bid"] = peak_bid
 
-            qp_price = round(live_price - CAPE_QP_OFFSET, 2)
-            trailing_sl_price = round(live_price - CAPE_TRAILING_SL_OFFSET, 2)
-            sl_candidate_price = max(existing_sl_price, qp_price, trailing_sl_price)
+            peak_pnl_pct = float(exit_state.get("max_pnl_pct", 0.0))
+            prev_tier = int(exit_state.get("qp_tier", 0))
+
+            if peak_pnl_pct >= QP_TIER_3_TRIGGER_PCT:
+                tier = 3
+                lock_price = round(fill_price * (1.0 + QP_TIER_3_LOCK_RATIO * peak_pnl_pct / 100.0), 2)
+            elif peak_pnl_pct >= QP_TIER_2_TRIGGER_PCT:
+                tier = 2
+                lock_price = round(fill_price * (1.0 + QP_TIER_2_LOCK_RATIO * peak_pnl_pct / 100.0), 2)
+            elif peak_pnl_pct >= QP_TIER_1_TRIGGER_PCT:
+                tier = 1
+                lock_price = round(fill_price * (1.0 + QP_TIER_1_LOCK_PCT / 100.0), 2)
+            else:
+                tier = 0
+                lock_price = existing_sl_price  # Tier 0: hold static SL
+
+            exit_state["qp_tier"] = tier
+            sl_candidate_price = max(existing_sl_price, lock_price) if lock_price is not None else existing_sl_price
+            qp_price = lock_price  # used below for qp_dynamic_pct
 
             qp_candidate_pct = _price_to_pct(qp_price)
             if qp_candidate_pct is not None:
                 exit_state["qp_dynamic_pct"] = qp_candidate_pct
-                if qp_candidate_pct > 0.0 and not bool(exit_state.get("qp_armed", False)):
-                    exit_state["qp_armed"] = True
-                    exit_state["qp_arm_time"] = tick_ts or _iso_now_utc()
-                    exit_state["qp_arm_price"] = round(live_price, 4)
-                    exit_state["qp_arm_pnl_pct"] = round(float(pnl_pct), 4)
-                    exit_state["qp_arm_peak_pct"] = round(float(max_pnl_pct), 4)
+
+            # Arm QP at Tier 1+ (peak >= QP_TIER_1_TRIGGER_PCT)
+            if tier >= 1 and not bool(exit_state.get("qp_armed", False)):
+                exit_state["qp_armed"] = True
+                exit_state["qp_arm_time"] = tick_ts or _iso_now_utc()
+                exit_state["qp_arm_price"] = round(live_price, 4)
+                exit_state["qp_arm_pnl_pct"] = round(float(pnl_pct), 4)
+                exit_state["qp_arm_peak_pct"] = round(float(max_pnl_pct), 4)
+            elif tier == 0:
+                exit_state["qp_armed"] = False
+
+            # Record tier transition for logging and B3 bypass
+            exit_state["qp_tier_changed"] = (tier != prev_tier)
         else:
-            # LOSS MODE:
-            # Disable QP. Tighten SL based on drawdown so SL ratchets upward as loss grows.
+            # LOSS MODE (B1): hold stop at the static SL — no drawdown tightening.
+            # The old drawdown ratchet (sl_static + drawdown) fired the stop at half the
+            # configured distance and was the primary cause of early exits before recoveries.
+            # sl_candidate_price already initialised to existing_sl_price above.
             exit_state["qp_dynamic_pct"] = 0.0
             exit_state["qp_armed"] = False
-
-            # Match required example behavior:
-            # initial_SL = entry - 0.25 (stored as sl_static_pct / sl_price)
-            # trailing_SL_loss = initial_SL + (entry - current)
-            # SL = max(existing_SL, trailing_SL_loss)
-            sl_static_price = _pct_to_price(sl_static_pct)
-            if sl_static_price is None:
-                sl_static_price = max(0.0, fill_price - CAPE_TRAILING_SL_OFFSET)
-
-            drawdown = max(0.0, fill_price - live_price)
-            trailing_sl_price = round(sl_static_price + drawdown, 2)
-            sl_candidate_price = max(existing_sl_price, trailing_sl_price)
 
     if sl_candidate_price is not None:
         sl_candidate_pct = _price_to_pct(sl_candidate_price)
@@ -2395,13 +2418,29 @@ def _update_dynamic_thresholds(
     sl_order_result = None
     if SL_STOP_ORDERS_ENABLED and not bool(exit_state.get("sl_broker_disabled", False)):
         if sl_last_placed is None or profit_sl_replace or (mode != "PROFIT" and current_sl_pct > float(sl_last_placed)):
-            log_and_print("debug", f"[QTY DEBUG] qty={qty} contract={contract_symbol}")
-            with _SL_PLACEMENT_LOCK:
-                try:
-                    sl_order_result = _place_sl_stop_order(tc, exit_state, contract_symbol, qty, buy_order_id, current_price=current_price)
-                except Exception as _sl_ex:
-                    log_and_print("error", f"[SL ERROR] _place_sl_stop_order raised for {contract_symbol}: {_sl_ex}")
-                    sl_order_result = {"operation": "error", "error": str(_sl_ex)}
+            # B3: minimum-step and minimum-interval gating to reduce broker call churn.
+            # Tier transitions (qp_tier_changed) always bypass both gates.
+            tier_changed = bool(exit_state.get("qp_tier_changed", False))
+            _now_replace = time.time()
+            _last_replace_ts = float(exit_state.get("sl_last_replace_ts", 0.0) or 0.0)
+            _interval_ok = tier_changed or (_now_replace - _last_replace_ts) >= SL_REPLACE_MIN_INTERVAL_SEC
+            _step_ok = tier_changed or sl_last_placed_price is None or (
+                current_price is not None
+                and _pct_to_price(current_sl_pct) is not None
+                and abs(_pct_to_price(current_sl_pct) - sl_last_placed_price) >= SL_REPLACE_MIN_STEP_USD
+            )
+            if _interval_ok and _step_ok:
+                log_and_print("debug", f"[QTY DEBUG] qty={qty} contract={contract_symbol}")
+                exit_state["sl_last_replace_ts"] = _now_replace
+                exit_state["qp_tier_changed"] = False  # consumed
+                with _SL_PLACEMENT_LOCK:
+                    try:
+                        sl_order_result = _place_sl_stop_order(tc, exit_state, contract_symbol, qty, buy_order_id, current_price=current_price)
+                    except Exception as _sl_ex:
+                        log_and_print("error", f"[SL ERROR] _place_sl_stop_order raised for {contract_symbol}: {_sl_ex}")
+                        sl_order_result = {"operation": "error", "error": str(_sl_ex)}
+            else:
+                log_and_print("debug", f"[SL GATE] replacement suppressed — interval_ok={_interval_ok} step_ok={_step_ok}")
 
     # Emit per-tick SL sync state for real-time terminal tracing.
     log_and_print(
@@ -2791,9 +2830,34 @@ def monitor_with_polling(
             _mark_exit_in_progress(exit_state)
             return sl_exit, sl_fill, exit_state
 
-        # ── Minimum trade duration hold gate ─────────────────────────────────
-        # Checked before fallback and internal exits so it applies in bracket
-        # mode too. Broker TP/SL fills (checked above) are always allowed.
+        # ── Safety exits: always fire regardless of min-duration gate (B7) ──────
+        # Broker stop fills are already handled above (before the gate).
+        # Fallback / order-system failures must also bypass the gate: holding a
+        # broken position for 30s then panic-selling at a worse price is strictly
+        # worse than an immediate safety exit.
+        fallback_reason, fallback_detail = _detect_market_fallback_reason(tc, exit_state, sellable_price)
+        if fallback_reason:
+            if buy_order_id:
+                set_live_exit_reason(buy_order_id, fallback_reason)
+            info(
+                f"{label}{fallback_reason} - {fallback_detail} - "
+                f"forcing market-exit fallback at {sellable_price:.4f}"
+            )
+            _cancel_exit_orders(tc, exit_state)
+            _append_sell_tick(
+                exit_state,
+                fallback_reason,
+                sellable_price,
+                fill_price,
+                bid_price=bid_price if bid_price > 0 else None,
+                mid_price=price,
+            )
+            _log_exit("POLLING", fallback_reason, sellable_price, fill_price)
+            return fallback_reason, sellable_price, exit_state
+
+        # ── Minimum trade duration hold gate (discretionary exits only) ─────────
+        # Safety exits (broker fills + fallback detector) already handled above.
+        # The gate here blocks internal/discretionary exits only (B7).
         now_ts = time.time()
         if min_exit_epoch_ts is not None and now_ts < min_exit_epoch_ts:
             if (
@@ -2834,26 +2898,6 @@ def monitor_with_polling(
             info(f"{label}Exit hold window completed; exits are now active")
             hold_notice_emitted = False
 
-        fallback_reason, fallback_detail = _detect_market_fallback_reason(tc, exit_state, sellable_price)
-        if fallback_reason:
-            if buy_order_id:
-                set_live_exit_reason(buy_order_id, fallback_reason)
-            info(
-                f"{label}{fallback_reason} - {fallback_detail} - "
-                f"forcing market-exit fallback at {sellable_price:.4f}"
-            )
-            _cancel_exit_orders(tc, exit_state)
-            _append_sell_tick(
-                exit_state,
-                fallback_reason,
-                sellable_price,
-                fill_price,
-                bid_price=bid_price if bid_price > 0 else None,
-                mid_price=price,
-            )
-            _log_exit("POLLING", fallback_reason, sellable_price, fill_price)
-            return fallback_reason, sellable_price, exit_state
-
         _append_timeline_tick(
             exit_state,
             source="poll",
@@ -2887,6 +2931,25 @@ def monitor_with_polling(
                 _cancel_exit_orders(tc, exit_state)
                 _append_sell_tick(exit_state, _bk_tp_reason, sellable_price, fill_price, bid_price=bid_price if bid_price > 0 else None, mid_price=price)
                 return _bk_tp_reason, sellable_price, exit_state
+            # B4 max-hold in bracket mode: _evaluate_priority_exit is skipped, so enforce here.
+            _bk_hold_age = now_ts - entry_ts
+            if (
+                EXIT_MAX_HOLD_ENABLED
+                and _bk_hold_age >= EXIT_MAX_HOLD_SEC
+                and pnl_pct >= 0
+                and pnl_pct < EXIT_MAX_HOLD_PNL_THRESHOLD_PCT
+            ):
+                _bk_mh_reason = "MAX_HOLD_TIME_EXIT"
+                if buy_order_id:
+                    set_live_exit_reason(buy_order_id, _bk_mh_reason)
+                info(
+                    f"{label}{_bk_mh_reason} (bracket) - held {_bk_hold_age:.0f}s (>{EXIT_MAX_HOLD_SEC}s), "
+                    f"pnl={pnl_pct:+.2f}% < {EXIT_MAX_HOLD_PNL_THRESHOLD_PCT}% - freeing capital"
+                )
+                _cancel_exit_orders(tc, exit_state)
+                _append_sell_tick(exit_state, _bk_mh_reason, sellable_price, fill_price, bid_price=bid_price if bid_price > 0 else None, mid_price=price)
+                _log_exit("POLLING", _bk_mh_reason, sellable_price, fill_price)
+                return _bk_mh_reason, sellable_price, exit_state
             continue
 
         # ── Bad entry detection: exit early if trade shows no momentum ──
@@ -3288,33 +3351,34 @@ def monitor_with_websocket(
                     stop_stream(stream)
                     return
 
-                if not (min_exit_epoch_ts is not None and now < min_exit_epoch_ts):
-                    fallback_reason, fallback_detail = _detect_market_fallback_reason(
-                        tc,
-                        state["exit_state"],
-                        sellable_price,
+                # B7: safety exits bypass the min-duration gate.
+                # Fallback detector fires here unconditionally (gate removed from this path).
+                fallback_reason, fallback_detail = _detect_market_fallback_reason(
+                    tc,
+                    state["exit_state"],
+                    sellable_price,
+                )
+                if fallback_reason:
+                    if buy_order_id:
+                        set_live_exit_reason(buy_order_id, fallback_reason)
+                    info(
+                        f"{label}{fallback_reason} - {fallback_detail} - "
+                        f"forcing market-exit fallback at {sellable_price:.4f}"
                     )
-                    if fallback_reason:
-                        if buy_order_id:
-                            set_live_exit_reason(buy_order_id, fallback_reason)
-                        info(
-                            f"{label}{fallback_reason} - {fallback_detail} - "
-                            f"forcing market-exit fallback at {sellable_price:.4f}"
-                        )
-                        _cancel_exit_orders(tc, state["exit_state"])
-                        state["last_price"] = sellable_price
-                        state["exit_reason"] = fallback_reason
-                        _append_sell_tick(
-                            state["exit_state"],
-                            fallback_reason,
-                            sellable_price,
-                            fill_price,
-                            bid_price=bid if bid > 0 else None,
-                            mid_price=price,
-                        )
-                        done.set()
-                        stop_stream(stream)
-                        return
+                    _cancel_exit_orders(tc, state["exit_state"])
+                    state["last_price"] = sellable_price
+                    state["exit_reason"] = fallback_reason
+                    _append_sell_tick(
+                        state["exit_state"],
+                        fallback_reason,
+                        sellable_price,
+                        fill_price,
+                        bid_price=bid if bid > 0 else None,
+                        mid_price=price,
+                    )
+                    done.set()
+                    stop_stream(stream)
+                    return
             # ── Minimum trade duration hold gate ─────────────────────────────
             # Runs before _evaluate_priority_exit so it applies in bracket mode
             # too. Broker TP/SL fills (checked above in throttled block) pass through.
@@ -3378,6 +3442,29 @@ def monitor_with_websocket(
                     state["last_price"] = sellable_price
                     state["exit_reason"] = _bk_tp_reason
                     _append_sell_tick(state["exit_state"], _bk_tp_reason, sellable_price, fill_price, bid_price=bid if bid > 0 else None, mid_price=price)
+                    done.set()
+                    stop_stream(stream)
+                    return
+                # B4 max-hold in bracket mode (WS path)
+                _ws_entry_ts = float(state["exit_state"].get("entry_ts") or 0.0)
+                _ws_hold_age = now - _ws_entry_ts if _ws_entry_ts > 0 else 0.0
+                if (
+                    EXIT_MAX_HOLD_ENABLED
+                    and _ws_hold_age >= EXIT_MAX_HOLD_SEC
+                    and pnl_pct >= 0
+                    and pnl_pct < EXIT_MAX_HOLD_PNL_THRESHOLD_PCT
+                ):
+                    _ws_mh_reason = "MAX_HOLD_TIME_EXIT"
+                    if buy_order_id:
+                        set_live_exit_reason(buy_order_id, _ws_mh_reason)
+                    info(
+                        f"{label}{_ws_mh_reason} (bracket/WS) - held {_ws_hold_age:.0f}s (>{EXIT_MAX_HOLD_SEC}s), "
+                        f"pnl={pnl_pct:+.2f}% < {EXIT_MAX_HOLD_PNL_THRESHOLD_PCT}% - freeing capital"
+                    )
+                    _cancel_exit_orders(tc, state["exit_state"])
+                    state["last_price"] = sellable_price
+                    state["exit_reason"] = _ws_mh_reason
+                    _append_sell_tick(state["exit_state"], _ws_mh_reason, sellable_price, fill_price, bid_price=bid if bid > 0 else None, mid_price=price)
                     done.set()
                     stop_stream(stream)
                     return

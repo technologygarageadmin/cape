@@ -3,12 +3,14 @@ from zoneinfo import ZoneInfo
 from alpaca.trading.enums import ContractType, OrderSide
 from config import (
     ENTRY_ATR_PCT_MIN,
+    ENTRY_ATR_PCT_MIN_PER_SYMBOL,
     ENTRY_CONFLUENCE_CANDLE_BODY_MIN,
     ENTRY_CONFLUENCE_MIN_SCORE,
     ENTRY_CONFLUENCE_VOLUME_RATIO_MIN,
     ENTRY_OPENING_ZONE_VETO_ENABLED,
     ENTRY_RSI_VETO_CALL_MAX,
     ENTRY_RSI_VETO_PUT_MIN,
+    ENTRY_SETUP_A_BODY_ALT_MIN,
     ENTRY_SETUP_A_ENABLED,
     ENTRY_SETUP_A_PULLBACK_MAX_PCT,
     ENTRY_SETUP_B_BODY_MIN_RATIO,
@@ -98,7 +100,12 @@ def _setup_a_pullback(rsi_result: dict, direction: str) -> bool:
     """Setup A: Pullback-to-EMA9 — trend-following entry.
 
     Fires when the PREVIOUS bar kissed EMA9 (within ENTRY_SETUP_A_PULLBACK_MAX_PCT)
-    and the CURRENT bar bounces in the trend direction and breaks prior structure.
+    and the CURRENT bar bounces in the trend direction. Accepts either:
+      (a) break of prior high/low (structure break — primary), OR
+      (b) strong-bodied candle >= ENTRY_SETUP_A_BODY_ALT_MIN (A2.4 — catches fast bounces
+          where the structure break hasn't happened on the same bar, e.g. TSLA gaps).
+    Tier 3 confluence still scores the bar independently, so the body-ratio
+    alternative is only a primary-signal gate relaxation, not a free pass.
     """
     previous_close = float(rsi_result.get("previous_close", 0))
     prev_ema_fast = float(rsi_result.get("prev_ema_fast", 0))
@@ -109,16 +116,15 @@ def _setup_a_pullback(rsi_result: dict, direction: str) -> bool:
     if prev_pullback_pct > ENTRY_SETUP_A_PULLBACK_MAX_PCT:
         return False
 
+    body_ratio = float(rsi_result.get("candle_body_ratio", 0))
     if direction == "CALL":
-        return (
-            bool(rsi_result.get("candle_is_bullish", False))
-            and bool(rsi_result.get("candle_breaks_prev_high", False))
-        )
+        structure_break = bool(rsi_result.get("candle_breaks_prev_high", False))
+        strong_body = bool(rsi_result.get("candle_is_bullish", False)) and body_ratio >= ENTRY_SETUP_A_BODY_ALT_MIN
+        return bool(rsi_result.get("candle_is_bullish", False)) and (structure_break or strong_body)
     else:
-        return (
-            bool(rsi_result.get("candle_is_bearish", False))
-            and bool(rsi_result.get("candle_breaks_prev_low", False))
-        )
+        structure_break = bool(rsi_result.get("candle_breaks_prev_low", False))
+        strong_body = bool(rsi_result.get("candle_is_bearish", False)) and body_ratio >= ENTRY_SETUP_A_BODY_ALT_MIN
+        return bool(rsi_result.get("candle_is_bearish", False)) and (structure_break or strong_body)
 
 
 def _setup_b_bb_break(rsi_result: dict, direction: str) -> bool:
@@ -220,8 +226,11 @@ def _confluence_score(rsi_result: dict, direction: str) -> tuple[int, list[str]]
         vetoes.append(f"RSI_OVEREXTENDED({latest_rsi:.1f}<={ENTRY_RSI_VETO_PUT_MIN})")
 
     atr_pct = rsi_result.get("atr_pct")
-    if atr_pct is not None and float(atr_pct) < ENTRY_ATR_PCT_MIN:
-        vetoes.append(f"CHOPPY(ATR%={float(atr_pct):.2f}<{ENTRY_ATR_PCT_MIN:.2f})")
+    if atr_pct is not None:
+        symbol = str(rsi_result.get("symbol") or "")
+        atr_floor = float(ENTRY_ATR_PCT_MIN_PER_SYMBOL.get(symbol, ENTRY_ATR_PCT_MIN))
+        if float(atr_pct) < atr_floor:
+            vetoes.append(f"CHOPPY(ATR%={float(atr_pct):.2f}<{atr_floor:.3f}[{symbol or 'default'}])")
 
     if ENTRY_OPENING_ZONE_VETO_ENABLED and bool(rsi_result.get("in_opening_zone", False)):
         vetoes.append("OPENING_ZONE(09:30-09:45)")
@@ -252,9 +261,11 @@ def _confluence_score(rsi_result: dict, direction: str) -> tuple[int, list[str]]
             score += 1
 
     # 3. Volume confirms — only credit when actual volume passes the ratio gate.
-    # Previously also passed when volume_unavailable, which gave every IEX bar a free point.
+    # On IEX feed volume is often 0 (volume_unavailable=True); the max achievable score
+    # is then 3/4. Log this so starvation analysis is honest (A2.3).
     if not volume_unavailable and volume_ratio >= ENTRY_CONFLUENCE_VOLUME_RATIO_MIN:
         score += 1
+    # denominator logged below in determine_signal via entry_info
 
     # 4. Price-structure candle pattern agrees
     if direction == "CALL" and ps_bullish:
@@ -321,15 +332,21 @@ def determine_signal(rsi_result, current_price: float):
     # ── Tier 3: Confluence ─────────────────────────────────────────────────────
     score, vetoes = _confluence_score(rsi_result, direction)
 
+    # A2.3: log the real denominator so we can diagnose IEX-feed starvation.
+    # Volume is permanently unavailable on the free IEX feed, capping max score at 3/4.
+    _vol_unavail = bool(rsi_result.get("volume_unavailable", False))
+    _denom = 3 if _vol_unavail else 4
+    _vol_note = " [IEX—volume unavailable, max 3/4]" if _vol_unavail else ""
+
     if vetoes:
         info(f"  Signal rejected: {direction} vetoed — {', '.join(vetoes)}")
         return None, None, None, None
 
     if score < ENTRY_CONFLUENCE_MIN_SCORE:
-        info(f"  Signal rejected: confluence {score}/4 < {ENTRY_CONFLUENCE_MIN_SCORE} required")
+        info(f"  Signal rejected: confluence {score}/{_denom} < {ENTRY_CONFLUENCE_MIN_SCORE} required{_vol_note}")
         return None, None, None, None
 
-    info(f"  Signal approved: {direction} | {setup_fired} | confluence {score}/4")
+    info(f"  Signal approved: {direction} | {setup_fired} | confluence {score}/{_denom}{_vol_note}")
 
     contract_type = ContractType.CALL if direction == "CALL" else ContractType.PUT
     order_side = OrderSide.BUY
@@ -339,14 +356,16 @@ def determine_signal(rsi_result, current_price: float):
         "filters_passed": [
             f"regime={regime}",
             f"setup={setup_fired}",
-            f"confluence={score}/4",
+            f"confluence={score}/{_denom}",
         ],
-        "reasons": [f"Regime {regime} | {setup_fired} | Confluence {score}/4"],
+        "reasons": [f"Regime {regime} | {setup_fired} | Confluence {score}/{_denom}{_vol_note}"],
         "entry_strategies": [setup_fired],
         "indicators": {
             "regime": regime,
             "setup": setup_fired,
             "confluence_score": score,
+            "confluence_denominator": _denom,
+            "volume_unavailable": _vol_unavail,
             "rsi": round(latest_rsi, 1),
             "rsi_delta": round(rsi_delta, 2),
             "rsi_ma": round(latest_rsi_ma, 1),

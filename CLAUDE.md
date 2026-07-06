@@ -177,16 +177,29 @@ All trading behavior is driven by `config.py`. Key knobs:
 | Setting | Current | Effect |
 |---|---|---|
 | `PAPER_TRADING` | `True` | Must flip to `False` for live |
-| `TAKE_PROFIT_PCT` | `0.25` | Absolute $0.25 above fill price |
-| `STOP_LOSS_PCT` | `0.50` | Absolute $0.50 below fill price |
+| `EXIT_TAKE_PROFIT_MODE` | `"pct"` | TP calculated as % of fill price |
+| `EXIT_TAKE_PROFIT_VALUE` | `0.08` | TP = fill × 1.08 (+8%) |
+| `EXIT_STOP_LOSS_MODE` | `"pct"` | SL calculated as % of fill price |
+| `EXIT_STOP_LOSS_VALUE` | `0.04` | SL = fill × 0.96 (−4%) |
 | `EXIT_BRACKET_QP_ENABLED` | `True` | Broker SL ratchet mode (primary exit via broker stop) |
-| `EXIT_QUICK_PROFIT_ENABLED` | `False` | Internal QP exit via market sell (off; broker SL handles QP) |
-| `EXIT_TRAILING_STOP_ENABLED` | `False` | Internal trailing SL exit via market sell (off) |
-| `CAPE_QP_OFFSET` | `0.01` | QP floor = current_price - $0.01 |
-| `CAPE_TRAILING_SL_OFFSET` | `0.25` | Trailing SL = current_price - $0.25 |
+| `EXIT_QUICK_PROFIT_ENABLED` | `True` | QP ratchet armed (tier ladder, not flat trail) |
+| `EXIT_TRAILING_STOP_ENABLED` | `True` | Trailing SL enabled |
+| `CAPE_QP_OFFSET` | `0.05` | Legacy; superseded by tier ladder (QP_TIER_*) |
+| `CAPE_TRAILING_SL_OFFSET` | `0.10` | Legacy; superseded by tier ladder |
+| `QP_TIER_1_TRIGGER_PCT` | `3.0` | Arm ratchet at +3% peak (Tier 1 = breakeven lock) |
+| `QP_TIER_2_TRIGGER_PCT` | `6.0` | Tier 2 = lock 50% of peak |
+| `QP_TIER_3_TRIGGER_PCT` | `10.0` | Tier 3 = lock 70% of peak |
+| `SL_REPLACE_MIN_STEP_USD` | `0.05` | Min $ stop move before broker replacement call |
+| `SL_REPLACE_MIN_INTERVAL_SEC` | `5.0` | Min seconds between broker replacements |
 | `SL_STOP_ORDERS_ENABLED` | `True` | Enables broker-side SL stop-market placement/replacement |
+| `EXIT_MAX_HOLD_ENABLED` | `True` | Exit stale trades after max hold time |
+| `EXIT_MAX_HOLD_SEC` | `300` | 5-minute max hold for sub-1% open positions |
+| `EXIT_MAX_HOLD_PNL_THRESHOLD_PCT` | `1.0` | Max-hold only fires if PnL < +1% |
 | `POST_TRADE_COOLDOWN_BARS` | `5` | Bars blocked after any exit |
-| `MIN_TRADE_DURATION_SEC` | `30` | No exit for 30s after fill |
+| `MIN_TRADE_DURATION_SEC` | `30` | Min hold before discretionary exits (NOT safety exits) |
+| `ENTRY_SR_PROXIMITY_PCT` | `0.0015` | S/R wall dead-zone: ±0.15% of PDH/PDL (VWAP removed) |
+| `ENTRY_SETUP_A_PULLBACK_MAX_PCT` | `0.30` | Max EMA9 kiss distance for Setup A |
+| `ENTRY_TIME_WINDOW_ENABLED` | `True` | Trade only during configured windows (9:45-10:45, 13:15-14:15 ET) |
 | `MONGO_REQUIRED` | `True` | Bot exits at startup if Mongo unreachable |
 
 `compute_tp_price()` and `compute_sl_price()` in `config.py` translate these settings into absolute prices. Always use these helpers rather than recomputing inline.
