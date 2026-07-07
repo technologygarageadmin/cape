@@ -151,6 +151,9 @@ The broker has rejected SL placement with 42210000 / "position not ready" contin
 **Condition 10 — TP limit at broker but not filling** (`TP_LIMIT_NOT_FILLING_MARKET_EXIT`)
 The TP child order exists (`tp_order_ids` non-empty), TP has not filled (`tp_order_filled = False`), and `sellable_price >= tp_price` — but the limit hasn't filled. Likely causes: wide option spread, thin liquidity at the TP strike, or partial venue routing. Fires after a **2-second grace** (`tp_not_filling_seen_ts` timer) to filter transient quote spikes that revert. Placed BEFORE the `confirmed_sl_price` early-out so the guard fires even though price is well above the SL. Grace timer resets when price retreats below TP, when TP fills, or when the TP child is cancelled. Companion to the existing immediate "no TP child + price >= tp_price → market exit" backstop at the bracket-mode block (which fires for Scenario B — TP limit never placed).
 
+**Condition 11 — Confirmed SL price breached** (`SL_PRICE_BREACH_MARKET_EXIT`)
+The last broker-verified stop (`confirmed_sl_price`) exists, SL orders are live, and `sellable_price <= confirmed_sl_price + 0.01` continuously for a 2-second grace (`sl_breach_seen_ts` timer). This is the local backup exit for when the broker stop-market does not trigger — on sparse option tapes the bid collapses before any trade prints at the stop, so in practice this condition (not the broker fill) performs most stop exits. **Timer reset**: cleared both by the condition's own else-branch and by the `confirmed_sl_price` early-out when price is safely above the stop — the early-out returns before the else-branch on recovery ticks, which previously left a stale timer armed for minutes and made the next one-tick touch of the stop fire instantly with no grace (`waited=58s/224s` exits, 2026-07-07). The early-out clears `qp_guard_trigger_seen_ts` (Condition 5) for the same reason.
+
 ### TP Placement Failure Handling
 
 `_attempt_place_tp_limit` is the only path that places a fresh standalone TP limit (non-bracket mode and the bracket-recovery path). Its two-attempt flow:
@@ -187,11 +190,14 @@ All trading behavior is driven by `config.py`. Key knobs:
 | `CAPE_QP_OFFSET` | `0.05` | Legacy; superseded by tier ladder (QP_TIER_*) |
 | `CAPE_TRAILING_SL_OFFSET` | `0.10` | Legacy; superseded by tier ladder |
 | `QP_TIER_1_TRIGGER_PCT` | `3.0` | Arm ratchet at +3% peak (Tier 1 locks +0.5%; must stay above the 0.20 buffer-zone guard or the lock is silently discarded) |
-| `QP_TIER_2_TRIGGER_PCT` | `6.0` | Tier 2 = lock 50% of peak |
+| `QP_TIER_2_TRIGGER_PCT` | `6.0` | Tier 2 = lock 65% of peak (was 50%; raised 2026-07-07) |
 | `QP_TIER_3_TRIGGER_PCT` | `10.0` | Tier 3 = lock 70% of peak |
+| `QP_NEAR_TP_ARM_MARGIN_PCT` | `1.0` | Near-TP trail arms once peak ≥ TP − 1% (monitoring.py has fallback defaults if config lacks these) |
+| `QP_NEAR_TP_TRAIL_GAP_PCT` | `1.5` | Near-TP trail locks peak − 1.5% when that beats the tier lock |
 | `SL_REPLACE_MIN_STEP_USD` | `0.05` | Min $ stop move before broker replacement call |
 | `SL_REPLACE_MIN_INTERVAL_SEC` | `5.0` | Min seconds between broker replacements |
 | `SL_STOP_ORDERS_ENABLED` | `True` | Enables broker-side SL stop-market placement/replacement |
+| `PRICE_POLL_SEC` | `3` | Base polling cadence; drops to 1s (`SL_PROXIMITY_POLL_SEC`, module constant in monitoring.py) when the bid is within 1.5% of the confirmed stop |
 | `EXIT_MAX_HOLD_ENABLED` | `True` | Exit stale trades after max hold time |
 | `EXIT_MAX_HOLD_SEC` | `300` | 5-minute max hold for any position below +1% PnL (including losers) |
 | `EXIT_MAX_HOLD_PNL_THRESHOLD_PCT` | `1.0` | Max-hold only fires if PnL < +1% |

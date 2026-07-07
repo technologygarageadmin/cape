@@ -32,7 +32,16 @@ EXIT_LOSS_CUT_HOLD_SEC = 120
 # ─── QP Tier 1 lock (was 0.0 = breakeven — DEAD: the buffer-zone guard
 #     reverts any SL candidate in [0, 0.20], so Tier 1 never moved the stop) ───
 QP_TIER_1_LOCK_PCT = 0.5
+
+# ─── Tier-2 retention + near-TP trail (2026-07-07 log review) ───
+QP_TIER_2_LOCK_RATIO = 0.65        # was 0.50 — a +7.4% peak locked only +3.7%
+QP_NEAR_TP_ARM_MARGIN_PCT = 1.0    # peak >= TP−1% arms the near-TP trail
+QP_NEAR_TP_TRAIL_GAP_PCT = 1.5     # then stop trails at peak − 1.5%
 ```
+
+The `QP_NEAR_TP_*` constants are optional at boot: `monitoring.py` imports them with
+fallback defaults (1.0 / 1.5), so the backend starts even if they are missing —
+but set them anyway so the config file reflects what actually runs.
 
 The new `EXIT_LOSS_CUT_*` constants are **required** — `monitoring.py` imports them
 at module load and the backend will not start without them.
@@ -55,3 +64,8 @@ gets `sl_price=3.2064`), not `sl=-14.97%`.
    (`LOSS_CUT_TIME_EXIT`). Timer resets if PnL recovers above −2%.
 3. **Max hold** — any position below +1% PnL after 300s → market exit
    (`MAX_HOLD_TIME_EXIT`). Now also fires for negative PnL (previously 0..+1% only).
+
+Code-side fixes (arrive via `git pull`, no config action): breach-timer reset on
+recovery (kills the false instant `SL_PRICE_BREACH` fires with `waited=58s/224s`),
+and adaptive polling (1s instead of 3s when the bid is within 1.5% of the stop —
+cuts exit slippage on both wins and losses).

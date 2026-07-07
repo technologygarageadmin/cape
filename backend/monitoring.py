@@ -63,6 +63,15 @@ from config import (
     WS_MAX_WAIT_SEC,
     WS_ORDER_CHECK_SEC,
 )
+# Near-TP trail constants (2026-07-07) — imported with fallbacks so the backend
+# still boots on a trading machine whose gitignored config.py has not been
+# hand-synced yet (config.py never propagates via git).
+try:
+    from config import QP_NEAR_TP_ARM_MARGIN_PCT, QP_NEAR_TP_TRAIL_GAP_PCT
+except ImportError:
+    QP_NEAR_TP_ARM_MARGIN_PCT = 1.0   # arm near-TP trail once peak >= TP − this
+    QP_NEAR_TP_TRAIL_GAP_PCT = 1.5    # then trail the stop at peak − this
+
 from logger import debug, info, _append_system_log
 from order_execution import set_live_exit_reason, update_live_exit_state, place_market_order, wait_for_fill, mark_exit_in_progress, is_position_exiting
 from rsi_analyer import analyze_rsi
@@ -99,6 +108,14 @@ SL_DESYNC_IMMEDIATE_EXIT_PCT = 0.4
 # market exit regardless of whether current price has bounced back above the
 # stop (bypasses the confirmed_sl early-out guard in the fallback detector).
 SL_TRIGGERED_HARD_CAP_SEC = 4.0
+
+# Adaptive polling: when the bid sits within this % band above the confirmed
+# stop (or has crossed below it), the polling monitor drops from PRICE_POLL_SEC
+# to the fast interval. At the default 3s cadence these contracts gap 15–30¢
+# between polls near the stop, which was the dominant exit-slippage source on
+# 2026-07-07 (losses realised at −4.1%..−6.3% against a −4% stop).
+SL_PROXIMITY_BAND_PCT = 1.5
+SL_PROXIMITY_POLL_SEC = 1.0
 
 # Prevent repeated Alpaca websocket auth tracebacks from flooding console/logs.
 logging.getLogger("alpaca.data.live.websocket").setLevel(logging.CRITICAL)
@@ -1785,6 +1802,14 @@ def _detect_market_fallback_reason(tc, exit_state: dict, sellable_price: float) 
     _confirmed_sl = float(exit_state.get("confirmed_sl_price") or 0)
     _broker_sl_disabled = bool(exit_state.get("sl_broker_disabled", False))
     if _confirmed_sl > 0 and sellable_price > _confirmed_sl + 0.01 and not _broker_sl_disabled:
+        # Price is safely above the stop — clear the grace timers of Condition 6 and
+        # the QP guard here. Their own reset branches below are unreachable on
+        # recovery ticks because this early-out returns first, so a timer armed
+        # during an earlier dip survived any rally and the next one-tick touch of
+        # the stop fired a market exit instantly with no grace (the impossible
+        # waited=58s/224s SL_PRICE_BREACH exits of 2026-07-07).
+        exit_state.pop("sl_breach_seen_ts", None)
+        exit_state.pop("qp_guard_trigger_seen_ts", None)
         return None, None
 
     tp_ids = list(exit_state.get("tp_order_ids") or [])
@@ -2362,6 +2387,17 @@ def _update_dynamic_thresholds(
                 tier = 0
                 lock_price = existing_sl_price  # Tier 0: hold static SL
 
+            # Near-TP overlay: once the peak has come within QP_NEAR_TP_ARM_MARGIN_PCT
+            # of the TP target, the ratio locks are too loose — on 2026-07-07 a +7.4%
+            # peak (0.6% from the +8% TP) locked only 50% of peak and realised +1.7%.
+            # Trail at peak − QP_NEAR_TP_TRAIL_GAP_PCT when that beats the tier lock.
+            if tp_pct > 0 and peak_pnl_pct >= (tp_pct - QP_NEAR_TP_ARM_MARGIN_PCT):
+                _near_tp_lock = round(
+                    fill_price * (1.0 + (peak_pnl_pct - QP_NEAR_TP_TRAIL_GAP_PCT) / 100.0), 2
+                )
+                if lock_price is None or _near_tp_lock > lock_price:
+                    lock_price = _near_tp_lock
+
             exit_state["qp_tier"] = tier
             sl_candidate_price = max(existing_sl_price, lock_price) if lock_price is not None else existing_sl_price
             qp_price = lock_price  # used below for qp_dynamic_pct
@@ -2752,6 +2788,24 @@ def _loss_cut_elapsed(exit_state, pnl_pct, now_ts):
     return None
 
 
+def _adaptive_poll_sec(exit_state: dict) -> float:
+    """Fast-poll when the last bid is near (or below) the confirmed stop.
+
+    The broker stop-market rarely triggers on sparse option tapes, so the
+    bid-based fallback detector is the effective stop — and its reaction time
+    is bounded by this sleep. Uses the previous tick's sellable price, so the
+    monitor speeds up one tick after price enters the proximity band.
+    """
+    try:
+        _sl = float(exit_state.get("confirmed_sl_price") or 0.0)
+        _px = float(exit_state.get("last_sellable_price") or 0.0)
+        if _sl > 0 and _px > 0 and _px <= _sl * (1.0 + SL_PROXIMITY_BAND_PCT / 100.0):
+            return SL_PROXIMITY_POLL_SEC
+    except Exception:
+        pass
+    return float(PRICE_POLL_SEC)
+
+
 def monitor_with_polling(
     option_data_client,
     contract_symbol,
@@ -2822,7 +2876,7 @@ def monitor_with_polling(
         )
 
     while True:
-        time.sleep(PRICE_POLL_SEC)
+        time.sleep(_adaptive_poll_sec(exit_state))
 
         if buy_order_id and is_position_exiting(buy_order_id):
             info(f"{label}[LIFECYCLE] {buy_order_id} exit_in_progress — polling monitor stopping")
@@ -2840,6 +2894,7 @@ def monitor_with_polling(
             continue
 
         sellable_price = _resolve_sellable_price(price, bid_price)
+        exit_state["last_sellable_price"] = sellable_price  # drives _adaptive_poll_sec
         pnl_pct = (sellable_price - fill_price) / fill_price * 100
         same_candle_price = sellable_price if EXIT_SAME_CANDLE_USE_BID_PRICE else price
         same_candle_pnl_pct = (same_candle_price - fill_price) / fill_price * 100
