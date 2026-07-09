@@ -146,6 +146,7 @@ from alpaca_helpers import (
     extract_snapshot_mid_price,
 )
 from pymongo import MongoClient
+from bson import ObjectId
 
 from config import (
     API_KEY, CHECK_INTERVAL_SEC, FILL_WAIT_SEC, MONGO_DB_NAME, MONGO_ENABLED, MONGO_URI,
@@ -232,6 +233,19 @@ def _to_iso(ts: Any) -> str | None:
         return ts.isoformat()
     except Exception:
         return str(ts)
+
+
+def _created_today(created_at: Any) -> bool:
+    """True if created_at falls on today's calendar date in America/Chicago.
+
+    Used by the trade-log list endpoints to decide whether to ship a trade's
+    timeline inline (today → instant expand) or strip it for lazy-loading
+    (older trades → keep the polled payload small).
+    """
+    iso = _to_iso(created_at)
+    if not iso:
+        return False
+    return iso[:10] == datetime.now(CDT).strftime("%Y-%m-%d")
 
 
 def _underlying_from_option_symbol(sym: str) -> str:
@@ -458,6 +472,35 @@ def _get_cached_orders() -> list[Any]:
     except Exception:
         pass  # Return stale cache on failure
     return _orders_cache
+
+
+_positions_cache: list[Any] = []
+_positions_cache_ts: float = 0.0
+_positions_cache_lock = threading.Lock()
+_POSITIONS_CACHE_TTL: float = 2.0  # seconds — dedupes the frequent UI pollers
+
+
+def _get_all_positions_cached() -> list[Any]:
+    """Return broker positions, refreshing at most once every few seconds.
+
+    /api/positions, /api/live-positions reconciliation, and both UI polling
+    loops all need the live position list. Without a cache each would hit the
+    Alpaca trading API (≈200 req/min limit) on every 2–5s tick. This coalesces
+    them to one broker call per TTL. Raises on a fresh-fetch failure (callers
+    that must not fail silently — e.g. /api/positions — handle it); stale cache
+    is returned only within the TTL window.
+
+    Not used by the liquidation path, which needs a guaranteed-fresh read.
+    """
+    global _positions_cache, _positions_cache_ts
+    with _positions_cache_lock:
+        if _positions_cache_ts and (time.monotonic() - _positions_cache_ts) < _POSITIONS_CACHE_TTL:
+            return _positions_cache
+    positions = trading_client.get_all_positions()
+    with _positions_cache_lock:
+        _positions_cache = positions
+        _positions_cache_ts = time.monotonic()
+    return positions
 
 
 def _position_entry_time_map(positions: list[Any]) -> dict[str, str]:
@@ -2846,22 +2889,29 @@ def close_position_endpoint(symbol: str) -> dict[str, Any]:
     except Exception:
         position_obj = None
 
+    # Look up any local registry entry for this contract up-front so every
+    # branch (broker market sell, convenience-close fallback, or phantom
+    # registry-only entry) can clear it. Previously this was only resolved
+    # inside the broker branch, so the phantom/no-broker path hit a NameError
+    # that was swallowed — the registry entry was never cleared and the card
+    # reappeared on the next poll ("Liquidate did nothing").
+    buy_order_id_for_contract = None
+    try:
+        for lot in get_open_positions():
+            if str(lot.get("contract_symbol") or "") == str(ticker):
+                buy_order_id_for_contract = lot.get("buy_order_id")
+                break
+    except Exception:
+        buy_order_id_for_contract = None
+
     result = None
+    broker_action = False    # True once an order actually reaches the broker
+    registry_cleared = False  # True once the local registry entry is removed
     try:
         # If we detected a live position from the broker, prefer submitting
         # an explicit market order so the liquidation hits Alpaca immediately.
         if position_obj is not None and qty > 0:
             sell_side = OrderSide.BUY if "short" in side_raw else OrderSide.SELL
-
-            # If the bot has an internal registry entry for this contract, capture it
-            buy_order_id_for_contract = None
-            try:
-                for lot in get_open_positions():
-                    if str(lot.get("contract_symbol") or "") == str(ticker):
-                        buy_order_id_for_contract = lot.get("buy_order_id")
-                        break
-            except Exception:
-                buy_order_id_for_contract = None
 
             # Cancel any open TP/SL bracket orders for this contract first.
             # Without this the market sell is rejected with "held_for_orders"
@@ -2886,6 +2936,7 @@ def close_position_endpoint(symbol: str) -> dict[str, Any]:
             try:
                 order = place_market_order(trading_client, ticker, qty, sell_side, allow_limit=False)
                 order_id = str(getattr(order, "id", "") or "")
+                broker_action = True
                 # Mark registry as closed immediately — the market sell is submitted and
                 # will fill asynchronously. Don't wait 60s for fill confirmation to update
                 # the registry (that leaves the card showing as "SELLING" indefinitely).
@@ -2893,12 +2944,18 @@ def close_position_endpoint(symbol: str) -> dict[str, Any]:
                     try:
                         mark_selling(buy_order_id_for_contract, order_id)
                         close_position(buy_order_id_for_contract)
+                        registry_cleared = True
                     except Exception:
                         pass
 
-                # Wait briefly for fill to capture filled price for the trade log only.
+                # Wait only BRIEFLY for the fill — just to capture the filled price
+                # for the trade log. The registry is already closed and the sell is
+                # already at the broker, so there's no reason to block the UI for the
+                # full 60s FILL_WAIT_SEC (that was the "Liquidating…" spinner hanging).
+                # Options fill in ~1s; on a slow fill we return the submitted order and
+                # the log falls back to the estimated current price.
                 try:
-                    filled = wait_for_fill(trading_client, order_id, FILL_WAIT_SEC)
+                    filled = wait_for_fill(trading_client, order_id, LIQUIDATE_FILL_WAIT_SEC)
                     result = _serialize_order(filled or order)
                 except Exception:
                     # Fill may not complete within timeout — still return submitted order
@@ -2908,28 +2965,37 @@ def close_position_endpoint(symbol: str) -> dict[str, Any]:
                 try:
                     response = trading_client.close_position(ticker)
                     result = _serialize_order(response) if response is not None else None
+                    broker_action = True
                 except Exception:
                     result = None
                 # Still remove from Cape registry on fallback path.
                 if buy_order_id_for_contract:
                     try:
                         close_position(buy_order_id_for_contract)
+                        registry_cleared = True
                     except Exception:
                         pass
         else:
-            # No broker-side position detected — use client-close as a fallback
+            # No broker-side position detected. Either a stale/phantom registry
+            # entry or an already-closed position. Try a broker close in case
+            # Alpaca simply didn't return it in get_all_positions(); then always
+            # clear the local registry entry so the card cannot reappear.
             try:
                 response = trading_client.close_position(ticker)
                 result = _serialize_order(response) if response is not None else None
+                broker_action = True
             except Exception:
                 result = None
             if buy_order_id_for_contract:
                 try:
                     close_position(buy_order_id_for_contract)
+                    registry_cleared = True
                 except Exception:
                     pass
     except Exception:
         result = None
+
+    closed = bool(broker_action or registry_cleared)
 
     logged_trade = None
     if position_obj is not None and qty > 0:
@@ -3032,8 +3098,9 @@ def close_position_endpoint(symbol: str) -> dict[str, Any]:
             }
 
     return {
-        "message": "position_close_requested",
+        "message": "position_close_requested" if closed else "nothing_to_close",
         "symbol": ticker,
+        "closed": closed,
         "result": result,
         "exit_reason": "MANUAL_LIQUIDATE",
         "logged_trade": logged_trade,
@@ -3054,7 +3121,7 @@ def get_config() -> dict[str, Any]:
 @app.get("/api/positions")
 def get_positions() -> dict[str, Any]:
     try:
-        positions = trading_client.get_all_positions()
+        positions = _get_all_positions_cached()
     except Exception as ex:
         raise HTTPException(status_code=502, detail=f"Failed to fetch positions: {str(ex)}") from ex
 
@@ -3093,10 +3160,86 @@ def get_positions() -> dict[str, Any]:
     }
 
 
+# Grace window: how long a just-registered position may be absent from the
+# broker's position list before we treat it as a stale phantom. Covers the lag
+# between a buy fill and Alpaca reflecting the new position, plus brief hiccups.
+STALE_REGISTRY_GRACE_SEC = 25
+
+# Max seconds the liquidation endpoint waits for the sell to fill before
+# responding. The sell is already submitted and the registry already closed, so
+# this only bounds how long the "Liquidating…" spinner shows — kept short so the
+# UI stays snappy. Distinct from FILL_WAIT_SEC (60s) used elsewhere.
+LIQUIDATE_FILL_WAIT_SEC = 8
+
+
+def _reconcile_registry_against_broker(positions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Drop registry positions the broker no longer actually holds.
+
+    The in-memory registry can diverge from Alpaca when a position closes
+    without close_position() being called — a monitor crash, a backend restart,
+    or (in the multi-machine setup) an exit executed by another instance. Such a
+    'phantom' would otherwise show forever in the Open Positions card even though
+    the trade does not exist.
+
+    Each registry contract is cross-checked against the broker's live positions.
+    A contract the broker doesn't hold is purged (marked CLOSED) and excluded —
+    unless it was registered within the grace window, where Alpaca may simply not
+    reflect a just-filled entry yet. If the broker fetch fails we skip
+    reconciliation entirely (hiding a real position is worse than a stale one).
+    """
+    if not positions:
+        return positions
+    try:
+        broker_positions = _get_all_positions_cached()
+    except Exception:
+        return positions
+
+    held = {
+        str(getattr(p, "symbol", "") or "").strip().upper()
+        for p in broker_positions
+    }
+    now = datetime.now(timezone.utc)
+    reconciled: list[dict[str, Any]] = []
+    for pos in positions:
+        contract = str(pos.get("contract_symbol") or pos.get("symbol") or "").strip().upper()
+        if contract and contract in held:
+            reconciled.append(pos)
+            continue
+
+        # Not held at broker — honour the grace window before purging.
+        fresh = False
+        reg = pos.get("registered_at")
+        if reg:
+            try:
+                reg_dt = datetime.fromisoformat(str(reg))
+                if reg_dt.tzinfo is None:
+                    reg_dt = reg_dt.replace(tzinfo=timezone.utc)
+                fresh = (now - reg_dt).total_seconds() < STALE_REGISTRY_GRACE_SEC
+            except Exception:
+                fresh = False
+        if fresh:
+            reconciled.append(pos)
+            continue
+
+        # Stale phantom — purge from the registry so it stops reappearing.
+        buy_order_id = str(pos.get("buy_order_id") or "")
+        if buy_order_id:
+            try:
+                close_position(buy_order_id)
+            except Exception:
+                pass
+        print(
+            f"[RECONCILE] Purged phantom registry position {contract or '?'} "
+            f"(buy_order_id={buy_order_id or '?'}) — not held at broker"
+        )
+
+    return reconciled
+
+
 @app.get("/api/live-positions")
 def get_live_positions_api() -> dict[str, Any]:
     """Return full live position data with entry reasons, live PnL, and exit thresholds."""
-    positions = get_live_positions()
+    positions = _reconcile_registry_against_broker(get_live_positions())
 
     EXIT_REASON_DESCRIPTIONS = {
         "STOP_LOSS_EXIT": "Price dropped below the static stop-loss level. This is the maximum allowed loss per trade.",
@@ -3937,7 +4080,7 @@ def manual_trade_buy(body: ManualTradeBuyBody) -> dict[str, Any]:
 @app.get("/api/manual-trades")
 def get_manual_trades(
     symbol: str | None = Query(default=None, description="Optional ticker filter"),
-    limit: int = Query(default=100, ge=1, le=500),
+    limit: int = Query(default=100, ge=1, le=5000),
 ) -> dict[str, Any]:
     if _options_log_col is None:
         return {"count": 0, "trades": []}
@@ -3994,7 +4137,12 @@ def get_manual_trades(
                 "qpArmPrice":    r.get("qp_arm_price"),
                 "qpArmPnlPct":   r.get("qp_arm_pnl_pct"),
                 "qpArmPeakPct":  r.get("qp_arm_peak_pct"),
-                "timeline":      r.get("timeline") or [],
+                # Today's trades ship their timeline inline so expanding a row is
+                # instant; older trades strip it (can be hundreds of ticks each)
+                # and the UI lazy-loads via /api/trade-timeline/{id} on expand.
+                # timelineCount always reflects the true length for the UI hint.
+                "timeline":      (r.get("timeline") or []) if _created_today(r.get("created_at")) else [],
+                "timelineCount": len(r.get("timeline") or []),
             }
         )
 
@@ -4007,7 +4155,7 @@ def get_manual_trades(
 def get_options_log(
     symbol: str | None = Query(default=None, description="Optional ticker filter"),
     result: str | None = Query(default=None, description="Filter by result: WIN or LOSS"),
-    limit: int = Query(default=100, ge=1, le=500),
+    limit: int = Query(default=100, ge=1, le=5000),
 ) -> dict[str, Any]:
     """Return options trade log entries from the options_log collection.
 
@@ -4099,11 +4247,46 @@ def get_options_log(
                 "qpArmPrice":    r.get("qp_arm_price"),
                 "qpArmPnlPct":   r.get("qp_arm_pnl_pct"),
                 "qpArmPeakPct":  r.get("qp_arm_peak_pct"),
-                "timeline":      r.get("timeline") or [],
+                # Today's trades ship their timeline inline so expanding a row is
+                # instant; older trades strip it (can be hundreds of ticks each)
+                # and the UI lazy-loads via /api/trade-timeline/{id} on expand.
+                # timelineCount always reflects the true length for the UI hint.
+                "timeline":      (r.get("timeline") or []) if _created_today(r.get("created_at")) else [],
+                "timelineCount": len(r.get("timeline") or []),
             }
         )
 
     payload = {"count": len(trades), "trades": trades}
+    _cache_set(cache_key, payload)
+    return payload
+
+
+@app.get("/api/trade-timeline/{trade_id}")
+def get_trade_timeline(trade_id: str) -> dict[str, Any]:
+    """Return the full tick-by-tick timeline for a single trade, on demand.
+
+    The list endpoints (/api/options-log, /api/manual-trades) strip the timeline
+    to keep their responses small; the UI fetches it here only when a trade row
+    is expanded. Works for both AIT and manual trades (both live in options_log).
+    """
+    if _options_log_col is None:
+        return {"id": trade_id, "timeline": []}
+
+    cache_key = f"trade_timeline:{trade_id}"
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached
+
+    try:
+        oid = ObjectId(trade_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid trade id")
+
+    doc = _options_log_col.find_one({"_id": oid}, {"timeline": 1})
+    if doc is None:
+        raise HTTPException(status_code=404, detail="Trade not found")
+
+    payload = {"id": trade_id, "timeline": doc.get("timeline") or []}
     _cache_set(cache_key, payload)
     return payload
 

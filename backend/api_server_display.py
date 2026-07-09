@@ -29,6 +29,7 @@ DISPLAY_ALLOWLIST = {
     "/api/orders/{order_id}/status",
     "/api/options/price",
     "/api/options-log",
+    "/api/trade-timeline/{trade_id}",
     "/api/manual-trades",
     "/api/config",
     "/api/config/trading-modes",
@@ -142,6 +143,11 @@ async def get_options_log(request: Request) -> Response:
     return await _forward("GET", "/api/options-log", query=dict(request.query_params))
 
 
+@app.get("/api/trade-timeline/{trade_id}")
+async def get_trade_timeline(trade_id: str, request: Request) -> Response:
+    return await _forward("GET", f"/api/trade-timeline/{trade_id}", query=dict(request.query_params))
+
+
 @app.get("/api/manual-trades")
 async def get_manual_trades(request: Request) -> Response:
     return await _forward("GET", "/api/manual-trades", query=dict(request.query_params))
@@ -213,6 +219,10 @@ async def get_straddle_trades(request: Request) -> Response:
 
 
 if __name__ == "__main__":
+    import os
     import uvicorn
 
-    uvicorn.run("api_server_display:app", host="0.0.0.0", port=8002, reload=True)
+    # Reload OFF by default so a .py save doesn't restart the proxy and drop
+    # in-flight requests. Opt in with CAPE_RELOAD=1 for local development.
+    reload = os.getenv("CAPE_RELOAD", "0") == "1"
+    uvicorn.run("api_server_display:app", host="0.0.0.0", port=8002, reload=reload)

@@ -526,21 +526,15 @@ const CandleChart = ({
         prevFitKeyRef.current = fitKey;
         const timeScale = chartRef.current.timeScale();
 
-        // Calculate visible range — show all bars with minimal right padding
-        // (1–2 bar widths only so no future empty space appears on the x-axis)
-        const lastTime  = uniqueData[uniqueData.length - 1].time;
-        const firstTime = uniqueData[0].time;
-        const barSpan   = uniqueData.length > 1
-          ? (lastTime - firstTime) / (uniqueData.length - 1)
-          : 300; // default 5 min in seconds
-
-        const leftPad  = barSpan * 2;
-        const rightPad = barSpan * 3; // only 3 bars of padding on the right
-
-        timeScale.setVisibleRange({
-          from: firstTime - leftPad,
-          to:   lastTime  + rightPad,
-        });
+        // Default view: show only the most recent ~VISIBLE_BARS candles so they
+        // stay wide and readable instead of squeezing the full multi-day history
+        // into the chart width (which made everything tiny and unreadable). Older
+        // bars remain scrollable to the left, and scroll/zoom is preserved on
+        // subsequent data updates because this only runs when fitKey changes.
+        const VISIBLE_BARS = 120;
+        const total = uniqueData.length;
+        const from = Math.max(0, total - VISIBLE_BARS);
+        timeScale.setVisibleLogicalRange({ from, to: total + 2 });
       }
     } catch (error) {
       console.error("CandleChart Error:", error);

@@ -320,12 +320,48 @@ function fmtTickTime(ts) {
   } catch { return ts }
 }
 
-function TradeTimeline({ timeline, fillPrice, qpArmed, qpArmTime, qpArmPrice, qpArmPnlPct, buyFilledTime, sellFilledTime }) {
+// Process-wide cache of lazily-fetched trade timelines, keyed by trade id, so
+// re-renders and the 5s history poll never re-download a timeline already seen.
+const _timelineCache = new Map()
+
+function TradeTimeline({ timeline, timelineCount = 0, tradeId, fillPrice, qpArmed, qpArmTime, qpArmPrice, qpArmPnlPct, buyFilledTime, sellFilledTime }) {
   const [open, setOpen] = useState(false)
   const [hoveredIdx, setHoveredIdx] = useState(-1)
-  if (!timeline || timeline.length === 0) return null
+  const [loaded, setLoaded] = useState(() => (tradeId && _timelineCache.has(tradeId) ? _timelineCache.get(tradeId) : null))
+  const [loading, setLoading] = useState(false)
 
-  const ticks = timeline
+  // List endpoints strip the timeline to keep payloads small; fetch it lazily
+  // the first time this row is expanded.
+  const provided = Array.isArray(timeline) ? timeline : []
+  const effective = provided.length > 0 ? provided : (loaded || [])
+  const count = provided.length || Number(timelineCount) || (loaded ? loaded.length : 0)
+
+  useEffect(() => {
+    if (!open || provided.length > 0 || loaded !== null || loading || !tradeId) return
+    let cancelled = false
+    setLoading(true)
+    ;(async () => {
+      try {
+        const res = await fetch(`${API_DISPLAY}/api/trade-timeline/${tradeId}`)
+        let tl = []
+        if (res.ok) {
+          const d = await res.json()
+          tl = Array.isArray(d.timeline) ? d.timeline : []
+        }
+        _timelineCache.set(tradeId, tl)
+        if (!cancelled) setLoaded(tl)
+      } catch {
+        if (!cancelled) setLoaded([])
+      } finally {
+        if (!cancelled) setLoading(false)
+      }
+    })()
+    return () => { cancelled = true }
+  }, [open, tradeId, provided.length, loaded, loading])
+
+  if (count === 0) return null
+
+  const ticks = effective
 
   // price ticks only (exclude order_placed rows which have no sellable_price)
   const priceTicks = ticks.filter(t => t.source !== 'order_placed' && t.sellable_price != null)
@@ -363,7 +399,11 @@ function TradeTimeline({ timeline, fillPrice, qpArmed, qpArmTime, qpArmPrice, qp
         <span style={{ fontSize: '9px', textTransform: 'uppercase', letterSpacing: '0.5px', fontWeight: 800 }}>
           {open ? '▲' : '▼'} Tick Timeline
         </span>
-        <span style={{ color: '#ccc', fontWeight: 500 }}>({priceTicks.length} ticks{ticks.length > priceTicks.length ? ` · ${ticks.length - priceTicks.length} orders` : ''})</span>
+        <span style={{ color: '#ccc', fontWeight: 500 }}>
+          {effective.length > 0
+            ? `(${priceTicks.length} ticks${ticks.length > priceTicks.length ? ` · ${ticks.length - priceTicks.length} orders` : ''})`
+            : `(${count} ticks)`}
+        </span>
         {qpArmed && (
           <span style={{
             padding: '1px 6px', borderRadius: '4px',
@@ -373,7 +413,13 @@ function TradeTimeline({ timeline, fillPrice, qpArmed, qpArmTime, qpArmPrice, qp
         )}
       </button>
 
-      {open && (
+      {open && effective.length === 0 && (
+        <div style={{ paddingBottom: '10px', fontSize: '11px', color: '#bbb', fontStyle: 'italic' }}>
+          {loading ? 'Loading timeline…' : 'No timeline data'}
+        </div>
+      )}
+
+      {open && effective.length > 0 && (
         <div style={{ paddingBottom: '10px' }}>
           {/* Sparkline */}
           <div style={{
@@ -941,8 +987,8 @@ export default function OverallSummary() {
   const fetchHistory = useCallback(async (silent = false) => {
     try {
       const [aitRes, manualRes, posRes, cfgRes] = await Promise.allSettled([
-        fetch(`${API_DISPLAY}/api/options-log?limit=500`),
-        fetch(`${API_DISPLAY}/api/manual-trades?limit=500`),
+        fetch(`${API_DISPLAY}/api/options-log?limit=2000`),
+        fetch(`${API_DISPLAY}/api/manual-trades?limit=2000`),
         fetch(`${API_DISPLAY}/api/positions`),
         fetch(`${API_DISPLAY}/api/config`),
       ])
@@ -1061,13 +1107,6 @@ export default function OverallSummary() {
     return () => window.removeEventListener('scroll', onScroll)
   }, [])
 
-  // Restore inner trade-cards scroll position after re-render caused by data updates
-  useLayoutEffect(() => {
-    if (tradeCardsRef.current) {
-      tradeCardsRef.current.scrollTop = tradeCardsScrollRef.current
-    }
-  }, [sorted])
-
   // ── Sell position handler ────────────────────────────────────────────────
   const handleSellPosition = async (symbol) => {
     if (!window.confirm(`Sell ${symbol} now to lock in profit?`)) return
@@ -1150,6 +1189,13 @@ export default function OverallSummary() {
     })
     return list
   }, [historyDisplayed, sortCol, sortDir])
+
+  // Restore inner trade-cards scroll position after re-render caused by data updates
+  useLayoutEffect(() => {
+    if (tradeCardsRef.current) {
+      tradeCardsRef.current.scrollTop = tradeCardsScrollRef.current
+    }
+  }, [sorted])
 
   const handleSort = (col) => {
     if (sortCol === col) setSortDir(d => d === 'asc' ? 'desc' : 'asc')
@@ -2444,6 +2490,8 @@ export default function OverallSummary() {
                         {/* ── Tick-by-tick timeline ── */}
                         <TradeTimeline
                           timeline={t.timeline}
+                          timelineCount={t.timelineCount}
+                          tradeId={t.id}
                           fillPrice={toNum(t.buyPrice) ?? toNum(t.buyFilledPrice)}
                           qpArmed={t.qpArmed}
                           qpArmTime={t.qpArmTime}

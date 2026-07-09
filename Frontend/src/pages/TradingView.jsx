@@ -129,8 +129,11 @@ const STRATEGIES = ['ATR Momentum', 'RSI Mean Reversion', 'Breakout Strategy', '
 const API_TRADING = 'http://localhost:8001'
 const API_DISPLAY = 'http://localhost:8002'
 const INTERVAL_MAP = { '1m': '1Min', '5m': '5Min', '15m': '15Min', '1H': '1Hour', '4H': '4Hour', '1D': '1Day' }
-// Enough history to render EMA(50) and detect EMA(9/21) crosses.
-const BARS_LIMIT = { '1m': 800, '5m': 500, '15m': 300, '1H': 240, '4H': 220, '1D': 220 }
+// History depth per interval. 1m caps at 1000 bars (≈2.5–3 trading days — the
+// backend /api/bars ceiling is le=1000) so we get recent context without weeks
+// of data. Also the hard cap the incremental poll trims to, so the array never
+// grows unbounded.
+const BARS_LIMIT = { '1m': 1000, '5m': 500, '15m': 300, '1H': 240, '4H': 220, '1D': 220 }
 // Polling interval per chart interval (ms) — 1m uses 2s for near-real-time updates
 const POLL_MS = { '1m': 2_000, '5m': 3_000, '15m': 5_000, '1H': 10_000, '4H': 30_000, '1D': 60_000 }
 // Limit used for incremental bar polls (only fetch recent bars, not full history)
@@ -139,25 +142,6 @@ const POLL_LIMIT = { '1m': 5, '5m': 5, '15m': 5, '1H': 3, '4H': 3, '1D': 3 }
 const BAR_DURATION_SEC = { '1m': 60, '5m': 300, '15m': 900, '1H': 3600, '4H': 14400, '1D': 86400 }
 // Normalize API bar: map `timestamp` field → `time` that CandleChart expects
 const normalizeBar = (b) => ({ ...b, time: b.time ?? b.timestamp })
-
-// Fallback candle generator used when API is unavailable
-function generateCandles(basePrice, count = 80) {
-  const now = Math.floor(Date.now() / 1000)
-  const step = 5 * 60
-  let price = basePrice
-  const candles = []
-  for (let i = count; i >= 0; i--) {
-    const open = price
-    const change = (Math.random() - 0.48) * (basePrice * 0.008)
-    const close = +(open + change).toFixed(2)
-    const high = +(Math.max(open, close) + Math.random() * basePrice * 0.003).toFixed(2)
-    const low  = +(Math.min(open, close) - Math.random() * basePrice * 0.003).toFixed(2)
-    const volume = Math.floor(50000 + Math.random() * 450000)
-    candles.push({ time: now - i * step, open: +open.toFixed(2), high, low, close, volume })
-    price = close
-  }
-  return candles
-}
 
 // CDT helper – returns a locale time string in America/Chicago
 const cdtTime = (d = new Date()) =>
@@ -245,6 +229,41 @@ const formatEntryStrategies = (trade) => {
   return names.length > 0 ? names.join(', ') : '—'
 }
 
+// Normalize a DB trade row (options-log / manual-trades) into the shape the
+// history table expects. Module-level so both the mount restore and the live
+// history poll can share it.
+const normalizeDbTrade = (t, type) => {
+  const tradeTypeRaw = String(t.tradeType || t.trade_type || '').toUpperCase()
+  const normalizedType = type === 'manual'
+    ? 'manual'
+    : tradeTypeRaw === 'STRADDLE'
+      ? 'straddle'
+      : tradeTypeRaw === 'RECOVERY'
+        ? 'recovery'
+        : tradeTypeRaw === 'MONITOR_EXIT'
+          ? 'monitor'
+          : 'ai'
+
+  return {
+    ...t,
+    id: t.id || String(Date.now() + Math.random()),
+    type: normalizedType,
+    tradeTypeRaw,
+    name: STOCK_SYMBOLS.find(s => s.symbol === t.symbol)?.name || t.symbol,
+    contractName: t.contractName || t.symbol,
+    strikePrice: t.strikePrice ?? '—',
+    optionType: String(t.optionType || t.option_type || t.direction || '—').toLowerCase(),
+    buyPrice: Number(t.buyPrice) || 0,
+    sellPrice: Number(t.sellPrice) || 0,
+    pnl: Number(t.pnl) || 0,
+    entryStrategies: asList(t.entryStrategies ?? t.entry_strategies),
+    entryStrategyNames: resolveEntryStrategyNames(t),
+    entryTime: fmtEntryTime(t.entryTime),
+    exitTime: fmtEntryTime(t.exitTime),
+    _entryIso: t.entryTime || t.createdAt,
+  }
+}
+
 export default function TradingView() {
   const [selected, setSelected]       = useState(() => {
     const saved = localStorage.getItem('cape_last_symbol')
@@ -252,7 +271,7 @@ export default function TradingView() {
   })
   const [interval, setInterval_]      = useState('1m')
   const [strategy, setStrategy]       = useState('ATR Momentum')
-  const [candles, setCandles]         = useState(() => { const spy = STOCK_SYMBOLS.find(s => s.symbol === 'SPY') ?? STOCK_SYMBOLS[0]; return generateCandles(spy.basePrice) })
+  const [candles, setCandles]         = useState([])
   const [rsi, setRsi]                 = useState(null)
   const [rsiPoints, setRsiPoints]     = useState([])
   const [rsiMaPoints, setRsiMaPoints] = useState([])
@@ -438,21 +457,37 @@ export default function TradingView() {
 
     setSymbolMode(prev => ({ ...prev, [sym]: newMode }))
 
-    // Notify backend so main.py respects the new mode immediately
-    try {
-      const res = await fetch(`${API_DISPLAY}/api/symbol/mode`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ symbol: sym, mode: newMode }),
-      })
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}))
-        pushToast(err.detail || `Mode change failed (${res.status})`, 'error')
-        setSymbolMode(prev => ({ ...prev, [sym]: currentMode }))
-        return
+    // Persist the mode change. This is a critical write, so go DIRECTLY to the
+    // trading server (not the read proxy) and retry on transient failures. A
+    // single dropped/slow request must not silently leave the OLD mode persisted
+    // — that caused "set MT, refresh, it's back to AIT" when the server was busy
+    // or restarting. 4xx (config-gate rejection) is final; 5xx/network retries.
+    const persistMode = async () => {
+      let lastErr = 'Mode change failed'
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          const res = await fetch(`${API_TRADING}/api/symbol/mode`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ symbol: sym, mode: newMode }),
+          })
+          if (res.ok) return { ok: true }
+          if (res.status >= 400 && res.status < 500) {
+            const err = await res.json().catch(() => ({}))
+            return { ok: false, detail: err.detail || `Mode change failed (${res.status})` }
+          }
+          lastErr = `Mode change failed (${res.status})`
+        } catch (_) {
+          lastErr = 'backend unreachable'
+        }
+        await new Promise(r => setTimeout(r, 400 * (attempt + 1)))
       }
-    } catch (_) {
-      pushToast('Mode change failed — backend unreachable', 'error')
+      return { ok: false, detail: lastErr }
+    }
+
+    const persistResult = await persistMode()
+    if (!persistResult.ok) {
+      pushToast(persistResult.detail, 'error')
       setSymbolMode(prev => ({ ...prev, [sym]: currentMode }))
       return
     }
@@ -630,7 +665,8 @@ export default function TradingView() {
     if (tradeActive) return
     localStorage.setItem('cape_last_symbol', stock.symbol)
     setSelected(stock)
-    setCandles(generateCandles(stock.basePrice)) // show immediately; API fetch will replace
+    setCandles([])          // clear old symbol's bars; loading state shows until API responds
+    setBarsLoading(true)
     setRsi(null)
     setRsiPoints([])
     setRsiMaPoints([])
@@ -712,8 +748,6 @@ export default function TradingView() {
 
   const handleLiquidatePosition = async (symbol) => {
     if (!symbol) return
-    const ok = window.confirm(`Liquidate open position for ${symbol}?`)
-    if (!ok) return
     setLiquidating(symbol)
     try {
       // 1. Stop the AI monitoring thread for this symbol's underlying
@@ -761,12 +795,32 @@ export default function TradingView() {
         setTradeHistory(prev => [{ ...data.logged_trade, _entryIso: data.logged_trade.entryTime || new Date().toISOString() }, ...prev])
       }
 
+      // Backend reports `closed=false` when neither a broker position nor a
+      // registry entry was actually acted on — don't show a false success.
+      const didClose = data?.closed !== false
+
       setLivePositions(prev => prev.filter(p => p.symbol !== symbol))
       setRegistryPositions(prev => prev.filter(lp => {
         const contract = String(lp.contract_symbol || lp.symbol || '')
         return contract !== symbol
       }))
-      pushToast(`Liquidated ${symbol}`, 'success')
+
+      if (didClose) {
+        // Suppress the redundant "Bot exited" toast the backend-exit poller
+        // would otherwise fire for this same close.
+        recentlyLiquidatedRef.current.add(symbol)
+        // Drop the persisted tick-stream snapshot so it doesn't linger on screen.
+        if (underlying) delete tickStreamCacheRef.current[underlying]
+        // If this was the actively-monitored manual position, clear it now.
+        if (manualPosition && String(manualPosition.contractSymbol || '') === symbol) {
+          setManualPosition(null)
+          setContractPrice(0)
+          setOrderStatus(null)
+        }
+        pushToast(`Liquidated ${underlying || symbol}`, 'success')
+      } else {
+        pushToast(`No active position found — nothing to liquidate`, 'error')
+      }
     } catch (err) {
       pushToast(`Failed to liquidate: ${err.message}`, 'error')
     } finally {
@@ -793,10 +847,13 @@ export default function TradingView() {
           setRsiPoints(Array.isArray(data.rsi_points) ? data.rsi_points : [])
           setRsiMaPoints(Array.isArray(data.rsi_ma_points) ? data.rsi_ma_points : [])
           setRsiMarkers(Array.isArray(data.rsi_markers) ? data.rsi_markers : [])
+        } else {
+          // API returned no bars — show empty (loading/no-data), no synthetic candles
+          setCandles([])
         }
-        // else: API returned no bars — keep generated fallback
       } catch (_) {
-        // API unreachable — keep whatever candles are in state (generated fallback)
+        // API unreachable — clear candles so the loading/no-data state shows
+        setCandles([])
       } finally {
         setBarsLoading(false)
       }
@@ -863,6 +920,35 @@ export default function TradingView() {
     return () => clearInterval(id)
   }, [])
 
+  // ── Cache the last non-empty tick stream per symbol ──
+  // The Live Tick Stream is driven by the registry poll. When a poll transiently
+  // returns no position (or the position closes), the panel would otherwise blank
+  // out. Persist the last good {contract, live, timeline} so it survives those
+  // gaps and remains visible for review after the trade closes.
+  const tickStreamCacheRef = useRef({})
+  // Contracts the user just liquidated — used to suppress the redundant
+  // "Bot exited" toast from the backend-exit poller for the same close.
+  const recentlyLiquidatedRef = useRef(new Set())
+  useEffect(() => {
+    const symbolLive = registryPositions.filter(lp =>
+      String(lp.contract_symbol || lp.symbol || '').startsWith(selected.symbol)
+    )
+    if (symbolLive.length === 0) return
+    const activePos =
+      (manualPosition?.contractSymbol
+        ? symbolLive.find(lp => String(lp.contract_symbol || lp.symbol || '') === String(manualPosition.contractSymbol))
+        : null) || symbolLive[0]
+    const live = activePos?.live || {}
+    const timeline = Array.isArray(live.timeline) ? live.timeline : []
+    if (timeline.length > 0) {
+      tickStreamCacheRef.current[selected.symbol] = {
+        contract: String(activePos?.contract_symbol || activePos?.symbol || ''),
+        live,
+        timeline,
+      }
+    }
+  }, [registryPositions, selected.symbol, manualPosition])
+
   // Resolve one canonical live price per contract so all widgets show the same number.
   const resolveContractLivePrice = (contractSymbol, fallbackPrice = 0) => {
     const contract = String(contractSymbol || '')
@@ -899,6 +985,8 @@ export default function TradingView() {
     const pollNewBars = async () => {
       try {
         const tf    = INTERVAL_MAP[interval] || '5Min'
+        // Hard cap so the arrays never grow unbounded as new bars stream in.
+        const cap   = BARS_LIMIT[interval] ?? 800
         // Use a small limit + since= for lightweight incremental fetches — avoids
         // pulling 7-day history on every tick.  Falls back to full limit on first poll.
         const since = lastBarTimeRef.current
@@ -921,7 +1009,9 @@ export default function TradingView() {
           if (!Array.isArray(incoming_) || !incoming_.length) return prev
           const existingTs = new Set(prev.map(p => p.timestamp))
           const toAdd = incoming_.filter(p => !existingTs.has(p.timestamp))
-          return toAdd.length ? [...prev, ...toAdd] : prev
+          if (!toAdd.length) return prev
+          const merged = [...prev, ...toAdd]
+          return merged.length > cap ? merged.slice(merged.length - cap) : merged
         }
 
         if (incoming.length > 0) {
@@ -929,7 +1019,9 @@ export default function TradingView() {
           setCandles(prev => {
             const existingTimes = new Set(prev.map(b => b.time ?? b.timestamp))
             const toAdd = incoming.map(normalizeBar).filter(b => !existingTimes.has(b.time))
-            return toAdd.length ? [...prev, ...toAdd] : prev
+            if (!toAdd.length) return prev
+            const merged = [...prev, ...toAdd]
+            return merged.length > cap ? merged.slice(merged.length - cap) : merged
           })
           if (data.rsi != null) setRsi(data.rsi)
           setRsiPoints(prev => mergePoints(prev, data.rsi_points))
@@ -985,8 +1077,8 @@ export default function TradingView() {
       try {
         // Fetch real trade history from MongoDB: options-log (AIT/Straddle) + manual-trades
         const [optRes, manRes] = await Promise.allSettled([
-          fetch(`${API_DISPLAY}/api/options-log?limit=500`),
-          fetch(`${API_DISPLAY}/api/manual-trades?limit=500`),
+          fetch(`${API_DISPLAY}/api/options-log?limit=2000`),
+          fetch(`${API_DISPLAY}/api/manual-trades?limit=2000`),
         ])
         const normalize = (t, type) => {
           const tradeTypeRaw = String(t.tradeType || t.trade_type || '').toUpperCase()
@@ -1038,49 +1130,18 @@ export default function TradingView() {
   useEffect(() => {
     const fetchHistory = async () => {
       try {
-        const normalize = (t, type) => {
-          const tradeTypeRaw = String(t.tradeType || t.trade_type || '').toUpperCase()
-          const normalizedType = type === 'manual'
-            ? 'manual'
-            : tradeTypeRaw === 'STRADDLE'
-              ? 'straddle'
-              : tradeTypeRaw === 'RECOVERY'
-                ? 'recovery'
-                : tradeTypeRaw === 'MONITOR_EXIT'
-                  ? 'monitor'
-                  : 'ai'
-
-          return {
-            ...t,
-            id: t.id || String(Date.now() + Math.random()),
-            type: normalizedType,
-            tradeTypeRaw,
-            name: STOCK_SYMBOLS.find(s => s.symbol === t.symbol)?.name || t.symbol,
-            contractName: t.contractName || t.symbol,
-            strikePrice: t.strikePrice ?? '—',
-            optionType: String(t.optionType || t.option_type || t.direction || '—').toLowerCase(),
-            buyPrice: Number(t.buyPrice) || 0,
-            sellPrice: Number(t.sellPrice) || 0,
-            pnl: Number(t.pnl) || 0,
-            entryStrategies: asList(t.entryStrategies ?? t.entry_strategies),
-            entryStrategyNames: resolveEntryStrategyNames(t),
-            entryTime: fmtEntryTime(t.entryTime),
-            exitTime: fmtEntryTime(t.exitTime),
-            _entryIso: t.entryTime || t.createdAt,
-          }
-        }
         const [optRes, manRes] = await Promise.allSettled([
-          fetch(`${API_DISPLAY}/api/options-log?limit=500`),
-          fetch(`${API_DISPLAY}/api/manual-trades?limit=500`),
+          fetch(`${API_DISPLAY}/api/options-log?limit=2000`),
+          fetch(`${API_DISPLAY}/api/manual-trades?limit=2000`),
         ])
         let combined = []
         if (optRes.status === 'fulfilled' && optRes.value.ok) {
           const d = await optRes.value.json()
-          combined = [...combined, ...(d.trades || []).map(t => normalize(t, 'ai'))]
+          combined = [...combined, ...(d.trades || []).map(t => normalizeDbTrade(t, 'ai'))]
         }
         if (manRes.status === 'fulfilled' && manRes.value.ok) {
           const d = await manRes.value.json()
-          combined = [...combined, ...(d.trades || []).map(t => normalize(t, 'manual'))]
+          combined = [...combined, ...(d.trades || []).map(t => normalizeDbTrade(t, 'manual'))]
         }
         if (combined.length > 0) setTradeHistory(combined)
       } catch (_) {}
@@ -1104,7 +1165,11 @@ export default function TradingView() {
   useEffect(() => {
     if (!manualPosition?.backendMonitored || !manualPosition?.orderId) return
     const orderId = manualPosition.orderId
+    // Guard so the exit is handled exactly once — the async work below outlives
+    // the 5s interval, so without this a second tick fires a duplicate toast.
+    let handled = false
     const checkBackendExit = async () => {
+      if (handled) return
       try {
         const res = await fetch(`${API_DISPLAY}/api/live-positions`)
         if (!res.ok) return
@@ -1113,6 +1178,7 @@ export default function TradingView() {
         const myPos = positions.find(p => p.buy_order_id === orderId)
         // If not found at all OR monitoring_active is false → backend exited
         if (!myPos || myPos.live?.monitoring_active === false) {
+          handled = true
           // Re-fetch history so the backend-logged trade appears
           try {
             const normalize = (t, type) => {
@@ -1147,8 +1213,8 @@ export default function TradingView() {
               }
             }
             const [optRes, manRes] = await Promise.allSettled([
-              fetch(`${API_DISPLAY}/api/options-log?limit=500`),
-              fetch(`${API_DISPLAY}/api/manual-trades?limit=500`),
+              fetch(`${API_DISPLAY}/api/options-log?limit=2000`),
+              fetch(`${API_DISPLAY}/api/manual-trades?limit=2000`),
             ])
             let combined = []
             if (optRes.status === 'fulfilled' && optRes.value.ok) {
@@ -1178,8 +1244,21 @@ export default function TradingView() {
             } catch (_) {}
           }
           exitReason = exitReason || 'MONITOR EXIT'
-          pushToast(`Bot exited · ${manualPosition.contractSymbol?.slice(0, 18)} · ${exitReason.replace(/_/g, ' ')}`, 'success')
-          setLivePositions(prev => prev.filter(p => String(p.symbol || '') !== String(manualPosition.contractSymbol || '')))
+
+          const contract = String(manualPosition.contractSymbol || '')
+          const underlying = contract.replace(/\d{6}[CP]\d+$/i, '')
+          // Drop the persisted tick-stream snapshot so it doesn't linger after close.
+          if (underlying) delete tickStreamCacheRef.current[underlying]
+
+          // Only toast for a genuine bot exit (TP/SL/monitor). If the user just
+          // liquidated this contract, they already saw "Liquidated …" — don't
+          // double up with a "Bot exited" toast.
+          if (recentlyLiquidatedRef.current.has(contract)) {
+            recentlyLiquidatedRef.current.delete(contract)
+          } else {
+            pushToast(`Bot exited · ${contract.slice(0, 18)} · ${exitReason.replace(/_/g, ' ')}`, 'success')
+          }
+          setLivePositions(prev => prev.filter(p => String(p.symbol || '') !== contract))
           setManualPosition(null)
           setContractPrice(0)
           setOrderStatus(null)
@@ -2012,19 +2091,35 @@ export default function TradingView() {
             )}
           </div>
 
-          <CandleChart
-            data={candles}
-            obrLines={obrLevels}
-            rsiPoints={rsiPoints}
-            rsiMaPoints={rsiMaPoints}
-            rsiMarkers={rsiMarkers}
-            emaLines={emaLines}
-            emaCrossMarkers={emaCrossMarkers}
-            rsiMeanReversionMarkers={rsiMeanReversionMarkers}
-            fitKey={selected.symbol + '_' + interval}
-            livePrice={livePrice}
-            barDurationSec={BAR_DURATION_SEC[interval] ?? 60}
-          />
+          <div style={{ position: 'relative' }}>
+            <CandleChart
+              data={candles}
+              obrLines={obrLevels}
+              rsiPoints={rsiPoints}
+              rsiMaPoints={rsiMaPoints}
+              rsiMarkers={rsiMarkers}
+              emaLines={emaLines}
+              emaCrossMarkers={emaCrossMarkers}
+              rsiMeanReversionMarkers={rsiMeanReversionMarkers}
+              fitKey={selected.symbol + '_' + interval}
+              livePrice={livePrice}
+              barDurationSec={BAR_DURATION_SEC[interval] ?? 60}
+            />
+            {(barsLoading || candles.length === 0) && (
+              <div style={{
+                position: 'absolute', inset: 0, display: 'flex',
+                alignItems: 'center', justifyContent: 'center',
+                background: 'var(--card-bg, rgba(255,255,255,0.72))',
+                backdropFilter: 'blur(2px)', borderRadius: '14px', zIndex: 5,
+              }}>
+                <Loader
+                  size="medium"
+                  variant="orbit"
+                  text={candles.length === 0 && !barsLoading ? 'No chart data' : `Loading ${selected.symbol} chart`}
+                />
+              </div>
+            )}
+          </div>
         </div>
 
         {/* ── Live Tick Stream for selected symbol ── */}
@@ -2033,7 +2128,32 @@ export default function TradingView() {
             const contract = String(lp.contract_symbol || lp.symbol || '')
             return contract.startsWith(selected.symbol)
           })
-          if (symbolLive.length === 0) {
+
+          const activePos =
+            symbolLive.length > 0
+              ? ((manualPosition?.contractSymbol
+                  ? symbolLive.find(lp => String(lp.contract_symbol || lp.symbol || '') === String(manualPosition.contractSymbol))
+                  : null) || symbolLive[0])
+              : null
+
+          let live = activePos?.live || {}
+          let contract = String(activePos?.contract_symbol || activePos?.symbol || '')
+          let timeline = Array.isArray(live.timeline) ? live.timeline : []
+          let streamStale = false
+
+          // Fall back to the cached stream when the live poll has no timeline
+          // (transient empty poll or the position just closed).
+          if (timeline.length === 0) {
+            const cached = tickStreamCacheRef.current[selected.symbol]
+            if (cached && Array.isArray(cached.timeline) && cached.timeline.length > 0) {
+              live = cached.live
+              contract = cached.contract
+              timeline = cached.timeline
+              streamStale = true
+            }
+          }
+
+          if (timeline.length === 0) {
             if (startupRecovery?.status === 'no_positions') {
               return (
                 <div style={{
@@ -2054,16 +2174,6 @@ export default function TradingView() {
             }
             return null
           }
-
-          const activePos =
-            (manualPosition?.contractSymbol
-              ? symbolLive.find(lp => String(lp.contract_symbol || lp.symbol || '') === String(manualPosition.contractSymbol))
-              : null) || symbolLive[0]
-
-          const live = activePos?.live || {}
-          const contract = String(activePos?.contract_symbol || activePos?.symbol || '')
-          const timeline = Array.isArray(live.timeline) ? live.timeline : []
-          if (timeline.length === 0) return null
 
           const recentTicks = [...timeline].slice(-180).reverse()
           const fillPx = toNum(live.fill_price ?? activePos?.fill_price)
@@ -2087,8 +2197,8 @@ export default function TradingView() {
                     Live Tick Stream
                   </span>
                 </div>
-                <span style={{ fontSize: '0.66rem', fontWeight: 700, color: '#9ca3af' }}>
-                  {contract} · {recentTicks.length} ticks
+                <span style={{ fontSize: '0.66rem', fontWeight: 700, color: streamStale ? '#f59e0b' : '#9ca3af' }}>
+                  {contract} · {recentTicks.length} ticks{streamStale ? ' · closed (last snapshot)' : ''}
                 </span>
               </div>
 
@@ -2562,8 +2672,16 @@ export default function TradingView() {
                         >
                           {liquidating === p.symbol ? (
                             <>
-                              <Loader size="small" variant="classic" text="" />
-                              <span style={{ fontSize: '0.72rem', fontWeight: 800 }}>Liquidating...</span>
+                              {/* Small inline spinner — the shared <Loader> forces a
+                                  200px-tall block, which ballooned the button into a
+                                  big empty card. This SVG stays compact in the button. */}
+                              <svg width="12" height="12" viewBox="0 0 24 24" style={{ display: 'block' }} aria-hidden="true">
+                                <circle cx="12" cy="12" r="9" fill="none" stroke="rgba(239,68,68,0.25)" strokeWidth="3" />
+                                <path d="M12 3 a9 9 0 0 1 9 9" fill="none" stroke="#ef4444" strokeWidth="3" strokeLinecap="round">
+                                  <animateTransform attributeName="transform" type="rotate" from="0 12 12" to="360 12 12" dur="0.7s" repeatCount="indefinite" />
+                                </path>
+                              </svg>
+                              <span style={{ fontSize: '0.72rem', fontWeight: 800 }}>Liquidating…</span>
                             </>
                           ) : (
                             'Liquidate'
