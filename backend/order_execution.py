@@ -1,3 +1,5 @@
+import json
+import os
 import time
 import threading
 import re
@@ -37,6 +39,71 @@ _bracket_options_supported: bool | None = None
 _positions: dict[str, dict] = {}   # buy_order_id → metadata
 _positions_lock = threading.Lock()
 
+# Registry snapshot persisted to disk so a restart can restore lot metadata and
+# reconcile trades that closed at the broker while the bot was down.
+_REGISTRY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs", "position_registry.json")
+
+# ---------------------------------------------------------------------------
+# Monitor ownership claims — single-owner rule for exit monitors.
+#
+# A claim on a contract symbol marks it as owned (or about to be owned) by a
+# dedicated monitor, so the generic open-positions monitor never attaches a
+# second, competing exit monitor to the same position (dual monitors cancel
+# each other's SL orders and can double-sell — 2026-07-09 race).
+#
+# Two claim strengths:
+#   * soft (ttl_sec set)  — placed automatically when a BUY order is submitted;
+#     covers the fill→register_position window, then expires. Another soft
+#     claim may overwrite it (multi-lot trades on one contract are supported).
+#   * hard (ttl_sec None) — placed by the generic OPENPOS monitor while it owns
+#     a position; exclusive against everyone until explicitly released.
+# ---------------------------------------------------------------------------
+_symbol_claims: dict[str, dict] = {}   # contract_symbol → {"owner": str, "expires_at": float | None}
+_claims_lock = threading.Lock()
+_BUY_CLAIM_TTL_SEC = 120.0
+
+
+def claim_symbol_monitor(contract_symbol: str, owner: str, ttl_sec: float | None = None) -> bool:
+    """Claim monitor ownership of a contract. Returns False when blocked.
+
+    Blocked when an active claim by a different owner exists and either that
+    claim is hard (no TTL) or the new claimant is the generic OPENPOS monitor.
+    Soft claims may overwrite each other (concurrent lots on one contract).
+    """
+    sym = str(contract_symbol or "").strip().upper()
+    if not sym:
+        return False
+    now = time.time()
+    with _claims_lock:
+        existing = _symbol_claims.get(sym)
+        if existing is not None:
+            expired = existing["expires_at"] is not None and existing["expires_at"] <= now
+            if not expired and existing["owner"] != owner:
+                if existing["expires_at"] is None or str(owner).startswith("OPENPOS"):
+                    return False
+        _symbol_claims[sym] = {"owner": owner, "expires_at": (now + ttl_sec) if ttl_sec else None}
+    debug(f"[CLAIM] {sym} claimed by {owner} (ttl={ttl_sec})")
+    return True
+
+
+def release_symbol_monitor(contract_symbol: str, owner: str) -> None:
+    """Release a claim; no-op when the claim is held by someone else."""
+    sym = str(contract_symbol or "").strip().upper()
+    with _claims_lock:
+        existing = _symbol_claims.get(sym)
+        if existing is not None and existing["owner"] == owner:
+            del _symbol_claims[sym]
+            debug(f"[CLAIM] {sym} released by {owner}")
+
+
+def get_claimed_symbols() -> set[str]:
+    """Return contract symbols under an active (non-expired) monitor claim."""
+    now = time.time()
+    with _claims_lock:
+        for sym in [s for s, c in _symbol_claims.items() if c["expires_at"] is not None and c["expires_at"] <= now]:
+            del _symbol_claims[sym]
+        return set(_symbol_claims.keys())
+
 # ---------------------------------------------------------------------------
 # Live exit state — updated on every monitoring poll tick.
 # Shared between monitoring loops and the API so frontend can see real-time
@@ -45,6 +112,51 @@ _positions_lock = threading.Lock()
 # ---------------------------------------------------------------------------
 _live_exit_states: dict[str, dict] = {}
 _live_exit_lock = threading.Lock()
+
+
+def _persist_registry_locked() -> None:
+    """Write the registry snapshot to disk. Caller must hold _positions_lock.
+
+    Atomic write (tmp + replace) so a crash mid-write never corrupts the file.
+    Persistence failures are logged and swallowed — trading never blocks on disk.
+    """
+    try:
+        os.makedirs(os.path.dirname(_REGISTRY_FILE), exist_ok=True)
+        payload = {
+            "saved_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "positions": _positions,
+        }
+        tmp_path = _REGISTRY_FILE + ".tmp"
+        with open(tmp_path, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, indent=1, default=str)
+        os.replace(tmp_path, _REGISTRY_FILE)
+    except Exception as ex:
+        debug(f"[REGISTRY] Persist failed: {ex}")
+
+
+def persist_registry_snapshot() -> None:
+    """Public helper: persist the current registry state to disk."""
+    with _positions_lock:
+        _persist_registry_locked()
+
+
+def load_persisted_open_lots() -> list[dict]:
+    """Read lots persisted by a previous session that were not CLOSED.
+
+    Used by startup recovery to restore lot metadata (true buy_order_id,
+    entry_time, trade_type) and to reconcile lots whose broker position
+    disappeared while the bot was down. Returns [] when no file exists.
+    """
+    try:
+        with open(_REGISTRY_FILE, "r", encoding="utf-8") as fh:
+            payload = json.load(fh)
+        lots = list((payload.get("positions") or {}).values())
+        return [lot for lot in lots if str(lot.get("status") or "") != "CLOSED"]
+    except FileNotFoundError:
+        return []
+    except Exception as ex:
+        debug(f"[REGISTRY] Load of persisted registry failed: {ex}")
+        return []
 
 
 def register_position(
@@ -87,6 +199,7 @@ def register_position(
             "entry_strategy_names": entry_strategy_names or [],
             "entry_filters_passed": entry_filters_passed or [],
         }
+        _persist_registry_locked()
     # Init live state with starting values
     with _live_exit_lock:
         _live_exit_states[buy_order_id] = {
@@ -119,6 +232,7 @@ def mark_selling(buy_order_id: str, sell_order_id: str) -> None:
             pos["status"] = "SELLING"
             pos["sell_order_id"] = sell_order_id
             pos["exit_in_progress"] = True
+            _persist_registry_locked()
     with _live_exit_lock:
         live = _live_exit_states.get(buy_order_id)
         if live:
@@ -132,6 +246,7 @@ def close_position(buy_order_id: str) -> dict | None:
         pos = _positions.get(buy_order_id)
         if pos:
             pos["status"] = "CLOSED"
+            _persist_registry_locked()
     with _live_exit_lock:
         live = _live_exit_states.get(buy_order_id)
         if live:
@@ -146,13 +261,19 @@ def get_open_positions() -> list[dict]:
         return [v for v in _positions.values() if v["status"] != "CLOSED"]
 
 def get_externally_managed_symbols() -> set[str]:
-    """Return contract symbols already managed by the bot's dedicated trade monitors."""
+    """Return contract symbols already managed by (or claimed for) a dedicated monitor.
+
+    Includes active monitor-ownership claims so the generic OPENPOS monitor
+    also stays away during the buy-fill → register_position window.
+    """
+    claimed = get_claimed_symbols()
     with _positions_lock:
-        return {
+        managed = {
             str(v.get("contract_symbol") or "")
             for v in _positions.values()
             if v["status"] != "CLOSED" and v.get("contract_symbol")
         }
+    return managed | claimed
 
 def update_live_exit_state(buy_order_id: str, exit_state: dict, pnl_pct: float, current_price: float) -> None:
     """Called from monitoring loops on each tick to update live exit thresholds."""
@@ -217,6 +338,7 @@ def mark_exit_in_progress(buy_order_id: str) -> None:
         pos = _positions.get(buy_order_id)
         if pos:
             pos["exit_in_progress"] = True
+            _persist_registry_locked()
     with _live_exit_lock:
         live = _live_exit_states.get(buy_order_id)
         if live:
@@ -398,6 +520,21 @@ def place_market_order(
     stop_loss_price: float | None = None,
 ):
     tif = _resolve_time_in_force()
+
+    # Single-owner rule: reserve the contract for a dedicated monitor before the
+    # buy is even submitted, so the generic OPENPOS monitor cannot attach during
+    # the fill → register_position window. Soft claim (TTL) — expires on its own
+    # if the caller never registers. Raises when the generic monitor already
+    # owns this contract: buying into a generically-monitored position would
+    # put two competing exit monitors on one broker position.
+    if str(side).upper().endswith("BUY") and _is_option_contract_symbol(contract_symbol):
+        _claim_owner = f"BUY-{contract_symbol}-{time.time_ns()}"
+        if not claim_symbol_monitor(contract_symbol, _claim_owner, ttl_sec=_BUY_CLAIM_TTL_SEC):
+            raise RuntimeError(
+                f"{contract_symbol} is owned by the generic position monitor — "
+                "buy blocked to prevent dual exit monitors on one position"
+            )
+
     # Determine whether to attempt bracket orders. If we previously detected
     # that options do not support complex/bracket orders in this environment,
     # skip attempting bracket orders for option contracts to avoid repeated

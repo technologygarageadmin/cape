@@ -173,6 +173,16 @@ Two module-level dicts hold all live state:
 
 `get_live_positions()` merges both dicts for API responses. Any exit path (TP, SL, fallback) must call `mark_selling()` then `close_position()` in order, or the position leaks into `get_open_positions()`.
 
+**Registry persistence.** `_positions` is snapshotted to `backend/logs/position_registry.json` on every mutation (register / mark_selling / close / exit-in-progress), via atomic tmp+replace. On startup, `_recover_open_positions` (api_server.py) loads the persisted lots: lots whose broker position still exists are re-registered with their original `buy_order_id` / `entry_time` / `trade_type` (instead of order-history guesses); lots whose broker position is gone closed while the bot was down and are logged to Mongo by `_reconcile_lots_closed_while_down` with `exit_reason=RECONCILED_EXIT_WHILE_DOWN` (sell price taken from the most recent filled SELL in Alpaca order history). The ratchet state (`sl_dynamic_pct` etc.) is NOT restored — recovery cancels stale sell orders, so the ratchet re-arms from live prices.
+
+### Monitor Ownership Claims (`order_execution.py`)
+
+Single-owner rule: at most one exit monitor per contract symbol. Claims prevent the generic OPENPOS monitor (`position_monitor_loop.py`) and a dedicated trade monitor (MANUAL/AIT/recovery) from managing the same position — the 2026-07-09 dual-monitor race where one monitor's fallback exit cancelled the other's SL orders.
+
+- **Soft claim (TTL 120s)** — placed automatically by `place_market_order` before submitting any option BUY; covers the fill → `register_position` window (previously the OPENPOS scanner could attach in those seconds). Expires on its own; another soft claim may overwrite it (multi-lot trades on one contract stay supported).
+- **Hard claim (no TTL)** — taken by `monitor_position_loop` for its thread lifetime, released in a `finally`. Exclusive: blocks other OPENPOS attaches AND blocks new buys of that contract (`place_market_order` raises RuntimeError) — buying into a generically-monitored position would create dual monitors.
+- `get_externally_managed_symbols()` returns registry symbols ∪ active claims; it is the OPENPOS attach guard.
+
 ## Configuration (`backend/config.py`)
 
 All trading behavior is driven by `config.py`. Key knobs:

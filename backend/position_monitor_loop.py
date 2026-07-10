@@ -41,6 +41,7 @@ from monitoring import (
 )
 from order_execution import get_open_positions, place_market_order, wait_for_fill
 from order_execution import get_externally_managed_symbols, get_exiting_symbols
+from order_execution import claim_symbol_monitor, release_symbol_monitor
 
 
 _OPTION_RE = re.compile(r"^([A-Z]+)(\d{6})([CP])(\d{8})$")
@@ -243,11 +244,25 @@ def close_position(
 
 
 def monitor_position_loop(tc: TradingClient, odc: OptionHistoricalDataClient, symbol: str, entry_price: float, qty: int) -> None:
-    """Monitor one existing open position and exit using configured criteria."""
+    """Monitor one existing open position and exit using configured criteria.
+
+    Single-owner rule: takes a hard monitor claim on the contract for the
+    thread's lifetime so no dedicated monitor (or buy) can race this one.
+    """
     if symbol in get_externally_managed_symbols():
         info(f"[MONITOR] {symbol} reserved by dedicated monitor — skipping generic monitor thread")
         return
+    _claim_owner = f"OPENPOS-{symbol}"
+    if not claim_symbol_monitor(symbol, _claim_owner):
+        info(f"[MONITOR] {symbol} monitor claim unavailable — skipping generic monitor thread")
+        return
+    try:
+        _monitor_position_loop_impl(tc, odc, symbol, entry_price, qty)
+    finally:
+        release_symbol_monitor(symbol, _claim_owner)
 
+
+def _monitor_position_loop_impl(tc: TradingClient, odc: OptionHistoricalDataClient, symbol: str, entry_price: float, qty: int) -> None:
     tp_price = compute_tp_price(entry_price)
     sl_price = compute_sl_price(entry_price)
     info(f"[MONITOR] {symbol} tracking started | entry={entry_price:.4f} tp={tp_price:.4f} sl={sl_price:.4f}")

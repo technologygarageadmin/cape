@@ -183,6 +183,7 @@ from order_execution import (
     update_live_exit_state, set_live_exit_reason,
 )
 from order_execution import upsert_broker_safety_sl
+from order_execution import load_persisted_open_lots, persist_registry_snapshot
 from position_monitor_loop import start_position_monitor_service
 from logger import log_trade
 
@@ -2267,6 +2268,60 @@ def _recovery_monitor_thread(
         _cache_invalidate_trade_log()
 
 
+def _reconcile_lots_closed_while_down(lots: list[dict], sell_fill_map: dict[str, dict]) -> int:
+    """Log exits for persisted lots whose broker position closed while the bot was down.
+
+    Without this, a trade whose broker stop filled during a restart window
+    simply vanishes — no Mongo row, no PnL record (TSLA lot orphaned by the
+    2026-07-09 13:40 restart). Returns the number of lots reconciled to Mongo.
+    """
+    reconciled = 0
+    for lot in lots:
+        contract_symbol = str(lot.get("contract_symbol") or "").strip().upper()
+        entry_price = float(lot.get("fill_price") or 0)
+        qty = int(lot.get("qty") or 0)
+        sell = sell_fill_map.get(contract_symbol)
+        parsed = _parse_option_contract(contract_symbol)
+        if not (sell and sell.get("price", 0) > 0 and entry_price > 0 and qty > 0 and parsed):
+            print(
+                f"[RECOVERY] {contract_symbol} lot from previous session is no longer open at the "
+                "broker and no recent sell fill was found — dropping from registry unlogged."
+            )
+            continue
+        sell_px = float(sell["price"])
+        pnl_pct = (sell_px - entry_price) / entry_price * 100
+        pnl_dollar = round((sell_px - entry_price) * qty * 100, 2)
+        result = "WIN" if pnl_dollar > 0 else "LOSS" if pnl_dollar < 0 else "BREAKEVEN"
+        print(
+            f"[RECOVERY] {contract_symbol} closed at the broker while bot was down — "
+            f"reconciled exit at {sell_px:.4f} | PnL: {pnl_pct:+.2f}% (${pnl_dollar})"
+        )
+        if _options_log_col is not None:
+            try:
+                _options_log_col.insert_one({
+                    "symbol": str(lot.get("symbol") or parsed["underlying"]),
+                    "contract_name": contract_symbol,
+                    "direction": parsed["signal"], "option_type": parsed["signal"],
+                    "strike_price": parsed["strike"], "expiry": parsed["expiry"],
+                    "qty": qty, "buy_price": entry_price, "sell_price": sell_px,
+                    "pnl": pnl_dollar, "pnl_pct": round(pnl_pct, 4),
+                    "result": result, "exit_reason": "RECONCILED_EXIT_WHILE_DOWN",
+                    "trade_type": str(lot.get("trade_type") or "RECONCILED"),
+                    "buy_order_id": str(lot.get("buy_order_id") or ""),
+                    "sell_order_id": str(sell.get("order_id") or ""),
+                    "entry_time": lot.get("entry_time"),
+                    "exit_time": sell.get("filled_at"),
+                    "created_at": datetime.now(CDT),
+                    "log_source": "startup_reconciliation",
+                    "timeline": [],
+                })
+                _cache_invalidate_trade_log()
+                reconciled += 1
+            except Exception as ex:
+                print(f"[RECOVERY] Mongo reconciliation write failed for {contract_symbol}: {ex}")
+    return reconciled
+
+
 def _recover_open_positions() -> None:
     """
     On startup, check Alpaca for any open positions left from a previous session.
@@ -2281,33 +2336,61 @@ def _recover_open_positions() -> None:
         _set_startup_recovery_status(status="error", message=f"Failed to fetch positions: {ex}")
         return
 
+    # Lots persisted by the previous session that were still open — used to
+    # restore true lot metadata and to reconcile trades that closed at the
+    # broker while the bot was down (previously those vanished unlogged).
+    persisted_by_contract: dict[str, list[dict]] = {}
+    for _lot in load_persisted_open_lots():
+        _csym = str(_lot.get("contract_symbol") or "").strip().upper()
+        if _csym:
+            persisted_by_contract.setdefault(_csym, []).append(_lot)
+
+    # Try to find original buy order IDs (and recent sell fills, for
+    # reconciliation) from Alpaca order history.
+    buy_order_map: dict[str, str] = {}  # contract_symbol → order_id
+    entry_time_map: dict[str, str] = {}  # contract_symbol → filled_at
+    sell_fill_map: dict[str, dict] = {}  # contract_symbol → most recent filled SELL
+    if positions or persisted_by_contract:
+        try:
+            orders = trading_client.get_orders(
+                filter=GetOrdersRequest(status=QueryOrderStatus.CLOSED, limit=500)
+            )
+            for order in orders:
+                sym = str(getattr(order, "symbol", "") or "")
+                side_val = str(getattr(getattr(order, "side", ""), "value", getattr(order, "side", ""))).lower()
+                status_val = str(getattr(getattr(order, "status", ""), "value", getattr(order, "status", ""))).lower()
+                if not sym or status_val != "filled":
+                    continue
+                if side_val == "buy":
+                    # Keep the most recent buy order per symbol
+                    if sym not in buy_order_map:
+                        buy_order_map[sym] = str(getattr(order, "id", ""))
+                        filled_at = getattr(order, "filled_at", None)
+                        if filled_at:
+                            entry_time_map[sym] = _to_iso(filled_at)
+                elif side_val == "sell":
+                    # Keep the most recent sell fill per symbol
+                    if sym not in sell_fill_map:
+                        sell_fill_map[sym] = {
+                            "order_id": str(getattr(order, "id", "")),
+                            "price": float(getattr(order, "filled_avg_price", 0) or 0),
+                            "filled_at": _to_iso(getattr(order, "filled_at", None)),
+                        }
+        except Exception as ex:
+            print(f"[RECOVERY] Could not fetch order history: {ex}")
+
     if not positions:
+        if persisted_by_contract:
+            _reconcile_lots_closed_while_down(
+                [lot for lots in persisted_by_contract.values() for lot in lots],
+                sell_fill_map,
+            )
+            persist_registry_snapshot()
         print("[RECOVERY] No position found — clean start.")
         _set_startup_recovery_status(status="no_positions", message="No position found.", found=0, recovered=0)
         return
 
     _set_startup_recovery_status(status="running", found=len(positions))
-
-    # Try to find original buy order IDs from Alpaca order history
-    buy_order_map: dict[str, str] = {}  # contract_symbol → order_id
-    entry_time_map: dict[str, str] = {}  # contract_symbol → filled_at
-    try:
-        orders = trading_client.get_orders(
-            filter=GetOrdersRequest(status=QueryOrderStatus.CLOSED, limit=500)
-        )
-        for order in orders:
-            sym = str(getattr(order, "symbol", "") or "")
-            side_val = str(getattr(getattr(order, "side", ""), "value", getattr(order, "side", ""))).lower()
-            status_val = str(getattr(getattr(order, "status", ""), "value", getattr(order, "status", ""))).lower()
-            if side_val == "buy" and status_val == "filled" and sym:
-                # Keep the most recent buy order per symbol
-                if sym not in buy_order_map:
-                    buy_order_map[sym] = str(getattr(order, "id", ""))
-                    filled_at = getattr(order, "filled_at", None)
-                    if filled_at:
-                        entry_time_map[sym] = _to_iso(filled_at)
-    except Exception as ex:
-        print(f"[RECOVERY] Could not fetch order history: {ex}")
 
     tc_recovery = TradingClient(API_KEY, SECRET_KEY, paper=PAPER_TRADING)
     odc_recovery = OptionHistoricalDataClient(API_KEY, SECRET_KEY)
@@ -2330,6 +2413,18 @@ def _recover_open_positions() -> None:
 
         underlying = parsed["underlying"]
         signal = parsed["signal"]
+
+        # Persisted lot(s) from the previous session for this contract, consumed
+        # here so post-loop reconciliation only sees lots whose broker position
+        # is truly gone. (Force-close branches below already write their own
+        # Mongo rows, so consuming before them prevents double-logging.)
+        _restored_lots = persisted_by_contract.pop(contract_symbol, [])
+        restored = _restored_lots[0] if _restored_lots else None
+        if len(_restored_lots) > 1:
+            print(
+                f"[RECOVERY] {contract_symbol}: {len(_restored_lots)} persisted lots merged into one "
+                "broker position — restoring metadata from the first"
+            )
 
         # Quick startup checks — if price already at/above TP or below SL, close immediately
         current_price_raw = float(getattr(pos, "current_price", 0) or 0)
@@ -2458,10 +2553,16 @@ def _recover_open_positions() -> None:
                 recovered += 1
                 continue
 
-        # Use real buy_order_id if found, otherwise generate a recovery key
-        real_order_id = buy_order_map.get(contract_symbol)
+        # Prefer the identity persisted by the previous session, then Alpaca
+        # order history, then a generated recovery key.
+        real_order_id = (
+            (str(restored.get("buy_order_id") or "") if restored else "")
+            or buy_order_map.get(contract_symbol)
+        )
         buy_order_id = real_order_id or f"RECOVERY-{contract_symbol}-{int(time.time())}"
-        entry_time = entry_time_map.get(contract_symbol)
+        entry_time = (restored.get("entry_time") if restored else None) or entry_time_map.get(contract_symbol)
+        restored_trade_type = (str(restored.get("trade_type") or "") if restored else "") or "RECOVERY"
+        restored_leg_name = (str(restored.get("leg_name") or "") if restored else "") or signal
 
         # Clear any stale open SELL orders (common after restarts) so the new monitor
         # can place a single fresh protective SL without "held_for_orders" errors.
@@ -2494,8 +2595,8 @@ def _recover_open_positions() -> None:
             fill_price=entry_price,
             tp_price=tp_price,
             sl_price=sl_price,
-            leg_name=signal,
-            trade_type="RECOVERY",
+            leg_name=restored_leg_name,
+            trade_type=restored_trade_type,
             entry_time=entry_time,
         )
 
@@ -2514,6 +2615,13 @@ def _recover_open_positions() -> None:
             f"[RECOVERY] Found open position: {contract_symbol} ({underlying} {signal}) "
             f"entry=${entry_price:.4f} qty={qty} — monitor attached"
         )
+
+    # Persisted lots with no matching broker position closed while the bot
+    # was down — log their exits so no trade vanishes across a restart.
+    leftover_lots = [lot for lots in persisted_by_contract.values() for lot in lots]
+    if leftover_lots:
+        _reconcile_lots_closed_while_down(leftover_lots, sell_fill_map)
+    persist_registry_snapshot()
 
     print(f"[RECOVERY] {recovered} position(s) recovered and monitoring started.")
     _set_startup_recovery_status(

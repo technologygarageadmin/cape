@@ -193,11 +193,18 @@ class TestQPGuardTimerResets(unittest.TestCase):
 class TestQPGuardDisabled(unittest.TestCase):
 
     def test_no_fire_when_sl_broker_disabled(self):
-        """sl_broker_disabled=True: entire guard block skipped."""
+        """sl_broker_disabled=True: QP guard skipped; Condition 6 owns the exit.
+
+        The base state is in profit, so the broker-SL-disabled profitable exit
+        (Condition 6) fires instead of the QP guard — that is the documented
+        behavior for an unprotected profitable position.
+        """
         state = _base_state(sl_broker_disabled=True)
         state["qp_guard_trigger_seen_ts"] = time.time() - 3.0
-        reason, _ = _detect_market_fallback_reason(_tc(), state, _qp_trigger(state))
-        self.assertIsNone(reason)
+        reason, detail = _detect_market_fallback_reason(_tc(), state, _qp_trigger(state))
+        self.assertEqual(reason, "BROKER_SL_DISABLED_MARKET_EXIT")
+        self.assertIn("broker_sl_disabled", detail)
+        self.assertNotIn("qp_sl_not_replaced", detail)
 
     def test_no_fire_when_sl_dynamic_not_in_profit(self):
         """sl_dynamic_pct <= 0: QP not ratcheted into profit, guard inactive."""

@@ -1956,13 +1956,17 @@ def _detect_market_fallback_reason(tc, exit_state: dict, sellable_price: float) 
                 if _first_seen <= 0.0 and _eff_grace > 0.0:
                     exit_state[_qp_guard_key] = _now
                 elif _first_seen <= 0.0 or (_now - _first_seen) >= _eff_grace:
+                    # On the 0-grace desync path _first_seen was never armed; report
+                    # waited=0 with an explicit marker instead of (now - 0) epoch garbage.
+                    _waited_s = (_now - _first_seen) if _first_seen > 0.0 else 0.0
+                    _grace_tag = "immediate-desync" if _eff_grace <= 0.0 else f"grace={_eff_grace:.0f}s"
                     detail = (
                         f"qp_sl_not_replaced:sellable={sellable_price:.4f}:"
                         f"qp_trigger={_qp_trigger:.4f}:"
                         f"sl_dynamic={_sl_dyn:+.4f}%:"
                         f"sl_last_placed={float(_sl_placed):+.4f}%:"
                         f"drift={_drift:+.4f}%:"
-                        f"waited={_now - _first_seen:.2f}s"
+                        f"waited={_waited_s:.2f}s:{_grace_tag}"
                     )
                     log_and_print("info", f"\n[FALLBACK TRIGGER]\n  reason=QP_SL_REPLACE_FAILED_MARKET_EXIT\n  detail={detail}\n  sell_price={sellable_price}\n")
                     return "QP_SL_REPLACE_FAILED_MARKET_EXIT", detail
